@@ -97,6 +97,10 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 	if rebound.ActiveRegistryGeneration <= 0 {
 		t.Fatalf("reinstalled worker has no active registry generation: %#v", rebound)
 	}
+	// Client performance suites restore the authored source shapes at this point.
+	if err := harness.Operator().RestoreDiagnosticSourceTableShapes(ctx); err != nil {
+		t.Fatalf("restore diagnostic source table shapes: %v", err)
+	}
 	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
 		t.Fatalf("restore diagnostic registrations: %v", err)
 	}
@@ -319,6 +323,180 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			return
 		}
 	}
+
+	// Issue 256: a registration that commits after the replacement slot
+	// boundary and before the slot binding must activate exactly once.
+	t.Run("registration before slot binding", func(t *testing.T) {
+		admin := openIssue49Admin(t, ctx, harness)
+		priorPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
+		if err != nil {
+			t.Fatalf("observe worker before reinstall: %v", err)
+		}
+		// The prior worker waits at its poll gate, so the binding lock below precedes every replacement worker.
+		releaseWorker, err := controller.PauseWALMaterialization(ctx)
+		if err != nil {
+			t.Fatalf("pause WAL worker before reinstall: %v", err)
+		}
+		workerReleased := false
+		defer func() {
+			if !workerReleased {
+				cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cleanupCancel()
+				if err := releaseWorker(cleanupContext); err != nil {
+					t.Errorf("release WAL worker: %v", err)
+				}
+			}
+		}()
+		tx, err := admin.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin extension reinstall: %v", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, "DROP EXTENSION synchro_pg CASCADE; CREATE EXTENSION synchro_pg"); err != nil {
+			t.Fatalf("replace extension: %v", err)
+		}
+		var publicationExists bool
+		if err := tx.QueryRowContext(ctx,
+			"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)", harness.Names().Publication,
+		).Scan(&publicationExists); err != nil || !publicationExists {
+			t.Fatalf("observe publication after extension replacement: exists=%t err=%v", publicationExists, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit extension reinstall: %v", err)
+		}
+		reinstall := blackbox.ExtensionReinstallResult{PriorWorkerPID: priorPID}
+		if err := admin.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&reinstall.ReinstallLSN); err != nil {
+			t.Fatalf("read reinstall WAL position: %v", err)
+		}
+
+		// A SHARE table lock has no transaction ID, so slot creation does not wait for it.
+		// It blocks only the binding UPDATE of the runtime state.
+		bindingLock, err := admin.Conn(ctx)
+		if err != nil {
+			t.Fatalf("open slot binding lock session: %v", err)
+		}
+		defer bindingLock.Close()
+		bindingTx, err := bindingLock.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin slot binding lock: %v", err)
+		}
+		defer bindingTx.Rollback()
+		var lockPID int
+		var unbound bool
+		if err := bindingTx.QueryRowContext(ctx, `
+			SELECT pg_catalog.pg_backend_pid(), active_slot_name IS NULL
+			FROM synchro.sync_runtime_state WHERE singleton`).Scan(&lockPID, &unbound); err != nil || !unbound {
+			t.Fatalf("observe unbound runtime after reinstall: unbound=%t err=%v", unbound, err)
+		}
+		if _, err := bindingTx.ExecContext(ctx, "LOCK TABLE synchro.sync_runtime_state IN SHARE MODE"); err != nil {
+			t.Fatalf("lock slot binding: %v", err)
+		}
+		if err := releaseWorker(ctx); err != nil {
+			t.Fatalf("release prior WAL worker: %v", err)
+		}
+		workerReleased = true
+
+		var slotBoundary string
+		deadline := time.Now().Add(90 * time.Second)
+		for slotBoundary == "" && time.Now().Before(deadline) {
+			err := admin.QueryRowContext(ctx, `
+				SELECT slot.confirmed_flush_lsn::text
+				FROM pg_catalog.pg_replication_slots slot
+				WHERE slot.slot_name = $1
+				  AND slot.confirmed_flush_lsn >= $2::pg_lsn
+				  AND EXISTS (
+				      SELECT 1 FROM pg_catalog.pg_stat_activity worker
+				      WHERE worker.datname = pg_catalog.current_database()
+				        AND worker.backend_type = 'synchro WAL consumer'
+				        AND worker.pid <> $3
+				        AND $4 = ANY(pg_catalog.pg_blocking_pids(worker.pid)))`,
+				harness.Names().ReplicationSlot, reinstall.ReinstallLSN, priorPID, lockPID,
+			).Scan(&slotBoundary)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("observe replacement slot before binding: %v", err)
+			}
+			if slotBoundary == "" {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		if slotBoundary == "" {
+			t.Fatalf("replacement worker did not create its slot and wait at the binding: %s", harness.FailureDiagnostics())
+		}
+
+		if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
+			t.Fatalf("register relations between slot creation and binding: %v", err)
+		}
+		var registeredUnbound, afterBoundary bool
+		var pending int
+		var targetGeneration int64
+		if err := admin.QueryRowContext(ctx, `
+			SELECT runtime.active_slot_name IS NULL,
+			       pg_catalog.pg_current_wal_lsn() > $1::pg_lsn,
+			       (SELECT count(*) FROM synchro.sync_registry_generations WHERE state = 'pending' AND validated),
+			       (SELECT COALESCE(max(generation), 0) FROM synchro.sync_registry_generations WHERE state = 'pending')
+			FROM synchro.sync_runtime_state runtime
+			WHERE runtime.singleton`, slotBoundary).Scan(&registeredUnbound, &afterBoundary, &pending, &targetGeneration); err != nil {
+			t.Fatalf("observe registrations before slot binding: %v", err)
+		}
+		if !registeredUnbound || !afterBoundary || pending < 2 {
+			t.Fatalf("registrations did not commit after the slot boundary and before binding: unbound=%t after_boundary=%t pending=%d",
+				registeredUnbound, afterBoundary, pending)
+		}
+		if err := bindingTx.Rollback(); err != nil {
+			t.Fatalf("release slot binding lock: %v", err)
+		}
+
+		activated := waitForReinstalledWorker(t, ctx, harness, reinstall, targetGeneration-1)
+		if activated.ActiveRegistryGeneration != targetGeneration {
+			t.Fatalf("slot binding did not activate the last registered generation: active=%d target=%d",
+				activated.ActiveRegistryGeneration, targetGeneration)
+		}
+		witnessID := "00000000-0000-4000-8c03-000000000400"
+		if err := harness.Source().ExecContext(ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'activated-once')", witnessID,
+		); err != nil {
+			t.Fatalf("insert post-activation witness: %v", err)
+		}
+		waitForRealWALRecords(t, ctx, harness, "cf_items", witnessID)
+		t.Logf("registrations after slot boundary %s activated once: active=%d pending_before_binding=%d",
+			slotBoundary, activated.ActiveRegistryGeneration, pending)
+
+		// This control proves that the no-poison observation can fail and that validation stays strict.
+		var forged int64
+		if err := admin.QueryRowContext(ctx, `
+			INSERT INTO synchro.sync_registry_generations (stream_generation, state, validated, parent_generation)
+			SELECT runtime.stream_generation, 'pending', false, progress.registry_generation
+			FROM synchro.sync_runtime_state runtime
+			JOIN synchro.sync_wal_progress progress ON progress.singleton
+			WHERE runtime.singleton
+			RETURNING generation`).Scan(&forged); err != nil {
+			t.Fatalf("insert never validated generation: %v", err)
+		}
+		var messageLSN string
+		if err := admin.QueryRowContext(ctx,
+			"SELECT pg_catalog.pg_logical_emit_message(true, 'synchro_registry', pg_catalog.convert_to($1, 'UTF8'))::text",
+			fmt.Sprintf(`{"generation":%d,"action":"activate"}`, forged),
+		).Scan(&messageLSN); err != nil {
+			t.Fatalf("emit never validated activation: %v", err)
+		}
+		var class, detail string
+		deadline = time.Now().Add(30 * time.Second)
+		for class == "" && time.Now().Before(deadline) {
+			err := admin.QueryRowContext(ctx, `
+				SELECT failure_class, COALESCE(failure_detail, '')
+				FROM synchro.sync_wal_poison
+				WHERE lifecycle = 'active' AND commit_lsn >= $1::pg_lsn`, messageLSN).Scan(&class, &detail)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("observe never validated activation poison: %v", err)
+			}
+			if class == "" {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		if class != "validation_failed" || detail != "registry activation is not a validated pending generation" {
+			t.Fatalf("never validated activation did not poison: class=%q detail=%q; %s", class, detail, harness.FailureDiagnostics())
+		}
+	})
 }
 
 func waitForReinstalledWorker(
@@ -334,6 +512,16 @@ func waitForReinstalledWorker(
 	var err error
 	for time.Now().Before(deadline) {
 		observation, err = harness.Operator().ObserveExtensionReinstall(ctx, reinstall.ReinstallLSN)
+		if err == nil && !observation.NoValidationFailurePoison {
+			// A validation_failed poison blocks the stream until an operator acts, so waiting cannot succeed.
+			var commitLSN, detail string
+			poisonErr := openIssue49Admin(t, ctx, harness).QueryRowContext(ctx, `
+				SELECT commit_lsn::text, COALESCE(failure_detail, '')
+				FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
+				ORDER BY id DESC LIMIT 1`).Scan(&commitLSN, &detail)
+			t.Fatalf("reinstalled worker poisoned the stream at %s: %q: %#v, %v; %s",
+				commitLSN, detail, observation, poisonErr, harness.FailureDiagnostics())
+		}
 		if err == nil && observation.WorkerPID > 0 && observation.WorkerPID != reinstall.PriorWorkerPID &&
 			observation.ActiveSlotName == harness.Names().ReplicationSlot && observation.RestartLSN != "" &&
 			observation.SlotActive && observation.RestartLSNAtOrAfterReinstall &&

@@ -1,8 +1,7 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-index aeafc6d..129652f 100644
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-@@ -10,6 +10,10 @@ The ordering of items is not stable, it is driven by a dependency graph.
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -10,6 +10,10 @@
  -- synchro-pg/src/lib.rs:40
  -- bootstrap
  
@@ -13,20 +12,19 @@ index aeafc6d..129652f 100644
  CREATE TABLE IF NOT EXISTS sync_runtime_state (
      singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
      stream_generation TEXT NOT NULL,
-@@ -2459,7 +2463,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2567,7 +2571,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1935
-+-- synchro-pg/src/lib.rs:1939
+--- synchro-pg/src/lib.rs:2016
++-- synchro-pg/src/lib.rs:2020
  -- finalize
  
  DO $roles$
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
-index e6663cd..22ac7e9 100644
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -39,6 +39,10 @@ pub(crate) const MEMBERSHIP_BACKFILL_LOCK_KEY: i64 = 0x6d65_6d62;
+@@ -39,6 +39,10 @@
  
  pgrx::extension_sql!(
      r#"

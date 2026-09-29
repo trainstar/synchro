@@ -136,6 +136,8 @@ fn synchro_backfill_bucket_edges(
 
         let boundary = load_materialization_boundary(client)
             .unwrap_or_else(|error| pgrx::error!("loading membership backfill boundary: {error}"));
+        drop_staging_table(client)
+            .unwrap_or_else(|error| pgrx::error!("dropping membership backfill stage: {error}"));
 
         pgrx::JsonB(serde_json::json!({
             "tables": table_names,
@@ -198,10 +200,15 @@ pub(crate) fn resolve_membership_batch(
             .iter()
             .map(|record_id| serde_json::json!({ "record_id": record_id }))
             .collect::<Vec<_>>();
-        let rows = client.select(
-            &query,
-            None,
-            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        let rows = crate::bucketing::evaluate_as_function_owner(
+            &registration.membership_function,
+            || {
+                client.select(
+                    &query,
+                    None,
+                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+                )
+            },
         )?;
         for row in rows {
             let record_id = row
@@ -374,7 +381,7 @@ pub(crate) fn activate_membership_stages(
             return Err("membership activation stage changed".to_string());
         }
     }
-    Ok(())
+    drop_staging_table(client)
 }
 
 /// Record the membership before the transaction of the changed rows of the
@@ -1156,10 +1163,14 @@ fn acquire_backfill_lock(client: &mut SpiClient<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates a new edge stage and membership baseline for one staging operation.
+/// The operation drops both before it succeeds. A relation that already has a
+/// stage name can belong to the caller, so creation then fails instead of
+/// using it.
 fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
         .update(
-            "CREATE TEMP TABLE IF NOT EXISTS synchro_backfill_edges (
+            "CREATE TEMP TABLE synchro_backfill_edges (
                  relation_id UUID NOT NULL,
                  table_name TEXT NOT NULL,
                  record_id TEXT NOT NULL,
@@ -1174,7 +1185,7 @@ fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
         .map_err(|error| format!("creating temporary edge table: {error}"))?;
     client
         .update(
-            "CREATE TEMP TABLE IF NOT EXISTS synchro_membership_baseline (
+            "CREATE TEMP TABLE synchro_membership_baseline (
                  relation_id UUID NOT NULL,
                  table_name TEXT NOT NULL,
                  record_id TEXT NOT NULL,
@@ -1184,13 +1195,17 @@ fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
             &[],
         )
         .map_err(|error| format!("creating temporary membership baseline: {error}"))?;
+    Ok(())
+}
+
+fn drop_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
         .update(
-            "TRUNCATE pg_temp.synchro_backfill_edges, pg_temp.synchro_membership_baseline",
+            "DROP TABLE pg_temp.synchro_backfill_edges, pg_temp.synchro_membership_baseline",
             None,
             &[],
         )
-        .map_err(|error| format!("clearing temporary edge table: {error}"))?;
+        .map_err(|error| format!("dropping temporary edge table: {error}"))?;
     Ok(())
 }
 
@@ -1410,7 +1425,7 @@ fn stage_table_edges(
     Ok((record_count, edge_count, batch_count))
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

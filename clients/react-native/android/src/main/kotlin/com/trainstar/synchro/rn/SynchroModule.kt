@@ -138,6 +138,9 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             )
             is SynchroError.AlreadyStarted -> "ALREADY_STARTED" to emptyMap()
             is SynchroError.NotStarted -> "NOT_STARTED" to emptyMap()
+            is SynchroError.AtomicGroupInvalid -> "atomic_group_invalid" to mapOf(
+                "reason" to atomicGroupInvalidReasonWireValue(error.reason)
+            )
         }
     }
 
@@ -576,11 +579,16 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    override fun beginAtomicWriteTransaction(promise: Promise) {
+        beginTransaction(isWrite = true, isAtomic = true, promise = promise)
+    }
+
+    @ReactMethod
     override fun beginReadTransaction(promise: Promise) {
         beginTransaction(isWrite = false, promise = promise)
     }
 
-    private fun beginTransaction(isWrite: Boolean, promise: Promise) {
+    private fun beginTransaction(isWrite: Boolean, promise: Promise, isAtomic: Boolean = false) {
         val c = synchronized(transactionLock) {
             client.takeIf { acceptingTransactions }
         } ?: run {
@@ -599,7 +607,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 if (isWrite) {
-                    c.writeTransaction { transaction ->
+                    val body: (ApplicationTransaction) -> Unit = { transaction ->
                         runTransactionLoop(
                             txID = txID,
                             session = session,
@@ -608,6 +616,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                             execute = transaction::execute,
                         )
                     }
+                    if (isAtomic) c.atomicWriteTransaction(body) else c.writeTransaction(body)
                 } else {
                     c.readTransaction { transaction ->
                         runTransactionLoop(
@@ -1655,6 +1664,14 @@ class SynchroModule(reactContext: ReactApplicationContext) :
         MutationRejectionCode.POLICY_REJECTED -> "policy_rejected"
         MutationRejectionCode.VALIDATION_FAILED -> "validation_failed"
         MutationRejectionCode.TABLE_NOT_SYNCED -> "table_not_synced"
+        MutationRejectionCode.ATOMIC_BATCH_REJECTED -> "atomic_batch_rejected"
+    }
+
+    private fun atomicGroupInvalidReasonWireValue(reason: AtomicGroupInvalidReason): String = when (reason) {
+        AtomicGroupInvalidReason.DELETE_FOLLOWED_BY_WRITE -> "deleteFollowedByWrite"
+        AtomicGroupInvalidReason.TOO_MANY_MUTATIONS -> "tooManyMutations"
+        AtomicGroupInvalidReason.MUTATION_TOO_LARGE -> "mutationTooLarge"
+        AtomicGroupInvalidReason.REQUEST_TOO_LARGE -> "requestTooLarge"
     }
 
     private fun jsonObjectToJsonObject(value: JsonObject): JSONObject {

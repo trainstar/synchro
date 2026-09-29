@@ -324,6 +324,12 @@
             messages,
         };
 
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = '0/1', processed_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("bind float WAL progress");
         Spi::connect_mut(|client| {
             crate::bgworker::materialize_transaction_for_test(client, &transaction)
         })

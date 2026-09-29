@@ -969,6 +969,48 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(hydrated.first?.baseUpdatedAt, "sv-accepted")
     }
 
+    func testAcceptedUpdateWithoutRowAppliesAbsenceAfterPushUnit() throws {
+        let (db, tracker, processor) = try makeTestEnv()
+        try db.writeSyncLockedTransaction { connection in
+            try connection.execute(
+                sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arguments: ["w1", "server", "u1", "2026-01-01T10:00:00.000000Z"]
+            )
+            try SynchroMeta.upsertRowVersion(
+                connection,
+                tableName: "orders",
+                recordID: "w1",
+                serverVersion: "sv-start",
+                rowChecksum: nil
+            )
+        }
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["local edit", "w1"])
+        let sent = try XCTUnwrap(try tracker.pendingChanges().first)
+
+        let accepted = AcceptedMutation(
+            mutationID: sent.mutationID,
+            table: testTable.tableID,
+            pk: ["id": AnyCodable("w1")],
+            outcomeSchema: SchemaRef(version: 1, hash: protocolTestSchemaHash),
+            status: .applied,
+            serverRow: nil,
+            rowChecksum: nil,
+            serverVersion: "removed-in-unit"
+        )
+        _ = try processor.applyAccepted(
+            accepted: [accepted],
+            syncedTables: [testTable],
+            sentPending: [sent.mutationID: sent]
+        )
+
+        XCTAssertNil(try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"]))
+        XCTAssertEqual(
+            try db.readTransaction { try SynchroMeta.getRowVersion($0, tableName: "orders", recordID: "w1") },
+            "removed-in-unit"
+        )
+        XCTAssertFalse(try tracker.hasPendingChanges())
+    }
+
     func testAcceptedDeleteFencePreservesLaterProjectionAndStoresReturnedVersion() throws {
         let (db, tracker, processor) = try makeTestEnv()
         try db.writeSyncLockedTransaction { connection in
@@ -1491,6 +1533,7 @@ final class PushProcessorTests: XCTestCase {
             clientID: "test-device",
             batchID: UUID().uuidString.lowercased(),
             schemaHash: protocolTestSchemaHash,
+            atomic: false,
             encoder: encoder
         )
         // The body writes the score 1e20 as 1e+20 and RFC 8785 writes all 21 digits.
@@ -1608,11 +1651,15 @@ final class PushProcessorTests: XCTestCase {
         let oversizeAddress = try ordersAddress(recordID: "w-big", normalizedOctets: 65_537)
         try insertOrder(db, id: "w-big", address: oversizeAddress)
         try insertOrder(db, id: "w-end", address: "later row")
-        _ = try db.execute(
-            "UPDATE orders SET deleted_at = ? WHERE id = ?",
-            params: ["2026-01-01T10:30:00.000Z", "w-big"]
-        )
-        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after delete", "w-big"])
+        // Entries in different atomic-group runs do not merge, so the oversize insert keeps two dependents.
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            try transaction.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["grouped", "w-big"])
+        }
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after group", "w-big"])
         let fitID = try mutationID(db, recordID: "w-fit", operation: "insert")
         let oversizeID = try mutationID(db, recordID: "w-big", operation: "insert")
         let laterID = try mutationID(db, recordID: "w-end", operation: "insert")
@@ -1859,12 +1906,15 @@ final class PushProcessorTests: XCTestCase {
                 let (db, tracker, processor) = try makeTestEnv(table: notesTable)
                 defer { closeAndRemove(db) }
                 try insertNote(db, id: "n-big", body: testCase.text, score: testCase.score)
-                // A soft delete and a later update depend on the large insert.
-                _ = try db.execute(
-                    "UPDATE notes SET deleted_at = ? WHERE id = ?",
-                    params: ["2026-01-01T10:30:00.000Z", "n-big"]
-                )
-                _ = try db.execute("UPDATE notes SET body = ? WHERE id = ?", params: ["after delete", "n-big"])
+                // Entries in different atomic-group runs do not merge, so the large insert keeps two dependents.
+                try db.applicationAtomicWriteTransaction(
+                    validate: { connection, groupID in
+                        try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+                    }
+                ) { transaction in
+                    try transaction.execute("UPDATE notes SET body = ? WHERE id = ?", params: ["grouped", "n-big"])
+                }
+                _ = try db.execute("UPDATE notes SET body = ? WHERE id = ?", params: ["after group", "n-big"])
                 try insertNote(db, id: "n-small", body: "small", score: 1.5)
                 let bigID = try mutationID(db, recordID: "n-big", operation: "insert")
                 let smallID = try mutationID(db, recordID: "n-small", operation: "insert")
@@ -2046,6 +2096,71 @@ final class PushProcessorTests: XCTestCase {
         XCTAssertEqual(failure.recoveryAction, .none)
         XCTAssertTrue(failure.metadata.isEmpty)
         XCTAssertEqual(try durableActionRows(db), before)
+    }
+
+    func testAtomicGroupSealsAsOneAtomicBatchAboveTheBatchSizeAndRetriesIdentically() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        try insertOrder(db, id: "u1", address: "before")
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            for id in ["g1", "g2", "g3"] {
+                try transaction.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, 'a', 'u1', '2026-01-01T10:00:00.000Z')",
+                    params: [id]
+                )
+            }
+        }
+        try insertOrder(db, id: "u2", address: "after")
+        let groupIDs = try ["g1", "g2", "g3"].map { try mutationID(db, recordID: $0, operation: "insert") }
+        let ungrouped = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable], batchSize: 1)
+        )
+        XCTAssertNil(ungrouped.atomic)
+        XCTAssertEqual(ungrouped.mutations.map(\.mutationID), [try mutationID(db, recordID: "u1", operation: "insert")])
+        try db.writeTransaction { connection in
+            try connection.execute(sql: "UPDATE _synchro_push_batches SET state = 'completed' WHERE state = 'pending'")
+            try connection.execute(sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted' WHERE record_id = 'u1'")
+        }
+
+        let sealed = try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable], batchSize: 1)
+        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: sealed)
+
+        XCTAssertEqual(request.atomic, true)
+        XCTAssertEqual(request.mutations.map(\.mutationID), groupIDs)
+        XCTAssertTrue(String(decoding: sealed, as: UTF8.self).contains(#""atomic":true"#))
+        let retried = try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable], batchSize: 1)
+        XCTAssertEqual(retried, sealed)
+    }
+
+    func testAtomicGroupSealsANormalizedMutationAtItsFirstSourceOrder() async throws {
+        let (db, _, processor) = try makeTestEnv()
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            for id in ["parent", "child"] {
+                try transaction.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, 'a', 'u1', '2026-01-01T10:00:00.000Z')",
+                    params: [id]
+                )
+            }
+            try transaction.execute("UPDATE orders SET ship_address = 'b' WHERE id = 'parent'")
+        }
+
+        let request = try JSONDecoder.synchroDecoder().decode(
+            PushRequest.self,
+            from: try await sealBatchWithLostResponse(db, processor: processor, syncedTables: [testTable])
+        )
+
+        XCTAssertEqual(request.atomic, true)
+        XCTAssertEqual(request.mutations.map { $0.pk["id"] }, [AnyCodable("parent"), AnyCodable("child")])
+        XCTAssertEqual(request.mutations.map(\.op), [.insert, .insert])
+        XCTAssertEqual(request.mutations.first?.columns?["ship_address"], AnyCodable("b"))
     }
 
     private func makeMockPushClient(dbPath: String) -> (HttpClient, URLSession) {

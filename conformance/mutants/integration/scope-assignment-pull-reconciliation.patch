@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/pull.rs b/extensions/synchro-pg/src/pull.rs
+--- a/extensions/synchro-pg/src/pull.rs
++++ b/extensions/synchro-pg/src/pull.rs
+@@ -124,7 +124,7 @@
+                 false,
+             );
+         }
+-        let server_scopes = crate::client::load_authoritative_scopes(client, p_user_id);
++        let server_scopes = client_state.bucket_subs.clone();
+         let scope_set_version = crate::client::next_scope_set_version(
+             &client_state.bucket_subs,
+             client_state.scope_set_version,

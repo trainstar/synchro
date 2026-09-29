@@ -33,8 +33,11 @@ import (
 )
 
 const (
-	localStartupTimeout   = 90 * time.Second
-	localShutdownTimeout  = 15 * time.Second
+	localStartupTimeout = 90 * time.Second
+	// A clean shutdown ends with a checkpoint that fsyncs every dirty file,
+	// which can take tens of seconds on a loaded host. This matches the
+	// default pg_ctl wait.
+	localShutdownTimeout  = 60 * time.Second
 	localPollInterval     = 250 * time.Millisecond
 	lifecycleMessageBytes = 64 << 10
 	lifecycleStateName    = "lifecycle-state.json"

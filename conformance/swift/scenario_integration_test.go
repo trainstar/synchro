@@ -37,6 +37,7 @@ func TestRealSwiftScenarios(t *testing.T) {
 		{"schema-queued-mutation", runSwiftSchemaQueuedMutation},
 		{"schema-check", runSwiftSchemaCheck},
 		{"dataset", runSwiftDataset},
+		{"scope-empty-pull", runSwiftScopeEmptyPull},
 	} {
 		t.Run(scenario.name, func(t *testing.T) { scenario.run(t) })
 	}
@@ -77,6 +78,18 @@ func runSwiftRetentionReconnect(t *testing.T) {
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift retention-reconnect identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+	}
+}
+
+func runSwiftScopeEmptyPull(t *testing.T) {
+	t.Helper()
+	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "scope-empty-pull-001.json"), 100)
+	result, err := RunScopeEmptyPullScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "scope-empty-pull-client-a"})
+	if err != nil {
+		t.Fatalf("run direct Swift scope-empty-pull scenario: %v", err)
+	}
+	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+		t.Fatalf("Swift scope-empty-pull identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
 	}
 }
 

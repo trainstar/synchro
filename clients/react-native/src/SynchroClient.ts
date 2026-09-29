@@ -119,6 +119,7 @@ const MUTATION_REJECTION_CODES: readonly MutationRejectionCode[] = [
   'policy_rejected',
   'validation_failed',
   'table_not_synced',
+  'atomic_batch_rejected',
 ];
 
 const MUTATION_OPERATIONS = ['insert', 'upsert', 'update', 'delete'] as const;
@@ -872,9 +873,27 @@ export class SynchroClient {
   async writeTransaction<T>(
     callback: (tx: Transaction) => Promise<T>
   ): Promise<T> {
+    return this.runWriteTransaction(() => this.native.beginWriteTransaction(), callback);
+  }
+
+  /**
+   * Runs a write transaction whose synced mutations the server applies all
+   * together or not at all. The native SDK owns the group. An invalid group
+   * rolls back and rejects with `AtomicGroupInvalidError`.
+   */
+  async atomicWriteTransaction<T>(
+    callback: (tx: Transaction) => Promise<T>
+  ): Promise<T> {
+    return this.runWriteTransaction(() => this.native.beginAtomicWriteTransaction(), callback);
+  }
+
+  private async runWriteTransaction<T>(
+    begin: () => Promise<string>,
+    callback: (tx: Transaction) => Promise<T>
+  ): Promise<T> {
     let txID: string;
     try {
-      txID = await this.native.beginWriteTransaction();
+      txID = await begin();
     } catch (error) {
       throw mapNativeError(error);
     }

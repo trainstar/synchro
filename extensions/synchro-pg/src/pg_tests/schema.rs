@@ -28,7 +28,6 @@
              REVOKE EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID) FROM PUBLIC;
              GRANT EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID)
                  TO synchro_owner, synchro_worker;
-             GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
              GRANT SELECT ON TABLE test_registration_gate TO synchro_owner;
              ALTER TABLE test_registration_gate ENABLE ROW LEVEL SECURITY;
              CREATE POLICY test_registration_gate_policy

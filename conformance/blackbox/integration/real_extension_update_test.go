@@ -109,13 +109,15 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				t.Fatalf("update extension from %s: %v", origin.version, err)
 			}
 			if update.VersionBeforeUpdate != origin.version || update.ReadyBeforeUpdate ||
-				update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version {
+				update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version ||
+				!update.WorkerStableBeforeUpdate {
 				t.Fatalf(
-					"extension update observation is invalid: before=%q ready=%t objects=%q after=%q",
+					"extension update observation is invalid: before=%q ready=%t objects=%q after=%q worker_stable=%t",
 					update.VersionBeforeUpdate,
 					update.ReadyBeforeUpdate,
 					update.ExtensionObjectsStateBeforeUpdate,
 					update.VersionAfterUpdate,
+					update.WorkerStableBeforeUpdate,
 				)
 			}
 
@@ -329,7 +331,7 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 	insertSourceRow(t, prefixID)
 	waitForRealWALRecords(t, ctx, harness, "cf_items", prefixID)
 	prefix, err := harness.Operator().ObserveWALRecords(ctx, []string{prefixID})
-	if err != nil || len(prefix.Records) != 1 || !prefix.AcknowledgementMatchesObservedEnd || !prefix.SlotMatchesObservedEnd {
+	if err != nil || len(prefix.Records) != 1 || !prefix.ContiguousAcknowledged || !prefix.SlotMatchesAcknowledgement {
 		t.Fatalf("establish exact baseline WAL prefix: observation=%#v err=%v", prefix, err)
 	}
 	prefixEndLSN := prefix.Records[0].EndLSN
@@ -346,8 +348,8 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 			!before.ReadinessBlocked || !before.PoisonCheckFailed {
 			t.Fatalf("baseline decoder did not persist a blocking decode poison: %#v", before)
 		}
-		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressBeforePoison ||
-			!beforeAcknowledgement.SlotBeforePoison || beforeAcknowledgement.ProgressEndLSN != prefixEndLSN ||
+		if !beforeAcknowledgement.SlotMatchesProgress || !beforeAcknowledgement.ProgressAtOrBeforePoison ||
+			!beforeAcknowledgement.SlotAtOrBeforePoison || beforeAcknowledgement.ProgressEndLSN != prefixEndLSN ||
 			beforeAcknowledgement.SlotFlushLSN != prefixEndLSN {
 			t.Fatalf("baseline slot advanced past the poisoned contiguous prefix: prefix=%s acknowledgement=%#v", prefixEndLSN, beforeAcknowledgement)
 		}
@@ -385,8 +387,9 @@ func TestRealExtensionUpdateRepairsRetainedDecoderPoison(t *testing.T) {
 		recovered, err := harness.Operator().ObserveWALRecords(ctx, []string{poisonID, laterID})
 		if err != nil || len(recovered.Records) != 2 || recovered.Records[0].RecordID != poisonID ||
 			recovered.Records[1].RecordID != laterID || recovered.BlockingPoison || !recovered.ContiguousAcknowledged ||
-			!recovered.AcknowledgementMatchesObservedEnd || !recovered.SlotMatchesObservedEnd ||
-			recovered.AcknowledgedEndLSN == "" || recovered.AcknowledgedEndLSN != recovered.SlotConfirmedFlushLSN {
+			!recovered.SlotMatchesAcknowledgement || recovered.AcknowledgedEndLSN == "" ||
+			recovered.AcknowledgedEndLSN != recovered.SlotConfirmedFlushLSN ||
+			recovered.ProcessedEndLSN != recovered.AcknowledgedEndLSN {
 			t.Fatalf("logical slot did not acknowledge the exact recovered contiguous end LSN: %#v, %v", recovered, err)
 		}
 		if err := harness.FinishExtensionUpdate(ctx); err != nil {

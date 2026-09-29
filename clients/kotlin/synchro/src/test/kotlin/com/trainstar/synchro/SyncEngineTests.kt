@@ -2206,6 +2206,122 @@ class SyncEngineTests {
     }
 
     @Test
+    fun testStartupPushesChangeCapturedBeforeResumedPullBackoff() = runTest {
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.PULLING, captureChange = true)
+    }
+
+    @Test
+    fun testStartupPushesChangeCapturedBeforeResumedRebuildBackoff() = runTest {
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.REBUILDING, captureChange = true)
+    }
+
+    @Test
+    fun testStartupPullsAfterResumedRebuildBackoff() = runTest {
+        assertStartupCompletesCycleAfterResumedBackoff(RetryOperation.REBUILDING, captureChange = false)
+    }
+
+    // The large debounce proves that the start itself completes the cycle.
+    private suspend fun assertStartupCompletesCycleAfterResumedBackoff(resumeState: String, captureChange: Boolean) {
+        val timing = BlockingRetryTiming(1_000L)
+        val connectCalls = AtomicInteger()
+        val failResumedOperation = AtomicBoolean(false)
+        val pushedRecordIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val requestPaths = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val retryable503 = {
+            MockResponse()
+                .setResponseCode(503)
+                .setHeader("Retry-After", "60")
+                .setBody(RETRYABLE_503_ERROR_JSON)
+        }
+        val (engine, db) = makeIntegrationEnv(
+            maxRetryAttempts = 0,
+            pushDebounce = 3_600.0,
+            syncInterval = 3_600.0,
+            retryTiming = timing,
+        ) { request ->
+            requestPaths += request.path!!.substringAfterLast("/sync/")
+            when {
+                request.path!!.endsWith("/sync/connect") -> {
+                    mockResponse(if (connectCalls.incrementAndGet() == 1) connectJSON else connectResumeJSON)
+                }
+                request.path!!.endsWith("/sync/rebuild") -> {
+                    if (resumeState == RetryOperation.REBUILDING && failResumedOperation.get()) {
+                        retryable503()
+                    } else {
+                        mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                    }
+                }
+                request.path!!.endsWith("/sync/pull") -> {
+                    if (resumeState == RetryOperation.PULLING && failResumedOperation.get()) {
+                        retryable503()
+                    } else {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    }
+                }
+                request.path!!.endsWith("/sync/push") -> {
+                    val requestBody = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                    val mutations = requestBody.getValue("mutations").jsonArray.map { it.jsonObject }
+                    mutations.forEach { mutation ->
+                        pushedRecordIDs += mutation.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content
+                    }
+                    val accepted = mutations.map { mutation ->
+                        acceptedPushOutcomeJSON(mutation, "captured-while-stopped")
+                    }
+                    mockResponse(
+                        """{"batch_id":${requestBody["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""",
+                    )
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            if (resumeState == RetryOperation.REBUILDING) {
+                db.execute("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
+            }
+            failResumedOperation.set(true)
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is RetryableError)
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
+            assertEquals(resumeState, requireNotNull(DurableBackoffStore.load(db)).resumeState)
+
+            engine.stop()
+            if (captureChange) {
+                db.execute(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("captured-while-stopped", "Stopped Street", "u1", "2026-01-01T10:00:00.000000Z"),
+                )
+            }
+            assertEquals(captureChange, ChangeTracker(db).hasPendingChanges())
+            failResumedOperation.set(false)
+
+            val restartRequestIndex = requestPaths.size
+            val initialSyncCompleted = CountDownLatch(1)
+            var restartPathsAtCompletion = emptyList<String>()
+            engine.start(
+                SyncOptions(initialSyncCompleted = {
+                    restartPathsAtCompletion = synchronized(requestPaths) { requestPaths.drop(restartRequestIndex) }
+                    initialSyncCompleted.countDown()
+                }),
+            )
+            timing.awaitNextSleep(2, TimeUnit.SECONDS)
+            timing.releaseAt(61_000L)
+
+            assertTrue(initialSyncCompleted.await(5, TimeUnit.SECONDS))
+            val resumedPath = if (resumeState == RetryOperation.REBUILDING) "rebuild" else "pull"
+            assertEquals(listOf("connect", resumedPath), restartPathsAtCompletion.take(2))
+            assertEquals("pull", restartPathsAtCompletion.drop(2).lastOrNull())
+            val expectedPushedRecordIDs = if (captureChange) listOf("captured-while-stopped") else emptyList()
+            assertEquals(expectedPushedRecordIDs, synchronized(pushedRecordIDs) { pushedRecordIDs.toList() })
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertNull(DurableBackoffStore.load(db))
+        } finally {
+            timing.releaseAt(61_000L)
+            engine.stop()
+        }
+    }
+
+    @Test
     fun testStopPreservesDurableBackoff() = runTest {
         val timing = BlockingRetryTiming(1_000L)
         val (engine, db) = makeIntegrationEnv(retryTiming = timing) {
@@ -3663,7 +3779,10 @@ class SyncEngineTests {
         )
         var resetRequest: JsonObject? = null
         val (engine, db) = makeIntegrationEnv { request ->
-            if (!request.path.orEmpty().endsWith("/sync/connect")) {
+            if (request.path.orEmpty().endsWith("/sync/pull")) {
+                // The reset assigns no scope, and a normal cycle still pulls to reconcile assignment.
+                mockResponse(emptyScopePullJSON(scopeSetVersion = 0))
+            } else if (!request.path.orEmpty().endsWith("/sync/connect")) {
                 mockResponse("""{"error":"unexpected"}""", 500)
             } else {
                 val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
@@ -3947,7 +4066,180 @@ class SyncEngineTests {
         }
     }
 
+    @Test
+    fun blockedPredecessorBlocksDependentUpdateAndCycleCompletes() = runTest {
+        val (engine, db) = makeIntegrationEnv { request ->
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(emptyScopePullJSON(scopeSetVersion = 1))
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("blocked-row", "initial", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val predecessor = mutationID(db, "blocked-row", "insert")
+            db.execute(
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'legacy_blocked' WHERE mutation_id = ?",
+                arrayOf(predecessor),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("dependent", "blocked-row"))
+            val dependent = mutationID(db, "blocked-row", "update")
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            // The connect assigns no scope. The cycle sends no push, and it still pulls to reconcile assignment.
+            assertEquals(
+                listOf("connect", "pull"),
+                List(server!!.requestCount) { server!!.takeRequest().path.orEmpty().substringAfterLast('/') },
+            )
+            assertEquals(listOf("legacy_blocked", "blocked_by_predecessor"), mutationStates(db, predecessor, dependent))
+            assertEquals(predecessor, dependsOnMutationID(db, dependent))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun blockedPredecessorBlocksDependentGroupAndCycleCompletes() = runTest {
+        val (engine, db) = makeIntegrationEnv { request ->
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(emptyScopePullJSON(scopeSetVersion = 1))
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("group-blocked", "initial", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val predecessor = mutationID(db, "group-blocked", "insert")
+            db.execute(
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'blocked_by_predecessor' WHERE mutation_id = ?",
+                arrayOf(predecessor),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("dependent", "group-blocked"))
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("group-peer", "peer", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val dependent = mutationID(db, "group-blocked", "update")
+            val peer = mutationID(db, "group-peer", "insert")
+            db.execute(
+                """
+                UPDATE _synchro_pending_changes
+                SET atomic_group_id = 'cycle-group'
+                WHERE mutation_id IN (?, ?)
+                """.trimIndent(),
+                arrayOf(dependent, peer),
+            )
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            // The connect assigns no scope. The cycle sends no push, and it still pulls to reconcile assignment.
+            assertEquals(
+                listOf("connect", "pull"),
+                List(server!!.requestCount) { server!!.takeRequest().path.orEmpty().substringAfterLast('/') },
+            )
+            assertEquals(
+                listOf("blocked_by_predecessor", "blocked_by_predecessor", "blocked_by_predecessor"),
+                mutationStates(db, predecessor, dependent, peer),
+            )
+            assertEquals(predecessor, dependsOnMutationID(db, dependent))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun pushWithoutProgressEndsThePushLoopAndTheCyclePulls() = runTest {
+        val pulls = AtomicInteger()
+        val (engine, db) = makeIntegrationEnv { request ->
+            val path = request.path.orEmpty()
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
+                path.endsWith("/sync/pull") -> {
+                    pulls.incrementAndGet()
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+        try {
+            installTestSchema(
+                db,
+                schemaVersion = 1,
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+                tables = listOf(protocolOrdersSchema()),
+            )
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(
+                    connection,
+                    scopeId = scopeID,
+                    cursor = "scope_cursor_1",
+                    checksum = emptyScopeChecksumJSON(),
+                )
+            }
+            db.writeSyncLockedTransaction { connection ->
+                connection.execSQL(
+                    "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arrayOf("unversioned", "server", "u1", "2026-01-01T00:00:00.000000Z"),
+                )
+            }
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("local", "unversioned"))
+            val waiting = mutationID(db, "unversioned", "update")
+
+            withContext(Dispatchers.Default) { withTimeout(3_000) { engine.start() } }
+
+            assertEquals(1, pulls.get())
+            assertEquals(listOf("captured"), mutationStates(db, waiting))
+            assertTrue(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+        } finally {
+            engine.stop()
+        }
+    }
+
     // MARK: - Helpers
+
+    private fun mutationID(db: SynchroDatabase, recordID: String, operation: String): String =
+        db.queryOne(
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = ? AND operation = ?",
+            arrayOf(recordID, operation),
+        )!!.getValue("mutation_id") as String
+
+    private fun mutationStates(db: SynchroDatabase, vararg mutationIDs: String): List<String> =
+        mutationIDs.map { mutationID ->
+            db.queryOne(
+                "SELECT lifecycle_state FROM _synchro_pending_changes WHERE mutation_id = ?",
+                arrayOf(mutationID),
+            )!!.getValue("lifecycle_state") as String
+        }
+
+    private fun dependsOnMutationID(db: SynchroDatabase, mutationID: String): String? =
+        db.queryOne(
+            "SELECT depends_on_mutation_id FROM _synchro_pending_changes WHERE mutation_id = ?",
+            arrayOf(mutationID),
+        )?.get("depends_on_mutation_id") as String?
 
     private fun makeSyncEngine(syncInterval: Double = 30.0): Pair<SyncEngine, SynchroDatabase> {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -4564,6 +4856,18 @@ class SyncEngineTests {
             else -> mockResponse("""{"error":"unexpected"}""", 500)
         }
     }
+
+    private fun emptyScopePullJSON(scopeSetVersion: Int): String = """
+        {
+            "changes": [],
+            "scope_set_version": $scopeSetVersion,
+            "scope_cursors": {},
+            "scope_updates": {"add": [], "remove": []},
+            "rebuild": [],
+            "has_more": false,
+            "checksums": {}
+        }
+    """.trimIndent()
 
     private fun mockResponse(body: String, statusCode: Int = 200): MockResponse =
         MockResponse().setBody(body).setResponseCode(statusCode)

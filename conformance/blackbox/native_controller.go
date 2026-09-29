@@ -1798,9 +1798,6 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
 		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment payload is invalid")
 	}
-	if len(payload.Assignments) == 0 {
-		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment is empty")
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
@@ -3218,6 +3215,23 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	return nativeSuccess(), nil
 }
 
+// awaitApplicationPushRecords resolves the runtime identities of an
+// application push. WAL materializes an accepted row asynchronously, so a
+// single read can occur before the row exists.
+func (c *NativeController) awaitApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
+	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
+	defer cancel()
+	for {
+		resolveErr := c.resolveApplicationPushRecords(deadline, transaction)
+		if resolveErr == nil {
+			return nil
+		}
+		if err := waitNativePoll(deadline); err != nil {
+			return fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+		}
+	}
+}
+
 func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
@@ -3724,7 +3738,7 @@ func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Cont
 	}
 	c.mu.Unlock()
 	for _, transaction := range pending {
-		if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, transaction); err != nil {
 			return fmt.Errorf("resolve pending native application push records: %w", err)
 		}
 	}
@@ -4638,7 +4652,7 @@ func (c *NativeController) rewriteNativePushIdentities(ctx context.Context, requ
 		// Only a materialized source transaction resolves these records today. A
 		// scenario that replays an accepted push without materializing needs the
 		// same resolution, so resolve it here.
-		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, binding); err != nil {
 			return fmt.Errorf("resolve native application push identities: %w", err)
 		}
 	}
@@ -4726,7 +4740,7 @@ func (c *NativeController) sealedNativePushReplay(ctx context.Context, operation
 		return nil, nil
 	}
 	if binding.RuntimeBatchID == "" {
-		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, binding); err != nil {
 			return nil, fmt.Errorf("resolve native application push identities: %w", err)
 		}
 	}

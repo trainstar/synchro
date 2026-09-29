@@ -113,6 +113,53 @@ final class PushProcessor: @unchecked Sendable {
         return PushOutcome(response: response, conflicts: reconciliation.0 + reconciliation.1.conflicts)
     }
 
+    /// Applies the commit-time rules of an atomic write group before its transaction commits.
+    ///
+    /// The worst-case request has the protocol maximum for the generation and the schema
+    /// version, and the longest batch ID, schema hash, and server version. The sealed
+    /// request is therefore always within the push limits.
+    func validateAtomicGroup(_ db: GRDB.Database, groupID: String, clientID: String) throws {
+        let group = try changeTracker.normalizeAtomicGroup(db, groupID: groupID)
+        guard group.count <= 1000 else {
+            throw SynchroError.atomicGroupInvalid(reason: .tooManyMutations)
+        }
+        let worstCaseSchema = SchemaRef(
+            version: PushLimits.maxProtocolInteger,
+            hash: String(repeating: "f", count: 64)
+        )
+        var requestOctets = try PushLimits.envelopeReserve(
+            clientID: clientID,
+            batchID: UUID().uuidString.lowercased(),
+            schemaHash: worstCaseSchema.hash,
+            atomic: true,
+            encoder: encoder
+        )
+        var historicalSchemas: [HistoricalSchemaKey: [LocalSchemaTable]] = [:]
+        for (index, entry) in group.enumerated() {
+            var entry = entry
+            if entry.operation != "insert" && entry.baseUpdatedAt == nil {
+                entry.baseUpdatedAt = String(repeating: "v", count: Self.maxServerVersionOctets)
+            }
+            let mutation = try buildMutation(
+                db,
+                from: entry,
+                requestSchema: worstCaseSchema,
+                syncedTables: [],
+                historicalSchemas: &historicalSchemas
+            )
+            let measure = try PushLimits.measure(mutation, encoder: encoder)
+            guard !measure.exceedsMutationLimits else {
+                throw SynchroError.atomicGroupInvalid(reason: .mutationTooLarge)
+            }
+            requestOctets = requestOctets.appending(measure.element, afterElement: index > 0)
+        }
+        guard requestOctets.fitsRequestLimit else {
+            throw SynchroError.atomicGroupInvalid(reason: .requestTooLarge)
+        }
+    }
+
+    private static let maxServerVersionOctets = 64
+
     private func buildMutation(
         _ db: GRDB.Database,
         from change: PendingChange,
@@ -316,6 +363,7 @@ final class PushProcessor: @unchecked Sendable {
                 clientID: clientID,
                 batchID: batchID,
                 schemaHash: schemaHash,
+                atomic: false,
                 encoder: encoder
             )
             var pending: [PendingChange] = []
@@ -324,7 +372,7 @@ final class PushProcessor: @unchecked Sendable {
             // unsealed state, so the next pass reads the next candidates.
             while pending.isEmpty {
                 let candidates = try changeTracker.pendingChanges(db, limit: batchSize)
-                guard !candidates.isEmpty else { return nil }
+                guard let first = candidates.first else { return nil }
                 // An envelope above a request limit is a configuration failure, not an
                 // oversized action. The error rolls back this transaction, so every
                 // action keeps its state.
@@ -336,6 +384,20 @@ final class PushProcessor: @unchecked Sendable {
                         message: "The push request envelope exceeds the request limit.",
                         recoveryAction: .none
                     ))
+                }
+                // The commit-time group rules already bound an atomic group by the worst case.
+                if first.atomicGroupID != nil {
+                    pending = candidates
+                    mutations = try candidates.map { candidate in
+                        try buildMutation(
+                            db,
+                            from: candidate,
+                            requestSchema: requestSchema,
+                            syncedTables: syncedTables,
+                            historicalSchemas: &historicalSchemas
+                        )
+                    }
+                    break
                 }
                 var requestOctets = envelope
                 for candidate in candidates {
@@ -368,6 +430,7 @@ final class PushProcessor: @unchecked Sendable {
                 clientGeneration: clientGeneration,
                 batchID: batchID,
                 schema: requestSchema,
+                atomic: pending.first?.atomicGroupID == nil ? nil : true,
                 mutations: mutations
             )
             let requestJSON = try encodeString(request)
@@ -597,6 +660,7 @@ final class PushProcessor: @unchecked Sendable {
                 clientGeneration: clientGeneration,
                 batchID: UUID().uuidString.lowercased(),
                 schema: installedSchema,
+                atomic: oldRequest.atomic,
                 mutations: oldRequest.mutations
             )
             try validateRenewedRequest(db, request: successor, syncedTables: syncedTables)
@@ -621,6 +685,7 @@ final class PushProcessor: @unchecked Sendable {
                     normalizedMutationID: member.normalizedMutationID,
                     sealedBatchID: successor.batchID,
                     sealedOrdinal: Int64(ordinal),
+                    atomicGroupID: member.atomicGroupID,
                     fieldValuesByID: member.fieldValuesByID
                 )
             }
@@ -769,7 +834,7 @@ final class PushProcessor: @unchecked Sendable {
                     later: later
                 )
             }
-            let hasAuthoritativeAbsence = outcome.serverRow == nil && source?.operation == "delete"
+            let hasAuthoritativeAbsence = outcome.serverRow == nil
             let canApply = currentTable != nil
                 && (outcome.serverRow == nil || projection != nil)
                 && patches != nil
@@ -966,9 +1031,8 @@ final class PushProcessor: @unchecked Sendable {
                     later: later
                 )
             }
-            let hasAuthoritativeAbsence = outcome.serverRow == nil
-                && outcome.status == .conflict
-                && (outcome.code == .rowDeleted || outcome.code == .rowNotFound)
+            // A conflict gives the authoritative state. No row means true absence or a fence-only delete for every code.
+            let hasAuthoritativeAbsence = outcome.serverRow == nil && outcome.status == .conflict
             let canApply = currentTable != nil
                 && (outcome.serverRow == nil || projection != nil)
                 && patches != nil

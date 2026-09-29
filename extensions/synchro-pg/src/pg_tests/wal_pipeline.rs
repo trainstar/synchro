@@ -698,6 +698,7 @@
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
+                 processed_end_lsn = NULL,
                  updated_at = now()
              WHERE singleton",
         )
@@ -861,6 +862,17 @@
         assert_eq!(response.0["edges"], json!(2));
     }
 
+    // Materialization records a processed boundary, which requires a generation
+    // start. The test cluster has no slot that sets one.
+    fn bind_test_wal_progress() {
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = '0/1', processed_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("bind test WAL progress");
+    }
+
     fn wal_counting_image(registration: &TableRegistration, record_id: &str) -> TupleImage {
         registration
             .fields
@@ -988,6 +1000,7 @@
             })
         })
         .expect("load orders WAL counting registration");
+        bind_test_wal_progress();
         let mut measurements = HashMap::new();
         for (start, count, commit_lsn) in [(1, 10, 0x100u64), (100, 100, 0x200), (1_000, 501, 0x300)] {
             let transaction = wal_counting_transaction(&registration, commit_lsn, start, count);
@@ -1053,6 +1066,7 @@
     #[pg_test]
     fn wal_self_impact_overflow_fails_the_whole_transaction() {
         setup_test_tables();
+        bind_test_wal_progress();
         let (table_id, user_field_id): (String, String) = Spi::connect(|client| {
             let registry = crate::registry::load_registry_from_client(client)?;
             let orders = registry
@@ -1295,6 +1309,7 @@
     #[pg_test]
     fn wal_activation_applies_to_later_rows_of_its_transaction() {
         setup_test_tables();
+        bind_test_wal_progress();
         let generation = register_orders_with_added_column("cutover_note");
         let record_id = "d6000000-0000-4000-8000-000000000001";
         let transaction = activation_cutover_transaction(generation, "cutover_note");
@@ -1329,6 +1344,7 @@
     #[pg_test]
     fn wal_replay_fingerprint_binds_the_activation_boundary() {
         setup_test_tables();
+        bind_test_wal_progress();
         let generation = register_orders_with_added_column("replay_note");
         let transaction = activation_cutover_transaction(generation, "replay_note");
         let replay = |transaction: &WalTransaction| {
@@ -1374,6 +1390,7 @@
     #[pg_test]
     fn wal_ignores_only_a_repeated_activation_of_the_active_chain() {
         setup_test_tables();
+        bind_test_wal_progress();
         let marker_only = |generation: i64, commit_lsn: u64| WalTransaction {
             xid: 1,
             final_lsn: commit_lsn,
@@ -1461,6 +1478,7 @@
     #[pg_test]
     fn wal_defers_activation_with_unknown_source_requirement() {
         setup_test_tables();
+        bind_test_wal_progress();
         let active: i64 = Spi::get_one(
             "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
         )

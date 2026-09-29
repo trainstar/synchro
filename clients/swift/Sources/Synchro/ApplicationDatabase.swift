@@ -118,7 +118,7 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
     private struct State {
         var syncedTables: Set<String> = []
         var captureTriggers: Set<String> = []
-        var captureContextWindowDepth = 0
+        var sdkWriteWindowDepth = 0
         var managedWriteDepth = 0
     }
 
@@ -138,18 +138,18 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
         state.unlock()
     }
 
-    /// The SDK writes the capture context rows itself, and the reserved-table
-    /// rule would deny that. The window opens only around the SDK's own
-    /// install and clear statements on the serial application queue.
-    func openCaptureContextWindow() {
+    /// The SDK writes the capture context rows and the atomic group state
+    /// itself, and the reserved-table rule would deny that. The window opens
+    /// only around the SDK's own statements on the serial application queue.
+    func openSDKWriteWindow() {
         state.lock()
-        protectedState.captureContextWindowDepth += 1
+        protectedState.sdkWriteWindowDepth += 1
         state.unlock()
     }
 
-    func closeCaptureContextWindow() {
+    func closeSDKWriteWindow() {
         state.lock()
-        protectedState.captureContextWindowDepth -= 1
+        protectedState.sdkWriteWindowDepth -= 1
         state.unlock()
     }
 
@@ -202,7 +202,7 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
                 // writes remain unavailable because writable_schema is denied.
                 return SQLITE_OK
             }
-            if isCaptureContextTable(target), snapshot.captureContextWindowDepth > 0 {
+            if isSDKWriteTable(target), snapshot.sdkWriteWindowDepth > 0 {
                 return SQLITE_OK
             }
             guard isReserved(target) else { return SQLITE_OK }
@@ -284,9 +284,10 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
             || name == "_grdb_migrations"
     }
 
-    private func isCaptureContextTable(_ name: String) -> Bool {
+    private func isSDKWriteTable(_ name: String) -> Bool {
         switch normalized(name) {
-        case "_synchro_capture_context", "_synchro_capture_fields":
+        case "_synchro_capture_context", "_synchro_capture_fields",
+             "_synchro_meta", "_synchro_pending_changes", "_synchro_mutation_values":
             return true
         default:
             return false
@@ -362,13 +363,48 @@ final class ApplicationDatabase: @unchecked Sendable {
 
     func write<T>(_ body: (ApplicationTransaction) throws -> T) throws -> T {
         try managedWrite { database in
-            try body(ApplicationTransaction(database: database) { sql, execute in
-                guard let context = try self.captureContext(for: sql) else {
-                    return try execute()
-                }
-                return try self.withCaptureContext(context, database: database, execute)
-            })
+            try body(capturingTransaction(database))
         }
+    }
+
+    /// Runs one write transaction whose captured mutations form one atomic group.
+    ///
+    /// `validate` receives the group ID after the body and before commit. An
+    /// error from the body or from `validate` rolls back the transaction.
+    func atomicWrite<T>(
+        validate: (GRDB.Database, String) throws -> Void,
+        _ body: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        try managedWrite { database in
+            let groupID = UUID().uuidString.lowercased()
+            try sdkWrite {
+                try database.execute(
+                    sql: "INSERT INTO _synchro_meta (key, value) VALUES ('atomic_group_id', ?)",
+                    arguments: [groupID]
+                )
+            }
+            let result = try body(capturingTransaction(database))
+            try sdkWrite {
+                try validate(database, groupID)
+                try database.execute(sql: "DELETE FROM _synchro_meta WHERE key = 'atomic_group_id'")
+            }
+            return result
+        }
+    }
+
+    private func capturingTransaction(_ database: GRDB.Database) -> ApplicationTransaction {
+        ApplicationTransaction(database: database) { sql, execute in
+            guard let context = try self.captureContext(for: sql) else {
+                return try execute()
+            }
+            return try self.withCaptureContext(context, database: database, execute)
+        }
+    }
+
+    private func sdkWrite<T>(_ body: () throws -> T) throws -> T {
+        policy.openSDKWriteWindow()
+        defer { policy.closeSDKWriteWindow() }
+        return try body()
     }
 
     func write<T>(
@@ -442,13 +478,13 @@ final class ApplicationDatabase: @unchecked Sendable {
     ) throws -> T {
         let token = UUID().uuidString
         let outcome = Result<T, any Error> {
-            try withCaptureContextWindow {
+            try sdkWrite {
                 try installCaptureContext(context, token: token, database: database)
             }
             return try body()
         }
         do {
-            try withCaptureContextWindow {
+            try sdkWrite {
                 try clearCaptureContext(token: token, database: database)
             }
         } catch {
@@ -467,13 +503,6 @@ final class ApplicationDatabase: @unchecked Sendable {
             )
         }
         return try outcome.get()
-    }
-
-    /// The reserved-table exception covers only the SDK context statements.
-    private func withCaptureContextWindow(_ body: () throws -> Void) throws {
-        policy.openCaptureContextWindow()
-        defer { policy.closeCaptureContextWindow() }
-        try body()
     }
 
     private func installCaptureContext(

@@ -701,6 +701,29 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 	}
 }
 
+func TestTransportObservationAcceptsEmptyScopePull(t *testing.T) {
+	encoded := func(scopeCount string) []byte {
+		return []byte(`{"sequence":1,"operation_class":"pull","status_code":200,"error_code":null,"retryable":null,"duration_nanoseconds":1,"cursor_fingerprints":[],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":` + scopeCount + `,"limit":1},"pull_response_facts":{"change_count":0,"has_more":false,"rebuild_scope_count":1,"checksum_count":1,"scope_cursor_fingerprints":[],"scope_cursor_fingerprints_complete":true}}`)
+	}
+	var valid TransportObservation
+	if err := json.Unmarshal(encoded("0"), &valid); err != nil {
+		t.Fatalf("decode empty-scope pull observation: %v", err)
+	}
+	if err := validateTransportObservation(valid); err != nil {
+		t.Fatalf("empty-scope pull observation failed: %v", err)
+	}
+	if err := validateTransportObservation(cloneObservation(valid)); err != nil {
+		t.Fatalf("cloned empty-scope pull observation failed: %v", err)
+	}
+	var invalid TransportObservation
+	if err := json.Unmarshal(encoded("-1"), &invalid); err != nil {
+		t.Fatalf("decode negative-scope pull observation: %v", err)
+	}
+	if err := validateTransportObservation(invalid); err == nil {
+		t.Fatal("negative pull scope count passed")
+	}
+}
+
 func TestMappedTransportObservationPreservesServerReportedErrorCode(t *testing.T) {
 	retryable := true
 	generation := int64(1)
@@ -936,6 +959,28 @@ func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
 	source = Result{RebuildAttempts: json.RawMessage(`[{"scope_id":"user:user-a","rebuild_id":"` + runtimeRebuildID + `","client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"cursor":"` + continuation + `","page_limit":1},{"scope_id":"user:user-b","rebuild_id":"` + runtimeRebuildID + `","client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"cursor":"` + continuation + `","page_limit":1}]`)}
 	if err := validateCursorSourceBinding(rebuild, rebuildObservation, source, nil); err == nil {
 		t.Fatal("duplicate runtime rebuild attempts passed continuation validation")
+	}
+}
+
+func TestEmptyScopePullBindsToNoCursor(t *testing.T) {
+	pull := scenarios.Operation{
+		ContractOperation: "pull",
+		Name:              "request-page",
+		Payload:           json.RawMessage(`{"scopes":[]}`),
+	}
+	complete := true
+	observation := TransportObservation{CursorFingerprints: []string{}, CursorFingerprintsComplete: &complete}
+	if err := validateCursorSourceBinding(pull, observation, Result{}, nil); err != nil {
+		t.Fatalf("bind empty-scope pull: %v", err)
+	}
+	observation.CursorFingerprints = []string{cursorFingerprint("checkpoint-a")}
+	if err := validateCursorSourceBinding(pull, observation, Result{}, nil); err == nil {
+		t.Fatal("empty-scope pull with a cursor passed")
+	}
+	pull.Payload = json.RawMessage(`{}`)
+	observation.CursorFingerprints = []string{}
+	if err := validateCursorSourceBinding(pull, observation, Result{}, nil); err == nil {
+		t.Fatal("pull without an authored scope set passed")
 	}
 }
 

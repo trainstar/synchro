@@ -199,8 +199,9 @@ fn test_seed_receipt_below_retention_floor_degrades_to_rebuild() {
     register_shared_scope("global", true);
     Spi::run(
         "UPDATE sync_wal_progress
-         SET materialized_commit_lsn = '0/20', materialized_end_lsn = '0/28',
-             acknowledged_end_lsn = NULL
+         SET generation_start_lsn = COALESCE(generation_start_lsn, '0/1'),
+             materialized_commit_lsn = '0/20', materialized_end_lsn = '0/28',
+             processed_end_lsn = '0/28', acknowledged_end_lsn = NULL
          WHERE singleton",
     )
     .unwrap();
@@ -219,7 +220,8 @@ fn test_seed_receipt_below_retention_floor_degrades_to_rebuild() {
     // The stream advances after the export, so only the floor decides continuation.
     Spi::run(
         "UPDATE sync_wal_progress
-         SET materialized_commit_lsn = '0/40', materialized_end_lsn = '0/48'
+         SET materialized_commit_lsn = '0/40', materialized_end_lsn = '0/48',
+             processed_end_lsn = '0/48'
          WHERE singleton",
     )
     .unwrap();
@@ -512,8 +514,9 @@ fn test_private_scope_is_revocable_for_one_user() {
     )
     .unwrap();
 
-    // Until the next connect, pull and rebuild serve the stored assignment:
-    // the revoked scope stays readable and the new grant is not served.
+    // Pull reconciles the scope set. The pull tests prove one grant and one
+    // revocation alone. Here the identity scope leaves and a grant arrives in
+    // one pull, which advances the version once and serves no revoked row.
     let pulled = pull_client(
         "private-user",
         "private-client",
@@ -524,33 +527,28 @@ fn test_private_scope_is_revocable_for_one_user() {
         100,
     );
     assert!(pulled.get("error").is_none(), "{pulled}");
-    assert_eq!(pulled["scope_updates"], json!({ "add": [], "remove": [] }), "{pulled}");
-    let changes = pulled["changes"].as_array().expect("pull changes");
-    assert_eq!(changes.len(), 1, "{pulled}");
-    assert_eq!(changes[0]["scope"].as_str(), Some("user:private-user"));
-    assert_eq!(changes[0]["op"].as_str(), Some("upsert"));
     assert_eq!(
-        changes[0]["pk"][field_id("test_orders", "id")].as_str(),
-        Some(record_id)
+        pulled["scope_updates"],
+        json!({
+            "add": [{ "id": "team:late-grant", "cursor": null }],
+            "remove": ["user:private-user"]
+        }),
+        "{pulled}"
     );
+    assert_eq!(pulled["scope_set_version"].as_i64(), Some(held_version + 1), "{pulled}");
+    assert_eq!(pulled["changes"], json!([]), "{pulled}");
+    // Rebuild does not reconcile. It serves only the stored set that the pull wrote.
+    let revoked_rebuild =
+        rebuild_client("private-user", "private-client", "user:private-user", None, 100);
     assert_eq!(
-        changes[0]["row"][field_id("test_orders", "title")].as_str(),
-        Some("held")
+        revoked_rebuild["error"]["code"].as_str(),
+        Some("invalid_request"),
+        "{revoked_rebuild}"
     );
-    let rebuilt = rebuild_client("private-user", "private-client", "user:private-user", None, 100);
-    assert!(rebuilt.get("error").is_none(), "{rebuilt}");
-    let records = rebuilt["records"].as_array().expect("rebuild records");
-    assert_eq!(records.len(), 1, "{rebuilt}");
-    assert_eq!(
-        records[0]["pk"][field_id("test_orders", "id")].as_str(),
-        Some(record_id)
-    );
-    assert_eq!(
-        records[0]["row"][field_id("test_orders", "title")].as_str(),
-        Some("held")
-    );
-    let early = rebuild_client("private-user", "private-client", "team:late-grant", None, 100);
-    assert_eq!(early["error"]["code"].as_str(), Some("invalid_request"), "{early}");
+    let granted_rebuild =
+        rebuild_client("private-user", "private-client", "team:late-grant", None, 100);
+    assert!(granted_rebuild.get("error").is_none(), "{granted_rebuild}");
+    assert_eq!(granted_rebuild["records"], json!([]), "{granted_rebuild}");
 
     let revoked = connect_client(
         "private-user",

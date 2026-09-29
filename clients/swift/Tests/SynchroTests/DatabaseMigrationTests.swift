@@ -478,6 +478,101 @@ final class DatabaseMigrationTests: XCTestCase {
         )
     }
 
+    func testVersionEighteenUpgradeAddsAtomicGroupCaptureAndKeepsQueuedIntent() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_atomic_group_upgrade_\(UUID().uuidString).sqlite")
+        let table = SchemaTable(
+            tableName: "orders",
+            updatedAtColumn: "updated_at",
+            deletedAtColumn: "deleted_at",
+            primaryKey: ["id"],
+            columns: [
+                SchemaColumn(name: "id", nullable: false, isPrimaryKey: true),
+                SchemaColumn(name: "ship_address", nullable: true),
+                SchemaColumn(name: "user_id", nullable: false),
+                SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+                SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
+            ]
+        )
+        let legacy = try SynchroDatabase(path: path)
+        try SchemaManager(database: legacy).createSyncedTables(
+            schema: SchemaResponse(schemaVersion: 1, schemaHash: protocolTestSchemaHash, serverTime: Date(), tables: [table])
+        )
+        let installed = try legacy.readTransaction { connection in
+            try JSONDecoder().decode(
+                [LocalSchemaTable].self,
+                from: Data(XCTUnwrap(SynchroMeta.get(connection, key: .localSchema)).utf8)
+            )
+        }
+        let current = SQLiteSchema.generateCDCTriggers(table: try XCTUnwrap(installed.first))
+        let versionSeventeen = current.map {
+            $0.replacingOccurrences(of: "atomic_group_id, created_at", with: "created_at")
+                .replacingOccurrences(of: "(SELECT value FROM _synchro_meta WHERE key = 'atomic_group_id'), ", with: "")
+        }
+        XCTAssertFalse(versionSeventeen.joined().contains("atomic_group_id"))
+        try legacy.writeTransaction { connection in
+            for statement in versionSeventeen {
+                try connection.execute(sql: statement)
+            }
+            try connection.execute(sql: "ALTER TABLE _synchro_pending_changes DROP COLUMN atomic_group_id")
+            try connection.execute(sql: "DROP INDEX idx_synchro_pending_changes_normalized")
+            try connection.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'synchro_v18_atomic_groups'")
+        }
+        _ = try legacy.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES ('r1', 'queued', 'u1', '2026-01-01T10:00:00.000Z')",
+            params: nil
+        )
+        let queued = try XCTUnwrap(legacy.queryOne(
+            "SELECT mutation_id, lifecycle_state FROM _synchro_pending_changes WHERE record_id = 'r1'",
+            params: nil
+        ))
+        try legacy.close()
+
+        let db = try SynchroDatabase(path: path)
+        defer { try? db.close() }
+        let tracker = ChangeTracker(database: db)
+        let processor = PushProcessor(database: db, changeTracker: tracker)
+        let upgraded = try XCTUnwrap(db.queryOne(
+            "SELECT mutation_id, lifecycle_state, atomic_group_id FROM _synchro_pending_changes WHERE record_id = 'r1'",
+            params: nil
+        ))
+        XCTAssertEqual(upgraded["mutation_id"] as String?, queued["mutation_id"] as String?)
+        XCTAssertEqual(upgraded["lifecycle_state"] as String?, queued["lifecycle_state"] as String?)
+        XCTAssertNil(upgraded["atomic_group_id"] as String?)
+        XCTAssertNotNil(try db.queryOne(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_pending_changes_normalized'",
+            params: nil
+        ))
+        XCTAssertEqual(
+            try tracker.pendingChanges().first?.fieldValuesByID["ship_address"]?.textValue,
+            "queued"
+        )
+        XCTAssertEqual(
+            try db.queryOne("SELECT ship_address FROM orders WHERE id = 'r1'", params: nil)?["ship_address"] as String?,
+            "queued"
+        )
+
+        try db.applicationAtomicWriteTransaction(
+            validate: { connection, groupID in
+                try processor.validateAtomicGroup(connection, groupID: groupID, clientID: "test-device")
+            }
+        ) { transaction in
+            try transaction.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES ('g1', 'grouped', 'u1', '2026-01-01T10:00:00.000Z')"
+            )
+        }
+        XCTAssertNotNil(
+            try db.queryOne("SELECT atomic_group_id FROM _synchro_pending_changes WHERE record_id = 'g1'", params: nil)?["atomic_group_id"] as String?
+        )
+        XCTAssertEqual(
+            try db.queryOne(
+                "SELECT COUNT(*) AS count FROM grdb_migrations WHERE identifier = 'synchro_v18_atomic_groups'",
+                params: nil
+            )?["count"] as Int?,
+            1
+        )
+    }
+
     /// Inserts a row, moves its mutation to `exceeds_push_limit`, updates the row,
     /// and gives the dependency of the update mutation.
     private func dependencyAfterPushLimitMutation(_ db: SynchroDatabase, recordID: String) throws -> String? {

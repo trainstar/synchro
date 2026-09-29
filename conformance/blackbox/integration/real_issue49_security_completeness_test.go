@@ -302,6 +302,37 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		"ALTER TABLE public.cf_items DROP CONSTRAINT cf_items_pkey",
 		"ALTER TABLE public.cf_items ADD PRIMARY KEY (id) DEFERRABLE",
 	})
+	if _, err := admin.ExecContext(ctx, `
+		CREATE TABLE public.security49_identity_drift (
+			id uuid PRIMARY KEY,
+			counter integer NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+			deleted_at timestamptz
+		);
+		ALTER TABLE public.security49_identity_drift ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY synchro_owner_all ON public.security49_identity_drift
+			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+		GRANT SELECT, INSERT, UPDATE ON TABLE public.security49_identity_drift TO synchro_owner;
+		GRANT SELECT ON TABLE public.security49_identity_drift TO synchro_worker;
+		CREATE FUNCTION public.security49_identity_drift_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC SELECT 'user:diagnostic-user'::text; END;
+		REVOKE ALL ON FUNCTION public.security49_identity_drift_membership FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION public.security49_identity_drift_membership
+			TO synchro_owner, synchro_worker;
+		SELECT synchro.synchro_register_table(
+			'public.security49_identity_drift',
+			'public.security49_identity_drift_membership',
+			'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled')`); err != nil {
+		t.Fatalf("create registered identity drift fixture: %v", err)
+	}
+	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+	identityDrift := security49HealthDuringTransaction(t, ctx, admin, []string{
+		"ALTER TABLE public.security49_identity_drift ALTER COLUMN counter ADD GENERATED ALWAYS AS IDENTITY",
+	})
 
 	if _, err := admin.ExecContext(ctx, `
 		ALTER TABLE public.cf_items RENAME TO cf_items_registered_oid;
@@ -361,6 +392,9 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		}
 		if deferrableDrift["ready"] != false || issue49HealthChecks(t, deferrableDrift)["relation_identity"] != "failed" {
 			t.Fatalf("deferrable primary-key drift did not fail relation identity: %#v", deferrableDrift)
+		}
+		if identityDrift["ready"] != false || issue49HealthChecks(t, identityDrift)["relation_identity"] != "failed" {
+			t.Fatalf("database-generated writable field drift did not fail relation identity: %#v", identityDrift)
 		}
 		if registeredOID != persistedOID || replacementOID == persistedOID || OIDDrift["ready"] != false ||
 			issue49HealthChecks(t, OIDDrift)["relation_identity"] != "failed" {
@@ -624,8 +658,9 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 		JOIN pg_catalog.pg_roles owner ON owner.oid = procedure.proowner
 		WHERE namespace.nspname = 'synchro'
 		  AND (owner.rolname <> 'synchro_owner'
-		       OR NOT procedure.prosecdef
-		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro'])`).Scan(&unsafeFunctions); err != nil {
+		       OR (NOT procedure.prosecdef
+		           AND procedure.proname <> 'synchro_assert_projection_reader')
+		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro, pg_temp'])`).Scan(&unsafeFunctions); err != nil {
 		t.Fatalf("inspect privileged function definitions: %v", err)
 	}
 
@@ -1285,6 +1320,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_unregister_shared_scope'),
 		('synchro_operator', 'synchro_grant_user_scope'),
 		('synchro_operator', 'synchro_revoke_user_scope'),
+		('synchro_operator', 'synchro_register_assignment_function'),
+		('synchro_operator', 'synchro_unregister_assignment_function'),
 		('synchro_operator', 'synchro_backfill_bucket_edges'),
 		('synchro_operator', 'synchro_compact'),
 		('synchro_operator', 'synchro_inject_client_retention_expiry'),
@@ -1310,6 +1347,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_abort_projection_bootstrap'),
 		('synchro_operator', 'synchro_complete_projection_bootstrap_cleanup'),
 		('synchro_operator', 'synchro_projection_bootstrap_slot_drop_state'),
+		('synchro_operator', 'synchro_assert_projection_reader'),
+		('synchro_worker', 'synchro_assert_projection_reader'),
 		('synchro_worker', 'synchro_projection_bootstrap_active_stream'),
 		('synchro_worker', 'synchro_projection_bootstrap_main_boundary'),
 		('synchro_worker', 'synchro_projection_bootstrap_slot_absent'),

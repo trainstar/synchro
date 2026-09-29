@@ -105,7 +105,8 @@
         assert_eq!(before_boundary, Some(false));
         Spi::run(
             "UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = '0/1', materialized_end_lsn = '0/1'
+             SET generation_start_lsn = '0/1', materialized_commit_lsn = '0/1',
+                 materialized_end_lsn = '0/1', processed_end_lsn = '0/1'
              WHERE singleton",
         )
         .expect("set projection bootstrap boundary");
@@ -1127,7 +1128,8 @@
              CROSS JOIN synchro.sync_wal_progress progress
              WHERE runtime.singleton AND progress.singleton;
              UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = '0/20', materialized_end_lsn = '0/30',
+             SET generation_start_lsn = '0/10', materialized_commit_lsn = '0/20',
+                 materialized_end_lsn = '0/30', processed_end_lsn = '0/30',
                  acknowledged_end_lsn = '0/30', updated_at = now()
              WHERE singleton",
         )
@@ -1154,7 +1156,8 @@
         Spi::run(
             "UPDATE synchro.sync_wal_progress
              SET materialized_commit_lsn = NULL, materialized_end_lsn = NULL,
-                 acknowledged_end_lsn = NULL WHERE singleton",
+                 acknowledged_end_lsn = NULL, processed_end_lsn = generation_start_lsn
+             WHERE singleton",
         )
         .expect("hold main materialization behind the activation barrier");
         let early_activation = Spi::connect_mut(|client| {
@@ -1164,7 +1167,8 @@
         Spi::run(
             "UPDATE synchro.sync_wal_progress
              SET materialized_commit_lsn = '0/20', materialized_end_lsn = '0/30',
-                 acknowledged_end_lsn = '0/30' WHERE singleton",
+                 processed_end_lsn = '0/30', acknowledged_end_lsn = '0/30'
+             WHERE singleton",
         )
         .expect("restore main materialization at the activation barrier");
 

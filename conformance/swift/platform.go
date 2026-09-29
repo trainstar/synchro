@@ -1657,10 +1657,14 @@ func validateCursorSourceBinding(operation scenarios.Operation, observation tran
 				CursorSource string `json:"cursor_source"`
 			} `json:"scopes"`
 		}
-		if err := json.Unmarshal(operation.Payload, &payload); err != nil || len(payload.Scopes) == 0 {
+		if err := json.Unmarshal(operation.Payload, &payload); err != nil || payload.Scopes == nil {
 			return errors.New("decode Swift authored pull cursor sources failed")
 		}
-		sourceKind := payload.Scopes[0].CursorSource
+		// A pull with no known scope reconciles assignment and carries no cursor.
+		sourceKind := "none"
+		if len(payload.Scopes) != 0 {
+			sourceKind = payload.Scopes[0].CursorSource
+		}
 		for _, scope := range payload.Scopes {
 			if scope.CursorSource != sourceKind {
 				return errors.New("Swift authored pull cursor sources are mixed")

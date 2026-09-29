@@ -305,6 +305,22 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 	}
 }
 
+func TestValidateRunnerResponseAcceptsEmptyScopePull(t *testing.T) {
+	pull := func(scopeCount string) string {
+		return `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"pull","status_code":200,"duration_nanoseconds":1,"cursor_fingerprints":[],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":` + scopeCount + `,"limit":1},"pull_response_facts":{"change_count":0,"has_more":false,"rebuild_scope_count":1,"checksum_count":1,"scope_cursor_fingerprints":[],"scope_cursor_fingerprints_complete":true}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
+	}
+	result, err := validateRunnerResponse([]byte(pull("0")))
+	if err != nil {
+		t.Fatalf("empty-scope pull observation rejected: %v", err)
+	}
+	if err := validateTransportObservation(cloneTransportObservation(result.TransportObservations.Observations[0])); err != nil {
+		t.Fatalf("cloned empty-scope pull observation rejected: %v", err)
+	}
+	if _, err := validateRunnerResponse([]byte(pull("-1"))); err == nil {
+		t.Fatal("negative pull scope count passed validation")
+	}
+}
+
 func TestValidateRunnerResponseAcceptsPushMutationCount(t *testing.T) {
 	data := `{"schema_version":1,"outcome":"passed","result":{"process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[{"sequence":1,"operation_class":"push","status_code":200,"retryable":null,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mutation_count":2}}],"overflowed":false,"sequence_checkpoint":1}},"error_code":null}`
 	result, err := validateRunnerResponse([]byte(data))

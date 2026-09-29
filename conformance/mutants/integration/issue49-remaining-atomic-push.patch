@@ -1,23 +1,29 @@
 diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
 --- a/extensions/synchro-pg/src/push.rs
 +++ b/extensions/synchro-pg/src/push.rs
-@@ -407,7 +407,18 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
-                 continue;
-             }
+@@ -417,12 +417,19 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
+                     continue;
+                 }
  
--            let evaluation = evaluate_mutation(client, p_user_id, mutation, &evaluation_context);
-+            let evaluation = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-+                evaluate_mutation(client, p_user_id, mutation, &evaluation_context)
-+            })) {
-+                Ok(evaluation) => evaluation,
-+                Err(_) => {
-+                    return push_protocol_error(
-+                        ProtocolErrorCode::SyncIntegrityFailure,
-+                        "evaluating push mutation failed",
-+                        false,
-+                    )
-+                }
-+            };
-             if evaluation.new_write {
-                 accepted_write = true;
+-                evaluated.push(evaluate_mutation(
+-                    client,
+-                    p_user_id,
+-                    mutation,
+-                    &evaluation_context,
+-                ));
++                let evaluation = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                    evaluate_mutation(client, p_user_id, mutation, &evaluation_context)
++                })) {
++                    Ok(evaluation) => evaluation,
++                    Err(_) => {
++                        return push_protocol_error(
++                            ProtocolErrorCode::SyncIntegrityFailure,
++                            "evaluating push mutation failed",
++                            false,
++                        )
++                    }
++                };
++                evaluated.push(evaluation);
              }
+             evaluated
+         };

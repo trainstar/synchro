@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
+
+// walWorkerRestartObservation is longer than the 5 s WAL worker restart time.
+const walWorkerRestartObservation = 7 * time.Second
 
 // ExtensionUpdateResult contains the facts that an extension update observes.
 type ExtensionUpdateResult struct {
@@ -15,6 +19,7 @@ type ExtensionUpdateResult struct {
 	ReadyBeforeUpdate                 bool
 	ExtensionObjectsStateBeforeUpdate string
 	VersionAfterUpdate                string
+	WorkerStableBeforeUpdate          bool
 }
 
 // ExtensionCatalogObservation contains normalized extension object lines.
@@ -76,6 +81,7 @@ func (h *Harness) ApplyExtensionUpdate(ctx context.Context) (ExtensionUpdateResu
 		return ExtensionUpdateResult{}, errors.New("extension objects health before update is unavailable")
 	}
 	result.ExtensionObjectsStateBeforeUpdate = objectsState.String
+	result.WorkerStableBeforeUpdate = walWorkerStableBeforeUpdate(ctx, database, h.config.StartupTimeout)
 	if _, err := database.ExecContext(ctx, "ALTER EXTENSION synchro_pg UPDATE"); err != nil {
 		return ExtensionUpdateResult{}, fmt.Errorf("update synchro_pg extension failed: %w", err)
 	}
@@ -117,6 +123,43 @@ func (h *Harness) closeRequested() bool {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
 	return h.closeStarted
+}
+
+// walWorkerStableBeforeUpdate reports whether one WAL worker backend keeps
+// its process identity for longer than the worker restart time.
+func walWorkerStableBeforeUpdate(ctx context.Context, database *sql.DB, timeout time.Duration) bool {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var recordedPID int64
+	if err := waitUntil(deadline, func(attemptContext context.Context) (bool, error) {
+		count, pid, err := readWALWorkerBackend(attemptContext, database)
+		if err != nil {
+			return false, nil
+		}
+		recordedPID = pid
+		return count == 1, nil
+	}); err != nil {
+		return false
+	}
+	timer := time.NewTimer(walWorkerRestartObservation)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-timer.C:
+	}
+	count, pid, err := readWALWorkerBackend(ctx, database)
+	return err == nil && count == 1 && pid == recordedPID
+}
+
+func readWALWorkerBackend(ctx context.Context, database *sql.DB) (int64, int64, error) {
+	var count, pid int64
+	err := database.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(max(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE backend_type = 'synchro WAL consumer'
+		  AND datname = current_database()`).Scan(&count, &pid)
+	return count, pid, err
 }
 
 func readExtensionVersion(ctx context.Context, database *sql.DB) (string, error) {

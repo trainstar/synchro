@@ -61,13 +61,17 @@ commit-ordered projected state.
 
 ## Slot acknowledgement
 
-The logical replication slot may advance only to the `end_lsn` of the largest contiguous sequence of source transactions for which the transaction records, event records, versions, edges, and effects have all committed durably. `end_lsn` is an acknowledgement boundary, not a pull cursor position.
+The worker records a durable processed boundary in the progress row. Every source transaction whose commit record starts before that boundary is completely durable. The processed boundary is an acknowledgement boundary, not a pull cursor position.
 
-Acknowledgement must occur after the materialization transaction commits. It must not advance to an individual event, an arbitrary decoder batch maximum, a later noncontiguous transaction, or a source transaction whose durable work is incomplete. If processing stops after durable materialization but before slot acknowledgement, replay must recognize the durable replay identity and acknowledgement may resume from the contiguous prefix without duplicating effects.
+The logical replication slot and the durable acknowledgement may advance only to the processed boundary. After a materialized transaction, the boundary is the `end_lsn` of that transaction. When a poll decodes no source transaction, the worker makes an idle acknowledgement. Its boundary is the WAL flush position that the worker read before the decode. When the row limit stops the decode, its boundary is the end of the last decoded row.
 
-PostgreSQL does not make a slot advance durable when the advance returns. After a crash, the slot position can be behind the durable acknowledgement. At startup, the worker must advance the slot to the durable acknowledgement when the slot position is at or after the generation start and before that acknowledgement. Every transaction in that interval is durably materialized and acknowledged, so this advance skips no work and replays no work. The worker must reject a slot position before the generation start.
+Acknowledgement must occur after the materialization transaction commits. It must not advance to an individual event, an arbitrary decoder batch maximum, a later noncontiguous transaction, a source transaction whose durable work is incomplete, or a position after an unprocessed source transaction. The worker records the processed boundary, then advances the slot, then records the acknowledgement. If processing stops after durable materialization but before slot acknowledgement, replay must recognize the durable replay identity and acknowledgement may resume from the contiguous prefix without duplicating effects.
 
-A decode or application failure blocks acknowledgement at the prior contiguous boundary and blocks later source-transaction processing. The worker must not acknowledge around a failed transaction.
+PostgreSQL does not make a slot advance durable when the advance returns. After a crash, the slot position can be behind the durable acknowledgement. At startup, the worker must advance the slot to the durable acknowledgement when the slot position is at or after the generation start and before that acknowledgement. Every transaction in that interval is durably materialized and acknowledged, so this advance skips no work and replays no work. A crash can also occur after the slot advance and before the acknowledgement record. At startup, the worker adopts a slot position that is after the acknowledgement and at or before the processed boundary. Every source transaction before that position is completely durable. The worker must reject a slot position before the generation start. The worker must also reject a slot position after the processed boundary.
+
+A decode or application failure blocks acknowledgement at the prior contiguous boundary and blocks later source-transaction processing. The worker must not acknowledge around a failed transaction. An active poison also blocks the idle acknowledgement. During a projection bootstrap catch-up, the activation barrier blocks an idle acknowledgement after the barrier.
+
+The candidate slot of a projection bootstrap does not need an idle acknowledgement. The coordinator writes a transactional marker before it selects the barrier. Thus candidate output always reaches the barrier.
 
 ## Poison-event quarantine and recovery
 

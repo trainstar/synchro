@@ -397,17 +397,13 @@ binding failed and does not process any scope in that request.
 
 ## Normal scope movement
 
-The server owns scope assignment. Connect evaluates the assignment sources in
-ADR 004 and stores the resulting assigned scope set for the client. Pull and
-rebuild authorize requested scopes against that stored set. They do not
-evaluate grants or revocations again.
-
-Registration or removal of a shared scope changes the stored set of every
-active client in the same transaction. The next pull returns that delta. An
-explicit grant or revocation changes the stored set of a client only at that
-client's next connect. Until that connect, pull and rebuild continue to serve a
-revoked scope and do not serve a new grant. Scope movement has these exact
-outcomes:
+Scope assignment is evaluated by the server on every connect and pull. Connect
+and pull compute the assigned scope set with the same rule. Pull reconciles the
+set after request validation and before it builds `scope_updates`. A changed
+set advances `scope_set_version` by exactly one and appears in `scope_updates`
+of that response. A failed pull writes no assignment state. Rebuild does not
+reconcile assignment, and a rebuild of a scope that is no longer assigned is
+rejected. Scope movement has these exact outcomes:
 
 - A newly assigned scope appears in `scope_updates.add` with `cursor: null` and
   in `rebuild`. It has no incremental progress until its rebuild finality is

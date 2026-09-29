@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
 --- a/extensions/synchro-pg/src/push.rs
 +++ b/extensions/synchro-pg/src/push.rs
-@@ -1451,21 +1451,5 @@ fn evaluate_mutation(
+@@ -1435,21 +1435,6 @@ fn evaluate_mutation(
      let row_identity = logical_row_identity(table_reg, &pk_value);
      let existing = load_existing_record(client, &record_id, table_reg);
  
@@ -20,7 +20,6 @@ diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.
 -            },
 -        );
 -    }
--
-     match mutation.op {
-         Operation::Insert => {
-             if let Some(existing) = existing.as_ref() {
+     if existing
+         .as_ref()
+         .is_some_and(RowState::hidden_by_row_security)

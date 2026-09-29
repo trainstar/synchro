@@ -156,7 +156,7 @@ func soakValidWALRestartObservation() blackbox.WALReplayRestartObservation {
 		PriorProgress:                     blackbox.WALProgressObservation{SlotMatchesProgress: true},
 		WorkerExitedBeforeAcknowledgement: true, WorkerRestarted: true,
 		BeforeRestart: blackbox.WALPipelineObservation{Records: []blackbox.WALRecordObservation{before}},
-		AfterRestart:  blackbox.WALPipelineObservation{Records: []blackbox.WALRecordObservation{after}, WorkerRunning: true, ContiguousAcknowledged: true, AcknowledgementMatchesObservedEnd: true, SlotMatchesObservedEnd: true, AcknowledgedEndLSN: "0/2"},
+		AfterRestart:  blackbox.WALPipelineObservation{Records: []blackbox.WALRecordObservation{after}, WorkerRunning: true, ContiguousAcknowledged: true, SlotMatchesAcknowledgement: true, AcknowledgedEndLSN: "0/2", ProcessedEndLSN: "0/2"},
 		BeforeStages:  stages, AfterStages: stages,
 	}
 }

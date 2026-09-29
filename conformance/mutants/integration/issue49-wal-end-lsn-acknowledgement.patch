@@ -1,21 +1,7 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-index aeafc6d..7eb44b1 100644
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-@@ -2353,7 +2353,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
- /* </end connected objects> */
- 
- /* <begin connected objects> */
---- synchro-pg/src/bgworker.rs:773
-+-- synchro-pg/src/bgworker.rs:790
- -- synchro_pg::bgworker::synchro_retry_wal_poison
- CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
- STRICT
 diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
-index 5c2c9d9..fb5540f 100644
 --- a/extensions/synchro-pg/src/bgworker.rs
 +++ b/extensions/synchro-pg/src/bgworker.rs
-@@ -683,6 +683,23 @@ fn poll_worker_once(
+@@ -781,6 +781,23 @@
                  let failure_class = failure.class;
                  if let Err(error) = persist_poison(failure) {
                      log!("synchro WAL poison persistence failed for {failure_class}: {error}");
@@ -39,3 +25,15 @@ index 5c2c9d9..fb5540f 100644
                  }
                  blocked = true;
              }
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -2452,7 +2452,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/bgworker.rs:858
++-- synchro-pg/src/bgworker.rs:875
+ -- synchro_pg::bgworker::synchro_retry_wal_poison
+ CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
+ STRICT

@@ -13,10 +13,14 @@ use synchro_core::checksum::{
 use synchro_core::limits::MAX_REBUILD_LIMIT;
 
 use crate::client::protocol_error_response;
+use crate::materialize::lower_hex;
 use crate::pull::{
     canonical_table, canonicalize_synced_row_data, contract_pk_value, row_primary_key_json,
 };
-use crate::registry::{load_registry_generation_from_client, TableRegistration};
+use crate::registry::{
+    load_registry_generation_from_client, registered_function_fingerprint,
+    resolve_assignment_function, RegisteredFunction, TableRegistration,
+};
 use crate::seed_token::{self, SeedContinuationPayload, SeedPagePayload, SeedSnapshotBoundary};
 use crate::spi_helpers::{
     current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_positive_i64,
@@ -206,9 +210,8 @@ fn synchro_register_shared_scope(p_scope_id: &str, p_portable: default!(bool, "f
     });
 }
 
-/// Grants one scope to one user. A granted scope is the only assignment a user
-/// can gain and lose. Connect reconciles the change on the user's next connect,
-/// so this records the grant and nothing else.
+/// Grants one scope to one user. The user's next pull or connect reconciles
+/// the change, so this records the grant and nothing else.
 #[pg_extern]
 fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
     validate_granted_scope_identity(p_user_id, p_scope_id);
@@ -239,8 +242,8 @@ fn synchro_grant_user_scope(p_user_id: &str, p_scope_id: &str) {
     });
 }
 
-/// Revokes one granted scope from one user. Connect reconciles the change on
-/// the user's next connect and leaves the scope's own state for other users.
+/// Revokes one granted scope from one user. The user's next pull or connect
+/// reconciles the change and leaves the scope's own state for other users.
 #[pg_extern]
 fn synchro_revoke_user_scope(p_user_id: &str, p_scope_id: &str) {
     validate_revoked_scope_identity(p_user_id, p_scope_id);
@@ -282,6 +285,185 @@ fn validate_revoked_scope_identity(user_id: &str, scope_id: &str) {
             pgrx::error!("revoked private scope belongs to another user");
         }
     }
+}
+
+/// Registers the one assignment function and replaces an earlier
+/// registration. The function derives scopes from application data, so a data
+/// change takes effect at the user's next pull or connect.
+#[pg_extern]
+fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!(i32, "1000")) {
+    let actor = unsafe { pg_sys::GetOuterUserId() };
+    if !(1..=1000).contains(&p_max_scopes) {
+        pgrx::error!("assignment function max_scopes must be from 1 through 1000");
+    }
+
+    Spi::connect_mut(|client| {
+        let (function, fingerprint) = resolve_assignment_function(client, actor, p_function)?;
+        let definition_sha256 = lower_hex(&fingerprint);
+        client.update(
+            "INSERT INTO synchro.sync_assignment_function (
+                 singleton, function_oid, function_schema, function_name,
+                 max_scopes, definition_sha256
+             ) VALUES (true, $1::oid, $2, $3, $4, $5)
+             ON CONFLICT (singleton) DO UPDATE SET
+                 function_oid = EXCLUDED.function_oid,
+                 function_schema = EXCLUDED.function_schema,
+                 function_name = EXCLUDED.function_name,
+                 max_scopes = EXCLUDED.max_scopes,
+                 definition_sha256 = EXCLUDED.definition_sha256,
+                 registered_at = now()",
+            None,
+            &[
+                i64::from(function.oid).into(),
+                function.schema.as_str().into(),
+                function.name.as_str().into(),
+                p_max_scopes.into(),
+                definition_sha256.as_str().into(),
+            ],
+        )?;
+        Ok::<_, pgrx::spi::Error>(())
+    })
+    .unwrap_or_else(|error| pgrx::error!("registering assignment function: {}", error));
+}
+
+#[pg_extern]
+fn synchro_unregister_assignment_function() {
+    Spi::run("DELETE FROM synchro.sync_assignment_function WHERE singleton")
+        .unwrap_or_else(|error| pgrx::error!("unregistering assignment function: {}", error));
+}
+
+struct AssignmentRegistration {
+    function: RegisteredFunction,
+    max_scopes: i32,
+    definition_sha256: String,
+}
+
+fn load_assignment_registration(
+    client: &SpiClient<'_>,
+) -> Result<Option<AssignmentRegistration>, pgrx::spi::Error> {
+    let rows = client.select(
+        "SELECT function_oid::bigint AS function_oid, function_schema, function_name,
+                max_scopes, definition_sha256
+         FROM synchro.sync_assignment_function
+         WHERE singleton",
+        None,
+        &[],
+    )?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let function_oid = row
+        .get_by_name::<i64, &str>("function_oid")?
+        .and_then(|oid| u32::try_from(oid).ok())
+        .unwrap_or_else(|| pgrx::error!("registered assignment function OID is invalid"));
+    let text = |name: &str| -> Result<String, pgrx::spi::Error> {
+        Ok(row.get_by_name::<String, &str>(name)?.unwrap_or_else(|| {
+            pgrx::error!("registered assignment function metadata is incomplete")
+        }))
+    };
+    Ok(Some(AssignmentRegistration {
+        function: RegisteredFunction {
+            oid: function_oid,
+            schema: text("function_schema")?,
+            name: text("function_name")?,
+        },
+        max_scopes: row
+            .get_by_name::<i32, &str>("max_scopes")?
+            .unwrap_or_else(|| pgrx::error!("registered assignment function bound is missing")),
+        definition_sha256: text("definition_sha256")?,
+    }))
+}
+
+fn assignment_definition_is_current(
+    client: &SpiClient<'_>,
+    registration: &AssignmentRegistration,
+) -> Result<bool, pgrx::spi::Error> {
+    let exists = client
+        .select(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_proc WHERE oid = $1::oid
+             ) AS exists",
+            None,
+            &[i64::from(registration.function.oid).into()],
+        )?
+        .first()
+        .get_by_name::<bool, &str>("exists")?
+        .unwrap_or(false);
+    if !exists {
+        return Ok(false);
+    }
+    let definition = registered_function_fingerprint(client, registration.function.oid)?;
+    Ok(lower_hex(&definition) == registration.definition_sha256)
+}
+
+/// Returns false when a registered assignment function is missing or its
+/// definition differs from the registered definition. Health runs before
+/// `ALTER EXTENSION UPDATE`, and an older catalog without the registration
+/// table has no registration.
+pub(crate) fn assignment_function_is_current(
+    client: &SpiClient<'_>,
+) -> Result<bool, pgrx::spi::Error> {
+    let registry_exists = client
+        .select(
+            "SELECT pg_catalog.to_regclass('synchro.sync_assignment_function') IS NOT NULL",
+            None,
+            &[],
+        )?
+        .first()
+        .get_one::<bool>()?;
+    if registry_exists != Some(true) {
+        return Ok(true);
+    }
+    match load_assignment_registration(client)? {
+        None => Ok(true),
+        Some(registration) => assignment_definition_is_current(client, &registration),
+    }
+}
+
+/// Evaluates the registered assignment function for one canonical user. Any
+/// invalid registration or result raises an error, so the caller's connect or
+/// pull fails as a whole and changes no assignment state.
+pub(crate) fn load_assigned_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<String> {
+    let evaluate = || -> Result<Vec<String>, pgrx::spi::Error> {
+        let Some(registration) = load_assignment_registration(client)? else {
+            return Ok(Vec::new());
+        };
+        if !assignment_definition_is_current(client, &registration)? {
+            pgrx::error!("registered assignment function definition has drifted");
+        }
+        let maximum = usize::try_from(registration.max_scopes)
+            .unwrap_or_else(|_| pgrx::error!("registered assignment function bound is invalid"));
+        // One row past the bound is enough to detect an exceeded bound.
+        let query = format!(
+            "SELECT assigned.scope_id
+             FROM (
+                 SELECT DISTINCT result.scope_id
+                 FROM {}($1::text) AS result(scope_id)
+             ) AS assigned
+             LIMIT $2",
+            crate::bucketing::qualified_function_name(&registration.function),
+        );
+        let rows = crate::bucketing::evaluate_as_function_owner(&registration.function, || {
+            client.select(
+                &query,
+                None,
+                &[user_id.into(), (registration.max_scopes + 1).into()],
+            )
+        })?;
+        let mut scopes = Vec::new();
+        for row in rows {
+            if scopes.len() == maximum {
+                pgrx::error!("assignment function exceeded its registered scope bound");
+            }
+            let scope_id = row
+                .get_by_name::<String, &str>("scope_id")?
+                .unwrap_or_else(|| pgrx::error!("assignment function returned a null scope"));
+            validate_shared_scope_id(&scope_id);
+            scopes.push(scope_id);
+        }
+        Ok(scopes)
+    };
+    evaluate().unwrap_or_else(|error| pgrx::error!("evaluating assignment function: {}", error))
 }
 
 #[pg_extern]

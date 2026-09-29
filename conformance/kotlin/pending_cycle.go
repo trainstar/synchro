@@ -594,30 +594,57 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	// The start call returns while the managed loop can still finish its run.
 	// A rebuild after the push can receive capture_pending until the push is
 	// materialized, and it retries after its backoff. Inspect the client when
-	// the run has settled: ready, with every scope cursor installed.
+	// the run has settled.
+	snapshot, err := awaitKotlinPendingCycleReady(ctx, platform, client, state, observation.Sequence)
+	if err != nil {
+		return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
+	}
+	return snapshot, nil
+}
+
+// A start that resumes a future backoff deadline returns before its cycle runs.
+// The push is then observed while the rebuild and pull of the cycle still run.
+func awaitKotlinPendingCycleReady(ctx context.Context, platform *Platform, client Client, state *platformClient, pushSequence uint64) (Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 	for {
+		// Read transport first, so ready is sampled after that response arrived.
+		if _, err := state.session.Execute(ctx, Request{Operation: "transport-snapshot"}); err != nil {
+			return Result{}, fmt.Errorf("poll Kotlin Android pending-cycle transport: %w", err)
+		}
+		observations, err := state.session.ObservationsAfter(pushSequence)
+		if err != nil {
+			return Result{}, err
+		}
 		snapshot, err := platform.scenarioSnapshot(ctx, client)
 		if err != nil {
-			return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
+			return Result{}, err
+		}
+		if snapshot.Status == nil || *snapshot.Status == "error" || *snapshot.Status == "stopped" {
+			return Result{}, errors.New("Kotlin Android pending-cycle synchronization is unavailable")
 		}
 		scopes, err := androidCursorScopeStates(snapshot.ScopeStates)
 		if err != nil {
 			return Result{}, err
 		}
-		settled := snapshot.Status != nil && *snapshot.Status == "ready" && len(scopes) != 0
+		cursorsInstalled := len(scopes) != 0
 		for _, scope := range scopes {
-			settled = settled && scope.Cursor != nil
+			cursorsInstalled = cursorsInstalled && scope.Cursor != nil
 		}
-		if settled {
-			return snapshot, nil
+		// Ready also occurs between push and pull, so require the terminal pull
+		// and every scope cursor.
+		if *snapshot.Status == "ready" && snapshot.Failure == nil && cursorsInstalled && len(observations) > 0 {
+			last := observations[len(observations)-1]
+			if last.OperationClass == "pull" && last.StatusCode == 200 && last.Retryable == nil && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
+				if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 {
+					return Result{}, errors.New("Kotlin Android pending-cycle synchronization retained pending mutations")
+				}
+				return snapshot, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
-			status := ""
-			if snapshot.Status != nil {
-				status = *snapshot.Status
-			}
-			return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s run did not settle: status %q, scopes %d: %w", name, status, len(scopes), ctx.Err())
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle ready state: %w", ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

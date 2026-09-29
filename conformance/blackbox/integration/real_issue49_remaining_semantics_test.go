@@ -368,9 +368,9 @@ func issue49RemainingAtomicPush(t *testing.T) {
 	}
 	mutations := []map[string]any{
 		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8e11-000000000001", recordIDs[0], "atomic-written"),
-		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8e11-000000000002", recordIDs[1], "atomic-suppressed"),
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8e11-000000000002", recordIDs[1], "atomic-failed"),
 	}
-	suppressIssue49ItemInsert(t, ctx, harness, recordIDs[1])
+	failIssue49ItemInsert(t, ctx, harness, recordIDs[1])
 	payload := phase4PushPayload(client, "00000000-0000-4000-8e10-000000000000", mutations)
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", payload)
 	requireRealProtocolError(t, status, response, http.StatusInternalServerError, "sync_integrity_failure")
@@ -383,23 +383,23 @@ func issue49RemainingAtomicPush(t *testing.T) {
 	}
 }
 
-// suppressIssue49ItemInsert adds a BEFORE INSERT trigger that discards the
-// source insert of one cf_items row. A first push that inserts this row after
-// an earlier source write then fails before it commits.
-func suppressIssue49ItemInsert(t *testing.T, ctx context.Context, harness *blackbox.Harness, recordID string) {
+// failIssue49ItemInsert adds a BEFORE INSERT trigger that raises an error
+// outside the push outcome contract for one cf_items row. A first push that
+// inserts this row after an earlier source write then fails before it commits.
+func failIssue49ItemInsert(t *testing.T, ctx context.Context, harness *blackbox.Harness, recordID string) {
 	t.Helper()
 	admin := openIssue49Admin(t, ctx, harness)
-	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`CREATE FUNCTION public.cf_suppress_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(`CREATE FUNCTION public.cf_fail_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 	BEGIN
 		IF NEW.id = '%s'::uuid THEN
-			RETURN NULL;
+			RAISE EXCEPTION 'issue49 late source failure';
 		END IF;
 		RETURN NEW;
 	END
 	$$;
-	CREATE TRIGGER zz_suppress_item_insert BEFORE INSERT ON public.cf_items
-	FOR EACH ROW EXECUTE FUNCTION public.cf_suppress_item_insert()`, recordID)); err != nil {
-		t.Fatalf("create insert-suppressing BEFORE INSERT trigger: %v", err)
+	CREATE TRIGGER zz_fail_item_insert BEFORE INSERT ON public.cf_items
+	FOR EACH ROW EXECUTE FUNCTION public.cf_fail_item_insert()`, recordID)); err != nil {
+		t.Fatalf("create failing BEFORE INSERT trigger: %v", err)
 	}
 }
 

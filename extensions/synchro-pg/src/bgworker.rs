@@ -20,8 +20,8 @@ use crate::registry::{
 };
 use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 use crate::wal_decoder::{
-    ColumnInfo, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent, WalTransaction,
-    BEGIN_MSG, MAX_TRANSACTION_BYTES,
+    ColumnInfo, DecodeError, RelationKey, TupleImage, TupleValue, WalDecoder, WalEvent,
+    WalTransaction, BEGIN_MSG, MAX_TRANSACTION_BYTES,
 };
 
 const BATCH_SIZE: i32 = 500;
@@ -436,6 +436,77 @@ fn startup_retry_exhausted(started_at: std::time::Instant) -> bool {
     started_at.elapsed() >= STARTUP_RETRY_BUDGET
 }
 
+/// Waits until the installed extension objects match this library build.
+/// Returns false when the worker must exit.
+fn wait_for_current_extension_objects(worker_login: &str) -> bool {
+    let mut logged = false;
+    let mut failing_since: Option<std::time::Instant> = None;
+    loop {
+        match run_worker_transaction(|| {
+            Spi::connect_mut(|client| {
+                let (_, worker_role_oid) = validated_worker_identity(client, worker_login)?;
+                activate_worker_role_in_transaction(client, worker_role_oid)?;
+                installed_extension_objects_current(client)
+            })
+        }) {
+            Ok(true) => return true,
+            Ok(false) => {
+                failing_since = None;
+                if !logged {
+                    log!(
+                        "synchro WAL worker waits for ALTER EXTENSION synchro_pg UPDATE: installed extension objects do not match the library build"
+                    );
+                    logged = true;
+                }
+            }
+            Err(error) => {
+                let started_at = *failing_since.get_or_insert_with(std::time::Instant::now);
+                if startup_retry_exhausted(started_at) {
+                    log!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                    pgrx::error!(
+                        "synchro WAL worker preparation failed after {} seconds: {error}",
+                        STARTUP_RETRY_BUDGET.as_secs()
+                    );
+                }
+            }
+        }
+        if !BackgroundWorker::wait_latch(Some(STARTUP_RETRY_WAIT)) {
+            return false;
+        }
+    }
+}
+
+fn installed_extension_objects_current(client: &SpiClient<'_>) -> Result<bool, String> {
+    let readable = client
+        .select(
+            "SELECT COALESCE(pg_catalog.has_table_privilege(pg_catalog.to_regclass('synchro.sync_extension_build'), 'SELECT'), false) AS readable",
+            None,
+            &[],
+        )
+        .map_err(|_| "reading extension build privilege failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("readable")
+        .map_err(|_| "reading extension build privilege failed".to_string())?
+        .unwrap_or(false);
+    if !readable {
+        return Ok(false);
+    }
+    let installed = client
+        .select(
+            "SELECT installed_fingerprint FROM synchro.sync_extension_build WHERE singleton",
+            None,
+            &[],
+        )
+        .map_err(|_| "reading installed extension build failed".to_string())?
+        .first()
+        .get_by_name::<String, &str>("installed_fingerprint")
+        .map_err(|_| "reading installed extension build failed".to_string())?;
+    Ok(installed.as_deref() == Some(crate::build_fingerprint::library_fingerprint()))
+}
+
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
@@ -460,6 +531,9 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     };
     let database = database_name();
     BackgroundWorker::connect_worker_to_spi(Some(&database), Some(&worker_login));
+    if !wait_for_current_extension_objects(&worker_login) {
+        return;
+    }
 
     let preparation_started_at = std::time::Instant::now();
     let identity = 'prepare: loop {
@@ -603,6 +677,9 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
         if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(IDLE_POLL_MS))) {
             break;
         }
+        if BackgroundWorker::sighup_received() {
+            reload_worker_configuration();
+        }
         if let Err(error) = acquire_worker_poll_gate() {
             if !poll_gate_failure_logged {
                 log!("synchro WAL poll gate blocked: {error}");
@@ -626,6 +703,14 @@ pub extern "C-unwind" fn synchro_wal_worker_main(_arg: pg_sys::Datum) {
     }
 
     let _ = heartbeat("stopped", identity.worker_role_oid);
+}
+
+fn reload_worker_configuration() {
+    unsafe {
+        // SAFETY: The worker is outside a transaction, as PostgreSQL requires for a configuration reload.
+        std::ptr::addr_of_mut!(pg_sys::ConfigReloadPending).write_volatile(0);
+        pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+    }
 }
 
 fn poll_worker_once(
@@ -1433,6 +1518,7 @@ fn bind_replacement_slot(
                    AND materialized_commit_lsn IS NULL
                    AND materialized_end_lsn IS NULL
                    AND acknowledged_end_lsn IS NULL
+                   AND processed_end_lsn IS NULL
                  FOR UPDATE
              ), runtime AS (
                  UPDATE synchro.sync_runtime_state
@@ -1448,6 +1534,7 @@ fn bind_replacement_slot(
              )
              UPDATE synchro.sync_wal_progress progress
              SET generation_start_lsn = $5::pg_lsn,
+                 processed_end_lsn = $5::pg_lsn,
                  updated_at = now()
              FROM runtime
              WHERE progress.singleton
@@ -1550,7 +1637,7 @@ fn validate_bound_slot(
                         progress.generation_start_lsn
                     )::text AS expected_lsn,
                     progress.generation_start_lsn::text AS generation_start_lsn,
-                    progress.materialized_end_lsn::text AS materialized_end_lsn
+                    progress.processed_end_lsn::text AS processed_end_lsn
              FROM synchro.sync_runtime_state runtime
              JOIN synchro.sync_wal_progress progress
                ON progress.singleton
@@ -1584,11 +1671,12 @@ fn validate_bound_slot(
         .map_err(|_| "reading active replication slot boundary failed".to_string())?
         .and_then(|value| parse_lsn(&value))
         .ok_or_else(|| "active replication generation start is invalid".to_string())?;
-    let materialized_end = row
-        .get_by_name::<String, &str>("materialized_end_lsn")
-        .map_err(|_| "reading active materialized boundary failed".to_string())?
-        .and_then(|value| parse_lsn(&value));
-    match startup_slot_reconciliation(actual, generation_start, expected, materialized_end)? {
+    let processed_end = row
+        .get_by_name::<String, &str>("processed_end_lsn")
+        .map_err(|_| "active replication processed boundary is invalid".to_string())?
+        .and_then(|value| parse_lsn(&value))
+        .ok_or_else(|| "active replication processed boundary is invalid".to_string())?;
+    match startup_slot_reconciliation(actual, generation_start, expected, processed_end)? {
         SlotReconciliation::Current => {}
         SlotReconciliation::AdoptSlot(reconciled) => {
             let requested = format_lsn(reconciled);
@@ -1600,7 +1688,7 @@ fn validate_bound_slot(
                      WHERE singleton
                        AND stream_generation = $2
                        AND COALESCE(acknowledged_end_lsn, generation_start_lsn) = $3::pg_lsn
-                       AND materialized_end_lsn >= $1::pg_lsn",
+                       AND processed_end_lsn >= $1::pg_lsn",
                     None,
                     &[
                         requested.as_str().into(),
@@ -1639,13 +1727,12 @@ fn startup_slot_reconciliation(
     actual: u64,
     generation_start: u64,
     acknowledged: u64,
-    materialized_end: Option<u64>,
+    processed_end: u64,
 ) -> Result<SlotReconciliation, String> {
     if actual == acknowledged {
         return Ok(SlotReconciliation::Current);
     }
-    if actual > acknowledged && materialized_end.is_some_and(|materialized| actual <= materialized)
-    {
+    if acknowledged < actual && actual <= processed_end {
         return Ok(SlotReconciliation::AdoptSlot(actual));
     }
     if generation_start <= actual && actual < acknowledged {
@@ -2011,7 +2098,7 @@ fn poll_candidate_and_process(
     )
     .map_err(|error| match error {
         PeekDecodeError::Read => "peeking candidate WAL failed".to_string(),
-        PeekDecodeError::Decode { .. } => "decoding candidate WAL failed".to_string(),
+        PeekDecodeError::Decode { error, .. } => decode_failure_detail(&error),
         PeekDecodeError::Identity { .. } => {
             "candidate WAL transaction identity is invalid".to_string()
         }
@@ -3114,9 +3201,10 @@ fn poll_and_process(
                     lsn,
                     pending_final_lsn,
                     pending_commit_timestamp,
+                    error,
                 } => PollFailure::Poison(PoisonFailure {
                     class: "decode_failed",
-                    detail: "WAL decoder rejected a replication message".to_string(),
+                    detail: decode_failure_detail(&error),
                     commit_lsn: pending_final_lsn.unwrap_or(lsn),
                     relation_id: None,
                     commit_timestamp: pending_commit_timestamp,
@@ -3131,10 +3219,17 @@ fn poll_and_process(
                 }),
             },
         )?;
-    if batch.message_count == 0 {
+    if batch.transactions.is_empty() {
         record_oldest_unmaterialized_commit(decoder.pending_commit_timestamp(), worker_role_oid)
             .map_err(|_| PollFailure::Transient("lag_record"))?;
-        return Ok(0);
+        if decoder.pending_commit_timestamp().is_none() {
+            if let Some((target, row_limited)) =
+                idle_acknowledgement_target(batch.message_count, batch.upto_lsn, batch.last_row_lsn)
+            {
+                acknowledge_idle_progress(slot, target, row_limited, worker_role_oid)?;
+            }
+        }
+        return Ok(batch.message_count);
     }
 
     let message_count = batch.message_count;
@@ -3237,6 +3332,37 @@ fn validate_slot_boundary(slot: &str, worker_role_oid: pg_sys::Oid) -> Result<()
 struct PeekedTransactions {
     message_count: usize,
     transactions: Vec<WalTransaction>,
+    upto_lsn: u64,
+    last_row_lsn: Option<u64>,
+}
+
+/// Returns the idle acknowledgement target and whether the row limit stopped the peek.
+fn idle_acknowledgement_target(
+    message_count: usize,
+    upto_lsn: u64,
+    last_row_lsn: Option<u64>,
+) -> Option<(u64, bool)> {
+    if message_count < BATCH_SIZE as usize {
+        return Some((upto_lsn, false));
+    }
+    last_row_lsn.map(|lsn| (lsn, true))
+}
+
+fn decode_failure_detail(error: &DecodeError) -> String {
+    match error {
+        DecodeError::UnexpectedEof => {
+            "WAL decoder found a truncated replication message".to_string()
+        }
+        DecodeError::InvalidMessage(_) => {
+            "WAL decoder rejected a malformed replication message".to_string()
+        }
+        DecodeError::TransactionTooLarge {
+            max_bytes,
+            max_records,
+        } => format!(
+            "WAL source transaction exceeds the decode limit of {max_bytes} bytes or {max_records} payload records"
+        ),
+    }
 }
 
 enum PeekDecodeError {
@@ -3245,6 +3371,7 @@ enum PeekDecodeError {
         lsn: u64,
         pending_final_lsn: Option<u64>,
         pending_commit_timestamp: Option<i64>,
+        error: DecodeError,
     },
     Identity {
         transaction: Box<WalTransaction>,
@@ -3261,26 +3388,45 @@ fn peek_and_decode(
     let (staged_decoder, batch) = run_replication_transaction(worker_role_oid, move || {
         let mut staged_decoder = staged_decoder;
         Spi::connect(|client| {
+            let upto_lsn = client
+                .select(
+                    "SELECT pg_catalog.pg_current_wal_flush_lsn()::text AS flush_lsn",
+                    None,
+                    &[],
+                )
+                .map_err(|_| PeekDecodeError::Read)?
+                .first()
+                .get_by_name::<String, &str>("flush_lsn")
+                .map_err(|_| PeekDecodeError::Read)?
+                .and_then(|value| parse_lsn(&value))
+                .ok_or(PeekDecodeError::Read)?;
             let mut cursor = client
                 .try_open_cursor(
                     "SELECT lsn::text AS lsn, xid::text AS xid, data
                      FROM pg_catalog.pg_logical_slot_peek_binary_changes(
-                         $1, NULL, $2,
+                         $1, $4::pg_lsn, $2,
                          'proto_version', '1',
                          'publication_names', $3,
                          'messages', 'true'
                      )",
-                    &[slot.into(), BATCH_SIZE.into(), publication.into()],
+                    &[
+                        slot.into(),
+                        BATCH_SIZE.into(),
+                        publication.into(),
+                        format_lsn(upto_lsn).as_str().into(),
+                    ],
                 )
                 .map_err(|_| PeekDecodeError::Read)?;
             let mut batch = PeekedTransactions {
                 message_count: 0,
                 transactions: Vec::new(),
+                upto_lsn,
+                last_row_lsn: None,
             };
             let mut batch_bytes = 0usize;
 
             loop {
-                let (tuple_table, sql_xid, data_len, completed) = {
+                let (tuple_table, lsn, sql_xid, data_len, completed) = {
                     let rows = cursor.fetch(1).map_err(|_| PeekDecodeError::Read)?.first();
                     if rows.is_empty() {
                         return Ok((staged_decoder, batch));
@@ -3323,14 +3469,16 @@ fn peek_and_decode(
                     let completed =
                         staged_decoder
                             .feed(data)
-                            .map_err(|_| PeekDecodeError::Decode {
+                            .map_err(|error| PeekDecodeError::Decode {
                                 lsn,
                                 pending_final_lsn: failure_context.map(|context| context.0),
                                 pending_commit_timestamp: failure_context.map(|context| context.1),
+                                error,
                             })?;
-                    (tuple_table, sql_xid, data_len, completed)
+                    (tuple_table, lsn, sql_xid, data_len, completed)
                 };
                 batch.message_count += 1;
+                batch.last_row_lsn = Some(lsn);
                 batch_bytes = batch_bytes.saturating_add(data_len);
                 let complete_batch = !completed.is_empty() && batch_bytes >= MAX_PEEK_BATCH_BYTES;
                 for transaction in completed {
@@ -3654,6 +3802,7 @@ fn materialize_transaction(
              SET stream_generation = $1,
                  materialized_commit_lsn = $2::pg_lsn,
                  materialized_end_lsn = $3::pg_lsn,
+                 processed_end_lsn = $3::pg_lsn,
                  registry_generation = $4,
                  updated_at = now()
              WHERE singleton = true",
@@ -3807,8 +3956,7 @@ fn validate_progress_order(
     let rows = client
         .update(
             "SELECT stream_generation::text AS stream_generation,
-                    materialized_commit_lsn::text AS commit_lsn,
-                    materialized_end_lsn::text AS end_lsn
+                    processed_end_lsn::text AS processed_end_lsn
              FROM synchro.sync_wal_progress WHERE singleton = true FOR UPDATE",
             None,
             &[],
@@ -3819,12 +3967,8 @@ fn validate_progress_order(
         .get_by_name::<String, &str>("stream_generation")
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
         .unwrap_or_default();
-    let prior_commit = row
-        .get_by_name::<String, &str>("commit_lsn")
-        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
-        .and_then(|value| parse_lsn(&value));
-    let prior_end = row
-        .get_by_name::<String, &str>("end_lsn")
+    let processed_end = row
+        .get_by_name::<String, &str>("processed_end_lsn")
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
         .and_then(|value| parse_lsn(&value));
     let blocked_by_barrier = client
@@ -3853,8 +3997,7 @@ fn validate_progress_order(
         return Err(failure("activation_barrier", transaction.commit_lsn));
     }
     if progress_stream != stream_generation
-        || prior_commit.is_some_and(|value| value >= transaction.commit_lsn)
-        || prior_end.is_some_and(|value| value >= transaction.end_lsn)
+        || processed_end.is_some_and(|value| transaction.commit_lsn < value)
     {
         return Err(failure("validation_failed", transaction.commit_lsn));
     }
@@ -7381,7 +7524,12 @@ fn advance_slot(
     end_lsn: u64,
     worker_role_oid: pg_sys::Oid,
 ) -> Result<(), PoisonFailure> {
-    let requested = format_lsn(end_lsn);
+    acknowledge_slot(slot, end_lsn, worker_role_oid)
+        .map_err(|()| failure("transaction_commit_failed", commit_lsn))
+}
+
+fn acknowledge_slot(slot: &str, target: u64, worker_role_oid: pg_sys::Oid) -> Result<(), ()> {
+    let requested = format_lsn(target);
     run_replication_transaction(worker_role_oid, || {
         Spi::connect_mut(|client| {
             let actual = client
@@ -7391,34 +7539,139 @@ fn advance_slot(
                     None,
                     &[slot.into(), requested.as_str().into()],
                 )
-                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?
+                .map_err(|_| ())?
                 .first()
                 .get_by_name::<String, &str>("end_lsn")
-                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?
+                .map_err(|_| ())?
                 .and_then(|value| parse_lsn(&value))
-                .ok_or_else(|| failure("transaction_commit_failed", commit_lsn))?;
-            if actual != end_lsn {
-                return Err(failure("transaction_commit_failed", commit_lsn));
+                .ok_or(())?;
+            if actual != target {
+                return Err(());
             }
-            activate_worker_role_in_transaction(client, worker_role_oid)
-                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?;
+            activate_worker_role_in_transaction(client, worker_role_oid).map_err(|_| ())?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_wal_progress
                      SET acknowledged_end_lsn = $1::pg_lsn, updated_at = now()
-                     WHERE singleton = true
-                       AND materialized_end_lsn >= $1::pg_lsn",
+                     WHERE singleton
+                       AND processed_end_lsn >= $1::pg_lsn
+                       AND COALESCE(acknowledged_end_lsn, generation_start_lsn) <= $1::pg_lsn",
                     None,
                     &[requested.as_str().into()],
                 )
-                .map_err(|_| failure("transaction_commit_failed", commit_lsn))?
+                .map_err(|_| ())?
                 .len();
             if updated != 1 {
-                return Err(failure("transaction_commit_failed", commit_lsn));
+                return Err(());
             }
             Ok(())
         })
     })
+}
+
+fn record_idle_progress(
+    client: &mut SpiClient<'_>,
+    target: u64,
+    row_limited: bool,
+    heartbeat_limit_seconds: i32,
+    max_wal_lag_bytes: i32,
+) -> Result<bool, String> {
+    let updated = client
+        .update(
+            "UPDATE synchro.sync_wal_progress progress
+             SET processed_end_lsn = $1::pg_lsn, updated_at = now()
+             FROM synchro.sync_runtime_state runtime
+             WHERE progress.singleton
+               AND runtime.singleton
+               AND progress.stream_generation = runtime.stream_generation
+               AND progress.processed_end_lsn <= $1::pg_lsn
+               AND (
+                   progress.processed_end_lsn < $1::pg_lsn
+                   OR progress.processed_end_lsn
+                      > COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM synchro.sync_wal_poison poison
+                   WHERE poison.lifecycle = 'active'
+                     AND poison.stream_generation = progress.stream_generation
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM synchro.sync_stream_resets reset
+                   WHERE reset.operation_kind = 'projection_bootstrap'
+                     AND reset.lifecycle = 'catching_up'
+                     AND reset.source_stream_generation = progress.stream_generation
+                     AND reset.activation_barrier IS NOT NULL
+                     AND $1::pg_lsn > reset.activation_barrier
+               )
+               AND (
+                   $2::boolean
+                   OR progress.processed_end_lsn
+                      > COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+                   OR progress.updated_at <= now() - ($3::integer * interval '500 milliseconds')
+                   OR pg_catalog.pg_wal_lsn_diff(
+                          pg_catalog.pg_current_wal_lsn(),
+                          COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+                      ) * 2 >= $4::integer
+               )
+             RETURNING progress.processed_end_lsn::text AS processed_end_lsn",
+            None,
+            &[
+                format_lsn(target).as_str().into(),
+                row_limited.into(),
+                heartbeat_limit_seconds.into(),
+                max_wal_lag_bytes.into(),
+            ],
+        )
+        .map_err(|_| "recording idle WAL progress failed".to_string())?
+        .len();
+    Ok(updated == 1)
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+pub(super) fn record_idle_progress_for_test(
+    client: &mut SpiClient<'_>,
+    target: u64,
+    row_limited: bool,
+    heartbeat_limit_seconds: i32,
+    max_wal_lag_bytes: i32,
+) -> Result<bool, String> {
+    record_idle_progress(
+        client,
+        target,
+        row_limited,
+        heartbeat_limit_seconds,
+        max_wal_lag_bytes,
+    )
+}
+
+fn acknowledge_idle_progress(
+    slot: &str,
+    target: u64,
+    row_limited: bool,
+    worker_role_oid: pg_sys::Oid,
+) -> Result<(), PollFailure> {
+    let heartbeat_limit_seconds = crate::MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC.get();
+    let max_wal_lag_bytes = crate::MAX_WAL_LAG_BYTES_GUC.get();
+    let recorded = run_worker_transaction(|| {
+        Spi::connect_mut(|client| {
+            activate_worker_role_in_transaction(client, worker_role_oid)?;
+            record_idle_progress(
+                client,
+                target,
+                row_limited,
+                heartbeat_limit_seconds,
+                max_wal_lag_bytes,
+            )
+        })
+    })
+    .map_err(|_| PollFailure::Transient("idle_progress"))?;
+    if !recorded {
+        return Ok(());
+    }
+    acknowledge_slot(slot, target, worker_role_oid)
+        .map_err(|()| PollFailure::Transient("slot_advance"))
 }
 
 fn persist_poison(failure: PoisonFailure) -> Result<(), String> {
@@ -7477,15 +7730,23 @@ fn record_oldest_unmaterialized_commit(
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             client
                 .update(
-                    "UPDATE synchro.sync_wal_worker_state
-                     SET oldest_unmaterialized_commit_timestamp = CASE
-                             WHEN $1::bigint IS NULL THEN NULL
-                             ELSE '2000-01-01 00:00:00+00'::timestamptz
-                                  + ($1::bigint * interval '1 microsecond')
-                         END,
+                    "UPDATE synchro.sync_wal_worker_state w
+                     SET oldest_unmaterialized_commit_timestamp = observed.commit_timestamp,
                          wal_observed_at = now(),
                          updated_at = now()
-                     WHERE worker_id = $2",
+                     FROM (
+                         SELECT CASE
+                                    WHEN $1::bigint IS NULL THEN NULL
+                                    ELSE '2000-01-01 00:00:00+00'::timestamptz
+                                         + ($1::bigint * interval '1 microsecond')
+                                END AS commit_timestamp
+                     ) observed
+                     WHERE w.worker_id = $2
+                       AND (
+                           w.wal_observed_at IS NULL
+                           OR w.oldest_unmaterialized_commit_timestamp
+                              IS DISTINCT FROM observed.commit_timestamp
+                       )",
                     None,
                     &[commit_timestamp.into(), WORKER_ID.into()],
                 )
@@ -7636,6 +7897,7 @@ fn load_active_poison_state(
 }
 
 fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
+    let max_worker_heartbeat_age_seconds = crate::MAX_WORKER_HEARTBEAT_AGE_SECONDS_GUC.get();
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
             activate_worker_role_in_transaction(client, worker_role_oid)?;
@@ -7648,9 +7910,20 @@ fn heartbeat(state: &str, worker_role_oid: pg_sys::Oid) -> Result<(), String> {
                          materialized_end_lsn = p.materialized_end_lsn,
                          heartbeat_at = now(), updated_at = now()
                      FROM synchro.sync_wal_progress p
-                     WHERE w.worker_id = $2 AND p.singleton = true",
+                     WHERE w.worker_id = $2 AND p.singleton = true
+                       AND (
+                           w.state IS DISTINCT FROM $1
+                           OR w.registry_generation IS DISTINCT FROM p.registry_generation
+                           OR w.materialized_commit_lsn IS DISTINCT FROM p.materialized_commit_lsn
+                           OR w.materialized_end_lsn IS DISTINCT FROM p.materialized_end_lsn
+                           OR w.heartbeat_at <= now() - ($3::integer * interval '500 milliseconds')
+                       )",
                     None,
-                    &[state.into(), WORKER_ID.into()],
+                    &[
+                        state.into(),
+                        WORKER_ID.into(),
+                        max_worker_heartbeat_age_seconds.into(),
+                    ],
                 )
                 .map_err(|_| "updating worker heartbeat failed".to_string())?;
             Ok(())
@@ -7808,30 +8081,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decode_failure_details_are_fixed_and_distinct() {
+        let details = [
+            decode_failure_detail(&DecodeError::UnexpectedEof),
+            decode_failure_detail(&DecodeError::InvalidMessage(
+                "synchro-decoded-value-marker".to_string(),
+            )),
+            decode_failure_detail(&DecodeError::TransactionTooLarge {
+                max_bytes: 16_777_216,
+                max_records: 10_000,
+            }),
+        ];
+
+        assert_eq!(
+            details[0],
+            "WAL decoder found a truncated replication message"
+        );
+        assert_eq!(
+            details[1],
+            "WAL decoder rejected a malformed replication message"
+        );
+        assert_eq!(
+            details[2],
+            "WAL source transaction exceeds the decode limit of 16777216 bytes or 10000 payload records"
+        );
+        assert_eq!(details.iter().collect::<HashSet<_>>().len(), 3);
+        assert!(!details[1].contains("synchro-decoded-value-marker"));
+    }
+
+    #[test]
     fn startup_slot_reconciliation_covers_every_boundary() {
         assert_eq!(
-            startup_slot_reconciliation(20, 10, 20, Some(30)),
+            startup_slot_reconciliation(20, 10, 20, 30),
             Ok(SlotReconciliation::Current)
         );
         assert_eq!(
-            startup_slot_reconciliation(25, 10, 20, Some(30)),
+            startup_slot_reconciliation(25, 10, 20, 30),
             Ok(SlotReconciliation::AdoptSlot(25))
         );
         assert_eq!(
-            startup_slot_reconciliation(30, 10, 20, Some(30)),
+            startup_slot_reconciliation(30, 10, 20, 30),
             Ok(SlotReconciliation::AdoptSlot(30))
         );
-        assert!(startup_slot_reconciliation(25, 10, 20, None).is_err());
-        assert!(startup_slot_reconciliation(40, 10, 20, Some(30)).is_err());
+        assert!(startup_slot_reconciliation(40, 10, 20, 30).is_err());
+        assert!(startup_slot_reconciliation(25, 10, 20, 20).is_err());
         assert_eq!(
-            startup_slot_reconciliation(15, 10, 20, Some(30)),
+            startup_slot_reconciliation(15, 10, 20, 30),
             Ok(SlotReconciliation::RestoreSlot(20))
         );
         assert_eq!(
-            startup_slot_reconciliation(10, 10, 20, Some(30)),
+            startup_slot_reconciliation(10, 10, 20, 30),
             Ok(SlotReconciliation::RestoreSlot(20))
         );
-        assert!(startup_slot_reconciliation(5, 10, 20, Some(30)).is_err());
+        assert!(startup_slot_reconciliation(5, 10, 20, 30).is_err());
+    }
+
+    #[test]
+    fn idle_acknowledgement_target_uses_the_decoded_bound() {
+        let limit = BATCH_SIZE as usize;
+        assert_eq!(
+            idle_acknowledgement_target(0, 100, None),
+            Some((100, false))
+        );
+        assert_eq!(
+            idle_acknowledgement_target(limit - 1, 100, Some(90)),
+            Some((100, false))
+        );
+        assert_eq!(
+            idle_acknowledgement_target(limit, 100, Some(90)),
+            Some((90, true))
+        );
+        assert_eq!(idle_acknowledgement_target(limit, 100, None), None);
+        assert_eq!(
+            idle_acknowledgement_target(limit + 1, 100, Some(95)),
+            Some((95, true))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/requirements-v2.schema.json",
   "schema_version": 2,
-  "release": "0.3.3",
+  "release": "0.4.0",
   "requirements": [
     {
       "id": "SYNC-TIME-001",
@@ -25,7 +25,7 @@
       "id": "SYNC-VERSION-001",
       "title": "Opaque server versions",
       "category": "protocol",
-      "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it.",
+      "statement": "Clients preserve server_version as an opaque optimistic-precondition and reconciliation token without sorting, incrementing, or parsing it, and use its bound of 1 through 64 printable ASCII octets only to compute a worst-case request size.",
       "required_proof_types": ["native-e2e"],
       "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#opaque-server-version-invariant" }]
@@ -412,7 +412,7 @@
       "id": "SYNC-WAL-005",
       "title": "Contiguous WAL acknowledgement",
       "category": "change-capture",
-      "statement": "The logical slot advances only after materialization commits and only to the end LSN of the largest contiguous prefix of completely durable source transactions, never past an incomplete or noncontiguous transaction.",
+      "statement": "The logical slot advances only after materialization commits and only to a durable processed boundary before which every source transaction is completely durable, never past an incomplete, noncontiguous, or unprocessed source transaction.",
       "required_proof_types": ["server-black-box", "fault-injection"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#contiguous-wal-acknowledgement" }]
@@ -448,7 +448,7 @@
       "id": "SYNC-REGISTRY-002",
       "title": "Registered key and replica identity",
       "category": "schema",
-      "statement": "An active registered relation has exactly one non-null, immediate (not deferrable) declared primary-key column of a built-in key type with one text form in every session (portable type string, int, or int64) and REPLICA IDENTITY DEFAULT backed by that key; nonconforming registration or later drift cannot remain active, and any key-value update, including a key change by a later BEFORE UPDATE trigger or a partition row move, fails with SQLSTATE 23514 before fence or row effects.",
+      "statement": "An active registered relation has exactly one non-null, immediate (not deferrable) declared primary-key column of a built-in key type with one text form in every session (portable type string, int, or int64) and REPLICA IDENTITY DEFAULT backed by that key; a registration with push policy enabled cannot use a database-generated key; nonconforming registration or later drift cannot remain active, and any key-value update, including a key change by a later BEFORE UPDATE trigger or a partition row move, fails with SQLSTATE 23514 before fence or row effects.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-key-and-replica-identity" }]
@@ -1001,6 +1001,60 @@
       "required_proof_types": ["server-black-box", "native-e2e"],
       "applicable_components": ["postgresql-server", "swift-client", "kotlin-client", "react-native-client"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#schema-cursor-continuity" }]
+    },
+    {
+      "id": "SYNC-SCOPE-007",
+      "title": "Pull reconciles scope assignment",
+      "category": "scope",
+      "statement": "Pull computes the authoritative scope set with the connect rule after request validation, reports a changed set in the same response with scope_set_version advanced by exactly one, and writes no assignment state for an unchanged set or a failed pull.",
+      "required_proof_types": ["server-black-box"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#pull-time-scope-reconciliation" }]
+    },
+    {
+      "id": "SYNC-SCOPE-008",
+      "title": "Assignment function contract",
+      "category": "scope",
+      "statement": "At most one registered assignment function contributes scopes, registration rejects every rule violation, and an evaluation with a changed definition, an invalid result, or more results than max_scopes fails the connect or pull with sync_integrity_failure and no assignment change.",
+      "required_proof_types": ["server-black-box"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-scope-assignment-function" }]
+    },
+    {
+      "id": "SYNC-SCOPE-009",
+      "title": "Empty scope set pull",
+      "category": "scope",
+      "statement": "A normal native sync cycle sends pull with an empty scopes map when the client knows no scope, and a scope that the pull response adds is rebuilt and materialized in that cycle without a reconnect.",
+      "required_proof_types": ["native-e2e"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#empty-scope-set-pull" }]
+    },
+    {
+      "id": "SYNC-ATOMICITY-002",
+      "title": "Atomic mutation group",
+      "category": "data-correctness",
+      "statement": "An atomic push commits every mutation or none, and a failed group returns the failing outcome from committed state with atomic_batch_rejected for every other mutation and no accepted outcome.",
+      "required_proof_types": ["server-black-box", "fault-injection"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-mutation-group" }]
+    },
+    {
+      "id": "SYNC-ATOMICITY-003",
+      "title": "Push unit constraint boundary",
+      "category": "data-correctness",
+      "statement": "Each push unit starts with every deferrable constraint deferred and checks every deferrable constraint before it ends, a failed unit-end check rolls back only that unit with validation_failed, and a call with a pending deferrable trigger event in the calling transaction fails before the batch claim without firing that event.",
+      "required_proof_types": ["server-black-box", "fault-injection"],
+      "applicable_components": ["postgresql-server"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#push-unit-constraint-boundary" }]
+    },
+    {
+      "id": "SYNC-QUEUE-005",
+      "title": "Atomic group capture and selection",
+      "category": "local-metadata",
+      "statement": "Every mutation captured in one atomic write transaction carries one group identity, an invalid group rolls back at local commit, and a group is sent only as one complete atomic batch with no other mutation.",
+      "required_proof_types": ["native-e2e"],
+      "applicable_components": ["swift-client", "kotlin-client", "react-native-client"],
+      "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#atomic-group-capture-and-selection" }]
     }
   ]
 }

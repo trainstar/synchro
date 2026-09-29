@@ -832,7 +832,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 	o.Retryable = retryable
 	o.DurationNanoseconds = *raw.DurationNanoseconds
 	if raw.CursorFingerprints != nil {
-		o.CursorFingerprints = append([]string(nil), (*raw.CursorFingerprints)...)
+		o.CursorFingerprints = cloneFingerprintSet(*raw.CursorFingerprints)
 	}
 	o.CursorFingerprintsComplete = clonePointer(raw.CursorFingerprintsComplete)
 	o.RequestFacts = raw.RequestFacts
@@ -997,7 +997,7 @@ func validateTransportRequestAndResponseFacts(observation TransportObservation) 
 			return errors.New("Kotlin connect request facts are invalid")
 		}
 	case "pull":
-		if !validTransportRequestCommon(facts) || facts.ProtocolVersion != nil || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion < 0 || facts.ScopeCount == nil || *facts.ScopeCount <= 0 || facts.Limit == nil || *facts.Limit <= 0 || facts.ScopeFingerprint != nil || facts.RebuildIDFingerprint != nil || facts.CursorFingerprint != nil || facts.CursorPresent != nil || facts.MutationCount != nil {
+		if !validTransportRequestCommon(facts) || facts.ProtocolVersion != nil || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion < 0 || facts.ScopeCount == nil || *facts.ScopeCount < 0 || facts.Limit == nil || *facts.Limit <= 0 || facts.ScopeFingerprint != nil || facts.RebuildIDFingerprint != nil || facts.CursorFingerprint != nil || facts.CursorPresent != nil || facts.MutationCount != nil {
 			return errors.New("Kotlin pull request facts are invalid")
 		}
 	case "push":
@@ -1133,7 +1133,7 @@ func cloneObservation(value TransportObservation) TransportObservation {
 	copy := value
 	copy.ErrorCode = clonePointer(value.ErrorCode)
 	copy.Retryable = clonePointer(value.Retryable)
-	copy.CursorFingerprints = append([]string(nil), value.CursorFingerprints...)
+	copy.CursorFingerprints = cloneFingerprintSet(value.CursorFingerprints)
 	copy.CursorFingerprintsComplete = clonePointer(value.CursorFingerprintsComplete)
 	if value.RebuildResponseFacts != nil {
 		response := *value.RebuildResponseFacts
@@ -1161,6 +1161,15 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		copy.RequestFacts = &facts
 	}
 	return copy
+}
+
+// cloneFingerprintSet keeps an empty set distinct from an absent set. A pull
+// with no known scope reports an empty set, and an absent set is incomplete.
+func cloneFingerprintSet(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 func clonePointer[T any](value *T) *T {

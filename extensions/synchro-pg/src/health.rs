@@ -206,6 +206,36 @@ SELECT
                  AND membership_function.proname::text = registry.membership_function_name::text
                  AND membership_function.prokind = 'f'
            ))
+           OR (registry.registration_kind = 'synced'
+               AND registry.push_policy = 'enabled'
+               AND EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_attribute key_attribute
+                   WHERE key_attribute.attrelid = registry.physical_relation_oid
+                     AND key_attribute.attname::text = registry.pk_column
+                     AND key_attribute.attnum > 0
+                     AND NOT key_attribute.attisdropped
+                     AND (
+                         key_attribute.attidentity = 'a'
+                         OR key_attribute.attgenerated <> ''
+                     )
+               ))
+           OR EXISTS (
+               SELECT 1
+               FROM synchro.sync_registry_fields field
+               JOIN pg_catalog.pg_attribute field_attribute
+                 ON field_attribute.attrelid = registry.physical_relation_oid
+                AND field_attribute.attname = field.physical_column
+                AND field_attribute.attnum > 0
+                AND NOT field_attribute.attisdropped
+               WHERE field.registry_generation = registry.registry_generation
+                 AND field.relation_id = registry.relation_id
+                 AND field.writable
+                 AND (
+                     field_attribute.attidentity = 'a'
+                     OR field_attribute.attgenerated <> ''
+                 )
+           )
     ) AS relation_identity_valid,
     (
         EXISTS (
@@ -429,37 +459,40 @@ SELECT
         JOIN progress
           ON progress.stream_generation = runtime.stream_generation
          AND progress.registry_generation = active_registry.generation
-        WHERE (
-            progress.generation_start_lsn IS NOT NULL
-            AND progress.materialized_commit_lsn IS NULL
-            AND progress.materialized_end_lsn IS NULL
-            AND progress.acknowledged_end_lsn IS NULL
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-            )
-        ) OR (
-             progress.generation_start_lsn IS NOT NULL
-             AND progress.materialized_commit_lsn IS NOT NULL
-            AND progress.materialized_end_lsn IS NOT NULL
-            AND progress.acknowledged_end_lsn = progress.materialized_end_lsn
-            AND EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND transaction.commit_lsn = progress.materialized_commit_lsn
-                  AND transaction.end_lsn = progress.materialized_end_lsn
-                  AND transaction.registry_generation <= progress.registry_generation
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND (
-                      transaction.commit_lsn > progress.materialized_commit_lsn
-                      OR transaction.end_lsn > progress.materialized_end_lsn
-                  )
+        WHERE progress.generation_start_lsn IS NOT NULL
+        AND progress.processed_end_lsn IS NOT NULL
+        AND COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+            = progress.processed_end_lsn
+        AND (
+            (
+                progress.materialized_commit_lsn IS NULL
+                AND progress.materialized_end_lsn IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                )
+            ) OR (
+                progress.materialized_commit_lsn IS NOT NULL
+                AND progress.materialized_end_lsn IS NOT NULL
+                AND progress.materialized_end_lsn <= progress.processed_end_lsn
+                AND EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND transaction.commit_lsn = progress.materialized_commit_lsn
+                      AND transaction.end_lsn = progress.materialized_end_lsn
+                      AND transaction.registry_generation <= progress.registry_generation
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND (
+                          transaction.commit_lsn > progress.materialized_commit_lsn
+                          OR transaction.end_lsn > progress.materialized_end_lsn
+                      )
+                )
             )
         )
     ) AS progress_valid,
@@ -677,6 +710,7 @@ impl Default for ReadinessStatus {
             "heartbeat",
             "wal_byte_lag",
             "wal_time_lag",
+            "assignment_function",
         ] {
             checks.insert(name, HealthCheck::unknown("health_query_unavailable"));
         }
@@ -938,6 +972,9 @@ pub(crate) fn load_readiness_status_with_configuration(
     if configuration.max_wal_lag_seconds <= 0 {
         status.set("wal_time_lag", HealthCheck::failed("invalid_limit"));
     }
+    if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+        return status;
+    }
 
     let Some(worker_login) = configuration.worker_login.as_deref() else {
         return status;
@@ -949,9 +986,11 @@ pub(crate) fn load_readiness_status_with_configuration(
             &configuration,
             login.worker_login_oid.unwrap_or_default(),
         )?;
-        Ok::<_, String>((login, raw))
+        let assignment_current = crate::portable_seed::assignment_function_is_current(client)
+            .map_err(|_| "loading assignment function state failed".to_string())?;
+        Ok::<_, String>((login, raw, assignment_current))
     });
-    let Ok((login, raw)) = loaded else {
+    let Ok((login, raw, assignment_current)) = loaded else {
         return status;
     };
 
@@ -1003,6 +1042,10 @@ pub(crate) fn load_readiness_status_with_configuration(
         known_check(raw.replication_slot_valid, "replication_slot_invalid"),
     );
     status.set("poison", known_check(raw.poison_clear, "blocking_poison"));
+    status.set(
+        "assignment_function",
+        known_check(assignment_current, "assignment_function_drifted"),
+    );
     status.set(
         "stream_reset",
         known_check(raw.stream_reset_clear, "stream_reset_incomplete"),

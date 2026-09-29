@@ -65,6 +65,24 @@ public final class SynchroClient: @unchecked Sendable {
         try database.applicationWriteTransaction(block)
     }
 
+    /// Runs one write transaction whose synced mutations the server applies all together or not at all.
+    ///
+    /// The transaction opens through the same path as `writeTransaction`, so nesting
+    /// behavior is identical. Before commit, the client validates the group. An
+    /// invalid group throws `SynchroError.atomicGroupInvalid` and rolls back.
+    ///
+    /// A failed group uses the ordinary outcome paths and has no revert path. After a
+    /// failed group with a conflict, local state holds the server row for the
+    /// conflicting member and local values for every other member.
+    public func atomicWriteTransaction<T>(_ block: (ApplicationTransaction) throws -> T) throws -> T {
+        try database.applicationAtomicWriteTransaction(
+            validate: { db, groupID in
+                try pushProcessor.validateAtomicGroup(db, groupID: groupID, clientID: config.clientID)
+            },
+            block
+        )
+    }
+
     /// Runs one write transaction whose capture retains only the named
     /// authored columns of the named table. A runtime support column the
     /// statement also writes stays out of the captured payload.

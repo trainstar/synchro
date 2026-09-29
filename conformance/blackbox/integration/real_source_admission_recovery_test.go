@@ -111,7 +111,7 @@ func TestRealSourceAdmissionRecovery(t *testing.T) {
 		t.Fatalf("rejected transaction has %d durable WAL transactions: %v", walTransactions, err)
 	}
 	blocked := observeIssue49BlockedAcknowledgement(t, ctx, admin, rejected.commitLSN)
-	if !blocked.ProgressBeforePoison || !blocked.SlotBeforePoison || !blocked.SlotMatchesProgress || blocked.ProgressEndLSN == prefix {
+	if !blocked.ProgressAtOrBeforePoison || !blocked.SlotAtOrBeforePoison || !blocked.SlotMatchesProgress || blocked.ProgressEndLSN == prefix {
 		t.Fatalf("acknowledgement did not stop after the accepted transaction: prefix=%s %#v", prefix, blocked)
 	}
 	if status, body := getIssue49Readiness(t, ctx, harness.AdapterURL()); status != http.StatusServiceUnavailable || !bytes.Equal(body, []byte(`{"ready":false}`)) {

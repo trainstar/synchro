@@ -218,13 +218,14 @@ enum SQLiteSchema {
                     (mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type,
                      operation, authored_schema_version, authored_schema_hash, base_version,
                      client_version, lifecycle_state, source_kind, dependency_mutation_id,
-                     created_at, updated_at)
+                     atomic_group_id, created_at, updated_at)
                 SELECT \(uuidExpression), \(sqlLiteral(safeTableID)), \(sqlLiteral(safeName)),
                        CAST(\(recordReference) AS TEXT), \(sqlLiteral(safePKFieldID)), \(sqlLiteral(safePKLogicalType)),
                        \(operationSQL),
                        CAST((SELECT value FROM _synchro_meta WHERE key = 'schema_version') AS INTEGER),
                        (SELECT value FROM _synchro_meta WHERE key = 'schema_hash'),
-                       \(baseVersion), \(tsNow), 'unsealed', 'application', \(dependency), \(tsNow), \(tsNow)
+                       \(baseVersion), \(tsNow), 'unsealed', 'application', \(dependency),
+                       (SELECT value FROM _synchro_meta WHERE key = 'atomic_group_id'), \(tsNow), \(tsNow)
                 WHERE \(captureCondition);
                 UPDATE _synchro_pending_changes
                 SET capture_uuid = mutation_id

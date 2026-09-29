@@ -31,6 +31,7 @@ data class PendingChange(
     val sealedBatchID: String?,
     val sealedOrdinal: Int?,
     val localRevision: Long = localOrder,
+    val atomicGroupID: String? = null,
 )
 
 internal data class LedgerValue(
@@ -322,6 +323,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
                     normalizedMutationID = if (cursor.isNull(15)) null else cursor.getString(15),
                     sealedBatchID = if (cursor.isNull(16)) null else cursor.getString(16),
                     sealedOrdinal = if (cursor.isNull(17)) null else cursor.getInt(17),
+                    atomicGroupID = if (cursor.isNull(18)) null else cursor.getString(18),
                 )
             }
         }
@@ -351,7 +353,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
             mutation_id, local_order, table_id, record_id, table_name, pk_field_id, pk_logical_type,
             operation, authored_schema_version, authored_schema_hash, base_version, client_version,
             lifecycle_state, source_kind, depends_on_mutation_id, normalized_mutation_id,
-            sealed_batch_id, sealed_ordinal
+            sealed_batch_id, sealed_ordinal, atomic_group_id
         """
     }
 }

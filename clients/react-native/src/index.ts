@@ -75,6 +75,8 @@ export {
   AlreadyStartedError,
   NotStartedError,
   TransactionTimeoutError,
+  AtomicGroupInvalidError,
+  ATOMIC_GROUP_INVALID_REASONS,
   NATIVE_ERROR_CODES,
   mapNativeError,
 } from './errors';
@@ -82,5 +84,6 @@ export {
 export type {
   NativeErrorCode,
   SchemaUnsupportedReason,
+  AtomicGroupInvalidReason,
   PushRejectedMutation,
 } from './errors';

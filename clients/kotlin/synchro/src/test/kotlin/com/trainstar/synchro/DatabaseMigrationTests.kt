@@ -424,7 +424,8 @@ class DatabaseMigrationTests {
                     table_id TEXT NOT NULL,
                     record_id TEXT NOT NULL,
                     pk_field_id TEXT NOT NULL,
-                    pk_logical_type TEXT NOT NULL
+                    pk_logical_type TEXT NOT NULL,
+                    normalized_mutation_id TEXT
                 )
                 """.trimIndent(),
             )
@@ -461,6 +462,114 @@ class DatabaseMigrationTests {
                 arrayOf("items", "id", "string", "record-1"),
             )?.get("mutation_id"),
         )
+    }
+
+    @Test
+    fun versionFourteenUpgradeAddsTheAtomicGroupColumnAndRestoresCaptureTriggers() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val path = context.getDatabasePath("synchro_atomic_group_${UUID.randomUUID()}.sqlite").absolutePath
+        val table = SchemaTable(
+            tableName = "orders",
+            updatedAtColumn = "updated_at",
+            deletedAtColumn = "deleted_at",
+            primaryKey = listOf("id"),
+            columns = listOf(
+                SchemaColumn("id", logicalType = "string", nullable = false, isPrimaryKey = true),
+                SchemaColumn("title", logicalType = "string"),
+                SchemaColumn("updated_at", logicalType = "datetime", nullable = false),
+                SchemaColumn("deleted_at", logicalType = "datetime"),
+            ),
+        ).localSchema
+        SynchroDatabase.open(context, path).let { current ->
+            installTestSchema(current, 1, "1".repeat(64), listOf(table))
+            current.execute(
+                "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf("o1", "before upgrade", "2026-01-01T00:00:00.000000Z"),
+            )
+            current.close()
+        }
+        val legacyColumns = mutableListOf<String>()
+        lateinit var rowsBefore: List<List<String?>>
+        lateinit var valuesBefore: List<List<String?>>
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { legacy ->
+            fun strings(sql: String): List<List<String?>> = legacy.rawQuery(sql, null).use { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) add((0 until cursor.columnCount).map(cursor::getString))
+                }
+            }
+            strings("PRAGMA table_info(_synchro_pending_changes)").map { it[1]!! }
+                .filterTo(legacyColumns) { it != "atomic_group_id" }
+            val columns = legacyColumns.joinToString()
+            val tableSQL = strings("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '_synchro_pending_changes'")
+                .single().single()!!
+            val legacyTableSQL = tableSQL.replace(Regex("""\s*atomic_group_id TEXT,"""), "")
+            val dependents = strings(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = '_synchro_pending_changes' AND type IN ('index', 'trigger') " +
+                    "AND sql IS NOT NULL AND name <> 'idx_synchro_pending_normalized'",
+            ).map { it.single()!! }
+            val captureTriggers = strings("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name GLOB '_synchro_cdc_*'")
+            val legacyTriggers = captureTriggers.map { (_, sql) ->
+                sql!!.replace(Regex("""\(SELECT value FROM _synchro_meta WHERE key = 'atomic_group_id'\),\s*"""), "")
+                    .replace(", atomic_group_id", "")
+            }
+            assertTrue(legacyTableSQL != tableSQL)
+            assertTrue(captureTriggers.any { it[1]!!.contains("atomic_group_id") })
+            assertTrue(legacyTriggers.none { it.contains("atomic_group_id") })
+            rowsBefore = strings("SELECT $columns FROM _synchro_pending_changes ORDER BY local_order")
+            valuesBefore = strings("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id")
+
+            captureTriggers.forEach { (name, _) -> legacy.execSQL("DROP TRIGGER \"$name\"") }
+            legacy.execSQL("CREATE TABLE _synchro_pending_v14 AS SELECT $columns FROM _synchro_pending_changes")
+            legacy.execSQL("DROP TABLE _synchro_pending_changes")
+            legacy.execSQL(legacyTableSQL)
+            legacy.execSQL("INSERT INTO _synchro_pending_changes ($columns) SELECT $columns FROM _synchro_pending_v14")
+            legacy.execSQL("DROP TABLE _synchro_pending_v14")
+            dependents.forEach(legacy::execSQL)
+            legacyTriggers.forEach(legacy::execSQL)
+            legacy.execSQL("PRAGMA user_version = 14")
+        }
+
+        val database = databases.open(context, path)
+        val columns = legacyColumns.joinToString()
+        assertEquals(
+            SynchroDatabase.DATABASE_VERSION.toLong(),
+            database.queryOne("PRAGMA user_version")?.get("user_version"),
+        )
+        fun strings(sql: String): List<List<String?>> =
+            database.query(sql).map { row -> row.values.map { it?.toString() } }
+        assertEquals(rowsBefore, strings("SELECT $columns FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(valuesBefore, strings("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+        assertEquals(listOf(listOf<String?>(null)), strings("SELECT atomic_group_id FROM _synchro_pending_changes"))
+        assertEquals(
+            1,
+            database.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_synchro_pending_normalized'").size,
+        )
+        val installed = database.query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name GLOB '_synchro_cdc_*'")
+            .associate { it.getValue("name") as String to SQLiteSchema.canonicalDDL(it.getValue("sql") as String) }
+        assertEquals(SQLiteSchema.expectedCDCTriggerSQL(table).mapValues { SQLiteSchema.canonicalDDL(it.value) }, installed)
+
+        val client = SynchroClient(
+            SynchroConfig(
+                dbPath = path,
+                serverURL = "http://localhost:8080",
+                authProvider = { "test-token" },
+                clientID = "device-1",
+                appVersion = "1.0.0",
+            ),
+            context,
+        )
+        try {
+            client.atomicWriteTransaction { transaction ->
+                transaction.execute(
+                    "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                    arrayOf("o2", "after upgrade", "2026-01-01T00:00:00.000000Z"),
+                )
+            }
+        } finally {
+            client.close()
+        }
+        val grouped = database.queryOne("SELECT atomic_group_id FROM _synchro_pending_changes WHERE record_id = 'o2'")
+        assertTrue((grouped?.get("atomic_group_id") as String?)?.isNotEmpty() == true)
     }
 
     @Test

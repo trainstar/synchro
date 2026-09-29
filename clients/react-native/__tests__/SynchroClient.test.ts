@@ -1,6 +1,7 @@
 import { SynchroClient } from '../src/SynchroClient';
 import { SynchroInspection } from '../src/inspection';
 import { SyncStatus } from '../src/types';
+import { AtomicGroupInvalidError } from '../src/errors';
 import {
   mockNativeModule,
   emitNativeEvent,
@@ -288,6 +289,65 @@ describe('SynchroClient', () => {
         ['dup', null]
       );
       expect(mockNativeModule.rollbackTransaction).toHaveBeenCalledWith('tx-1');
+    });
+  });
+
+  describe('atomicWriteTransaction', () => {
+    it('begins an atomic native transaction, runs statements in it, and commits', async () => {
+      const client = makeClient();
+      const result = await client.atomicWriteTransaction(async (tx) => {
+        await tx.execute('UPDATE items SET name = ? WHERE id = ?', ['a', '1']);
+        await tx.execute('INSERT INTO items (id, name) VALUES (?, ?)', ['2', 'b']);
+        return 'done';
+      });
+
+      expect(mockNativeModule.beginAtomicWriteTransaction).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.beginWriteTransaction).not.toHaveBeenCalled();
+      expect(mockNativeModule.txExecute.mock.calls).toEqual([
+        ['tx-atomic-1', 'UPDATE items SET name = ? WHERE id = ?', ['a', '1']],
+        ['tx-atomic-1', 'INSERT INTO items (id, name) VALUES (?, ?)', ['2', 'b']],
+      ]);
+      expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-atomic-1');
+      expect(mockNativeModule.rollbackTransaction).not.toHaveBeenCalled();
+      expect(result).toBe('done');
+    });
+
+    it('rolls back the atomic transaction when the callback throws', async () => {
+      const failure = new Error('application failure');
+
+      const client = makeClient();
+      await expect(
+        client.atomicWriteTransaction(async (tx) => {
+          await tx.execute('DELETE FROM items WHERE id = ?', ['1']);
+          throw failure;
+        })
+      ).rejects.toMatchObject({ code: 'UNKNOWN' });
+
+      expect(mockNativeModule.beginAtomicWriteTransaction).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.commitTransaction).not.toHaveBeenCalled();
+      expect(mockNativeModule.rollbackTransaction).toHaveBeenCalledWith('tx-atomic-1');
+    });
+
+    it('rejects with the typed invalid-group error when the native commit rejects the group', async () => {
+      mockNativeModule.commitTransaction.mockRejectedValueOnce({
+        code: 'atomic_group_invalid',
+        message: 'native text',
+        userInfo: { reason: 'deleteFollowedByWrite' },
+      });
+
+      const client = makeClient();
+      const rejection = client.atomicWriteTransaction(async (tx) => {
+        await tx.execute('DELETE FROM items WHERE id = ?', ['1']);
+        await tx.execute('INSERT INTO items (id, name) VALUES (?, ?)', ['1', 'again']);
+      });
+
+      await expect(rejection).rejects.toBeInstanceOf(AtomicGroupInvalidError);
+      await expect(rejection).rejects.toMatchObject({
+        code: 'atomic_group_invalid',
+        reason: 'deleteFollowedByWrite',
+      });
+      expect(mockNativeModule.commitTransaction).toHaveBeenCalledWith('tx-atomic-1');
+      expect(mockNativeModule.rollbackTransaction).toHaveBeenCalledWith('tx-atomic-1');
     });
   });
 
@@ -848,6 +908,28 @@ describe('SynchroClient', () => {
         code: 'INVALID_RESPONSE',
       });
       await client.close();
+    });
+
+    it('accepts an atomic_batch_rejected terminal rejection', async () => {
+      const rejected = {
+        mutationID: 'mutation-3',
+        tableName: 'items',
+        recordID: 'record-3',
+        status: 'rejected_terminal',
+        code: 'atomic_batch_rejected',
+        message: null,
+        serverRowJSON: null,
+        serverVersion: null,
+        mutationJSON: '{}',
+        rejectionJSON: '{}',
+        createdAt: '2026-08-17T10:00:00.000Z',
+        updatedAt: '2026-08-17T10:01:00.000Z',
+      };
+      mockNativeModule.inspectRejectedMutations.mockResolvedValueOnce(
+        JSON.stringify([rejected])
+      );
+
+      await expect(makeClient().inspectRejectedMutations()).resolves.toEqual([rejected]);
     });
 
     it('maps the maximum provenance maintenance cursor without numeric precision loss', async () => {

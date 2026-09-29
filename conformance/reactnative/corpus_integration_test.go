@@ -35,6 +35,7 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 		forgedCursorScenarioID:         runRealReactNativeForgedCursor,
 		retentionReconnectScenarioID:   runRealReactNativeRetentionReconnect,
 		schemaQueuedMutationScenarioID: runRealReactNativeSchemaQueuedMutation,
+		scopeEmptyPullScenarioID:       runRealReactNativeScopeEmptyPull,
 	}
 	authored, err := scenarios.LoadAll(context.Background(), "../..")
 	if err != nil {
@@ -45,9 +46,7 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 		t.Fatal(err)
 	}
 	for _, id := range selected {
-		t.Run(id, func(t *testing.T) {
-			runners[id](t, platform)
-		})
+		t.Run(id, func(t *testing.T) { runners[id](t, platform) })
 	}
 	// The authored dataset flow is not a scenario document. Its expectations
 	// are the hand-written dataset checkpoints.

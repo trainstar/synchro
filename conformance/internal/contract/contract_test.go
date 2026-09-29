@@ -781,14 +781,19 @@ func completeSnapshotFixture(t *testing.T) string {
 		writeFixtureFile(t, root, path, data)
 	}
 	for _, path := range []string{
+		"conformance/scenarios/server/atomic-group-001.json",
 		"conformance/scenarios/server/membership-reassignment-001.json",
 		"conformance/scenarios/server/pull-divergent-checkpoints-001.json",
 		"conformance/scenarios/server/pull-hydration-failure-001.json",
 		"conformance/scenarios/server/push-response-loss-001.json",
+		"conformance/scenarios/server/push-unit-constraints-001.json",
 		"conformance/scenarios/server/rebuild-forged-cursor-001.json",
 		"conformance/scenarios/server/registry-reload-001.json",
 		"conformance/scenarios/server/retention-reconnect-001.json",
 		"conformance/scenarios/server/schema-queued-mutation-001.json",
+		"conformance/scenarios/server/scope-assignment-bound-001.json",
+		"conformance/scenarios/server/scope-assignment-pull-001.json",
+		"conformance/scenarios/server/scope-empty-pull-001.json",
 		"conformance/scenarios/server/wal-decode-failure-001.json",
 		"conformance/scenarios/server/wal-order-001.json",
 		"conformance/scenarios/performance/configured-bounds-001.json",

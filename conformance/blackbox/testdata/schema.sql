@@ -1,5 +1,7 @@
 -- Independent diagnostic source schema.
 -- This file never creates or mutates Synchro internal state.
+-- Keep every object name schema-relative. The source shape restore applies
+-- this file again in an isolated schema.
 
 CREATE TABLE cf_global_items (
     id UUID PRIMARY KEY,
@@ -129,7 +131,7 @@ CREATE TABLE cf_source_filled_items (
 
 CREATE INDEX cf_source_filled_items_owner_id_idx ON cf_source_filled_items (owner_id);
 
-CREATE FUNCTION cf_source_filled_items_slug()
+CREATE OR REPLACE FUNCTION cf_source_filled_items_slug()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -143,14 +145,16 @@ CREATE TRIGGER cf_source_filled_items_slug
 BEFORE INSERT ON cf_source_filled_items
 FOR EACH ROW EXECUTE FUNCTION cf_source_filled_items_slug();
 
-CREATE FUNCTION zz_cf_source_filled_items_touch()
+CREATE OR REPLACE FUNCTION zz_cf_source_filled_items_touch()
 RETURNS trigger
 LANGUAGE plpgsql
+-- Push runs triggers with the Synchro search_path.
+SET search_path FROM CURRENT
 AS $$
 BEGIN
     -- A push runs this trigger under the extension search_path, which omits public.
     IF pg_trigger_depth() = 1 THEN
-        UPDATE public.cf_source_filled_items
+        UPDATE cf_source_filled_items
         SET trigger_value = NEW.value || '-triggered'
         WHERE id = NEW.id;
     END IF;

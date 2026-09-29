@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -2026,7 +2026,7 @@ fn run_in_subtransaction<T>(body: impl FnOnce() -> (T, bool)) -> T {
+         if commit {
+             pg_sys::ReleaseCurrentSubTransaction();
+         } else {
+-            pg_sys::RollbackAndReleaseCurrentSubTransaction();
++            pg_sys::ReleaseCurrentSubTransaction();
+         }
+         pg_sys::MemoryContextSwitchTo(outer_context);
+         pg_sys::CurrentResourceOwner = outer_owner;

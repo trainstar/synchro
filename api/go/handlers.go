@@ -125,6 +125,10 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 	if !requireStringMember(w, members, "client_id") {
 		return
 	}
+	if atomic, exists := members["atomic"]; exists && !bytes.Equal(atomic, []byte("true")) {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 
 	resp, err := h.queryJSONB(
 		r.Context(),

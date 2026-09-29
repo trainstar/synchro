@@ -46,6 +46,7 @@
              )
              UPDATE synchro.sync_wal_progress progress
              SET generation_start_lsn = slot.confirmed_flush_lsn,
+                 processed_end_lsn = slot.confirmed_flush_lsn,
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,

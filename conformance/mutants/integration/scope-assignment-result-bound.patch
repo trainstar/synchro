@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/portable_seed.rs b/extensions/synchro-pg/src/portable_seed.rs
+--- a/extensions/synchro-pg/src/portable_seed.rs
++++ b/extensions/synchro-pg/src/portable_seed.rs
+@@ -452,7 +452,7 @@
+         })?;
+         let mut scopes = Vec::new();
+         for row in rows {
+-            if scopes.len() == maximum {
++            if scopes.len() == maximum && false {
+                 pgrx::error!("assignment function exceeded its registered scope bound");
+             }
+             let scope_id = row

@@ -125,6 +125,8 @@
 	test-rn-push-ios \
 	test-rn-retention-android \
 	test-rn-retention-ios \
+	test-rn-scope-empty-pull-android \
+	test-rn-scope-empty-pull-ios \
 	test-rn-check-android \
 	test-rn-check-ios \
 	test-rn-requests-android \
@@ -449,6 +451,8 @@ help:
 	@echo "  test-rn-provenance-ios - Run direct React Native multi-scope provenance through the iOS bridge"
 	@echo "  test-rn-retention-ios - Run retention reconnect through the iOS bridge"
 	@echo "  test-rn-retention-android - Run retention reconnect through the Android bridge"
+	@echo "  test-rn-scope-empty-pull-ios - Run the empty scope set pull through the iOS bridge"
+	@echo "  test-rn-scope-empty-pull-android - Run the empty scope set pull through the Android bridge"
 	@echo "  test-rn-queue-replay-ios - Run direct React Native queue-replay through the iOS bridge"
 	@echo "  test-rn-queue-replay-android - Run direct React Native queue-replay through the Android bridge"
 	@echo "  test-rn-seeded-empty-startup-ios - Run seeded and empty startup through the iOS bridge"
@@ -642,9 +646,9 @@ test-blackbox-mutation-control:
 	case "$$test_name" in \
 		TestRealMutationControlCursorAdvancement|TestRealMutationControlWALAcknowledgement|TestRealMutationControlMutationConservation|TestRealMutationControlChecksumCorrectness|TestRealMutationControlScopeIsolation|TestRealMutationControlProgressOrder|TestRealS02DivergentPullPaginationIsStarvationFree|\
 		TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues|TestRealIssue49SemanticVersionPrecedence|TestRealIssue49PortableIntegerBoundariesAndCounterOverflow|TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay|TestRealIssue49PortableSeedScopeContinuationAndTokenBindings|TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner|TestRealIssue49RebuildReplayEpochAndMonotonicCursor|TestRealIssue49PublishedSchemaIdentityIsImmutable|\
-		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
+		TestRealIssue49SecurityAdapterAuthorityAndScopeBoundary|TestRealIssue49SecurityRegistryIdentityAndKeys|TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm|TestRealRegistryRejectsDeferrablePrimaryKey|TestRealRegistryRejectsDatabaseGeneratedPushKey|TestRealIssue49SecurityCaptureHealthFailsClosed|TestRealIssue49SecurityDatabaseAuthority|TestRealIssue49SecurityOperationalRedaction|TestRealIssue49SecurityInstallationAuthority|\
 		TestRealIssue49WALIsTheOnlyAtomicPublicationPath|TestRealIssue49ResetLifecycleAndFenceCoverage|TestRealIssue49FenceCorrelationAndCapturePending|TestRealWALCorrelatesTriggerDMLPerRowIdentity|TestRealCaptureFenceRejectsOutOfOrderRowWrites|TestRealIssue49CompletePullVisibleWALRepresentation|TestRealIssue49CaptureReadinessRequiresEveryCheck|TestRealIssue49FenceCorrelatesOldRecordIdentity|TestRealIssue49FenceCorrelatesCaptureKeys|TestRealIssue49ResetCoversEveryFenceOperation|TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss|\
-		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline|TestRealTransactionMembershipUsesFinalProjectionAcrossActivations) ;; \
+		TestRealIssue49RemainingSemantics|TestRealExtensionUpdateFromBaseline|TestRealTransactionMembershipUsesFinalProjectionAcrossActivations|TestRealScopeAssignmentPullReconciliation|TestRealScopeAssignmentBoundFailsClosed|TestRealAtomicGroupAppliesAllOrNone|TestRealPushUnitConstraintBoundary) ;; \
 		*) echo "MUTATION_CONTROL_TEST is not a supported mutation control" >&2; exit 1 ;; \
 	esac; \
 	case "$$assertion" in assertion|assertion\#[0-9][0-9]) ;; *) echo "MUTATION_CONTROL_TEST does not name a supported assertion" >&2; exit 1 ;; esac; \
@@ -1657,6 +1661,28 @@ test-rn-retention-ios: conformance-mod-download test-blackbox-harness rn-seed-as
 		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
 			-run '^TestRealReactNativeRetentionReconnectIOS$$' -args --provision --install
 
+test-rn-scope-empty-pull-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
+	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
+	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
+	cd clients/react-native/example && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" npx detox build --configuration $(RN_ANDROID_DETOX_CONFIG)
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" SYNCHRO_RN_DETOX_CONFIGURATION="$(RN_ANDROID_DETOX_CONFIG)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeScopeEmptyPullAndroid \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativeScopeEmptyPullAndroid$$' -args --provision --install
+
+test-rn-scope-empty-pull-ios: conformance-mod-download test-blackbox-harness rn-seed-asset rn-watchman-reset rn-ios-pods
+	cd clients/react-native/example && npx detox build --configuration ios.sim.debug
+	@set -eu; \
+		$(WARM_CONNECT_ENV) \
+		cd conformance && SYNCHRO_RN_DETOX_CONFIGURATION=ios.sim.debug GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+		-test TestRealReactNativeScopeEmptyPullIOS \
+		-expect target_pass \
+		-- go test -tags reactnativeintegration -json ./reactnative -count=1 -timeout=35m \
+			-run '^TestRealReactNativeScopeEmptyPullIOS$$' -args --provision --install
+
 test-rn-check-android: conformance-mod-download test-blackbox-harness test-rn-warm-connect-control test-rn-android-parity rn-watchman-reset
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android Detox requires JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
@@ -1982,6 +2008,7 @@ test-rn-e2e-android-run: test-rn-e2e-android-smoke
 test-rn-scenarios-ios test-rn-scenarios-android: conformance-mod-download
 	$(call declared_selection,GO_TEST_ARGS)
 	@set -eu; \
+		$(WARM_CONNECT_ENV) \
 		case "$@" in \
 			test-rn-scenarios-ios) platform=IOS; configuration=ios.sim.debug ;; \
 			test-rn-scenarios-android) platform=Android; configuration="$(RN_ANDROID_DETOX_CONFIG)"; \
@@ -2435,17 +2462,17 @@ local-postgres-start: build-local-postgres
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
 		exit 1
 
+# Each provisioner cleanup stage has its own deadline, so the stop waits for
+# exit. A forced kill would skip cluster removal and extension restoration.
+# The start time distinguishes the provisioner from a process that reuses its PID.
 local-postgres-stop:
 	@set -eu; \
 		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
 			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
 			if kill -0 "$$pid" 2>/dev/null; then \
+				started="$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)"; \
 				kill "$$pid"; \
-				for attempt in $$(seq 1 30); do \
-					if ! kill -0 "$$pid" 2>/dev/null; then break; fi; \
-					sleep 1; \
-				 done; \
-				if kill -0 "$$pid" 2>/dev/null; then kill -9 "$$pid" 2>/dev/null || true; fi; \
+				while [ -n "$$started" ] && [ "$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)" = "$$started" ]; do sleep 1; done; \
 				 echo "local PostgreSQL provisioner stopped"; \
 			else \
 				echo "local PostgreSQL provisioner is not running"; \

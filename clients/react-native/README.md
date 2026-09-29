@@ -12,19 +12,19 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 ## Installation
 
-Install the published package only after Synchro `0.3.3` is available. Before that,
+Install the published package only after Synchro `0.4.0` is available. Before that,
 use the local artifact flow in
 [Client Consumption](https://trainstar.github.io/synchro/clients/consumption/).
 
 ```sh
-npm install @trainstar/synchro-react-native@0.3.3
+npm install @trainstar/synchro-react-native@0.4.0
 ```
 
-Before you run `pod install`, add these published Synchro `0.3.3` dependencies to the
+Before you run `pod install`, add these published Synchro `0.4.0` dependencies to the
 application `ios/Podfile`:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.3'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```
 
@@ -168,6 +168,59 @@ await client.writeTransaction(async (tx) => {
 });
 ```
 
+## Atomic write transactions
+
+`atomicWriteTransaction(fn)` runs one write transaction. The server applies all of its synced mutations or none of them. The native SDK owns the group. The bridge only forwards the call to the native `atomicWriteTransaction`.
+
+- The API opens its transaction through the same path as `writeTransaction()`. Nesting behavior is therefore identical to `writeTransaction()`.
+- The `tx` object exposes no nested transaction API.
+- The transaction contract of `writeTransaction()` also applies.
+- A group that captures no synced rows commits as an ordinary write.
+
+```ts
+import { AtomicGroupInvalidError } from '@trainstar/synchro-react-native';
+
+try {
+  await client.atomicWriteTransaction(async (tx) => {
+    await tx.execute('UPDATE notes SET body = ? WHERE id = ?', ['Reviewed', noteID]);
+    await tx.execute(
+      'INSERT INTO notes (id, owner_id, body) VALUES (?, ?, ?)',
+      [reviewID, 'alice', `Review of ${noteID}`]
+    );
+  });
+} catch (error) {
+  if (error instanceof AtomicGroupInvalidError) {
+    console.warn(`Atomic group rolled back: ${error.reason}`);
+  } else {
+    throw error;
+  }
+}
+```
+
+Before the local commit, the native SDK validates the group. An invalid group rolls back the local transaction. No row change and no queue entry remains. The promise rejects with `AtomicGroupInvalidError`. Its `code` is `atomic_group_invalid`, and its `reason` is one of these values:
+
+| `reason` | Rule |
+| --- | --- |
+| `deleteFollowedByWrite` | A `delete` of a row is followed by a later write of the same row in the group. |
+| `tooManyMutations` | The normalized group has more than 1000 mutations. |
+| `mutationTooLarge` | A normalized mutation has more than 65,536 octets in canonical form or more than 256 authored columns. |
+| `requestTooLarge` | The worst-case push request body or its RFC 8785 form is more than 1,048,576 octets. |
+
+When one mutation in a group does not apply, the server applies no mutation of the group. The SDK uses the existing outcome paths and adds no revert path:
+
+- The failing mutation keeps its own status and code.
+- A failing conflict follows the existing conflict path. The SDK applies `server_row` and then reapplies later local intent for that row.
+- Every other member gets `atomic_batch_rejected`. This outcome follows the existing terminal path. Its local row stays, and `inspectRejectedMutations()` reports the mutation.
+
+After a failed group with a conflict, local state holds the server row for the conflicting member. It holds local values for every other member. The SDK does not revert those local values. Use `inspectRejectedMutations()` to find them and write new intent.
+
+The atomic API requires the Synchro `0.4.0` extension and adapter. Use this deployment order:
+
+1. Install the `0.4.0` extension and adapter on the server.
+2. Release the client code that calls `atomicWriteTransaction()`.
+
+A `0.4.0` client that never calls the atomic API works with a `0.3.x` server. A `0.3.x` server answers an atomic batch with `400 invalid_request`. The client keeps the sealed batch and reports the failure. It does not lose data.
+
 ## Errors
 
 Native errors are normalized to typed JS errors, including:
@@ -185,6 +238,7 @@ Native errors are normalized to typed JS errors, including:
 - `AlreadyStartedError`
 - `NotStartedError`
 - `TransactionTimeoutError`
+- `AtomicGroupInvalidError`
 
 The iOS schema bridge rejects malformed JSON with the existing `UNKNOWN` error code.
 

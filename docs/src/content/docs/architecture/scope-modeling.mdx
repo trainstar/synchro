@@ -48,12 +48,14 @@ One public row change should update one shared scope, not one scope per user.
 A registered membership function determines which scopes contain each row.
 That does not determine which clients can read those scopes.
 
-Connect assigns the authenticated identity scope `user:{user_id}` unless it was explicitly revoked.
-Registered shared scopes are assigned to every authenticated user.
-An administrator can assign another scope with `synchro.synchro_grant_user_scope(user_id, scope_id)`.
+The server computes the assigned scope set for each canonical user from four sources:
+
+- the identity scope `user:{user_id}`, unless an operator revoked it
+- every registered shared scope
+- each explicit grant from `synchro.synchro_grant_user_scope(user_id, scope_id)`
+- the results of the registered assignment function
+
 Use `synchro.synchro_revoke_user_scope(user_id, scope_id)` to revoke an explicit assignment.
-Connect reconciles those changes on the user's next connection.
-Until then, pull and rebuild keep the prior assignment, so a revoked scope stays readable to a connected client.
 
 For example, a private project scope needs both a membership function that returns `project:123` and an explicit grant:
 
@@ -65,6 +67,87 @@ Run this administrative operation through a trusted server-side authorization de
 Do not accept a requested scope or user ID from an untrusted client as authorization.
 A granted scope is not a portable public scope.
 See [server setup](/synchro/getting-started/server-setup/) for a complete default-scope example.
+
+## Assignment function
+
+Use an assignment function when application data already records which users can read a scope.
+The function derives scopes from that data, so you do not maintain a separate grant for each user.
+
+This example reads project membership from an application table:
+
+```sql
+CREATE TABLE public.project_members (
+    user_id text NOT NULL,
+    project_id uuid NOT NULL,
+    PRIMARY KEY (user_id, project_id)
+);
+
+CREATE FUNCTION public.project_scopes(p_user_id text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, synchro
+BEGIN ATOMIC
+    SELECT 'project:' || project_id::text
+    FROM public.project_members
+    WHERE user_id = p_user_id;
+END;
+
+REVOKE ALL ON FUNCTION public.project_scopes(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.project_scopes(text) TO synchro_owner;
+
+SELECT synchro.synchro_register_assignment_function('public.project_scopes', 100);
+```
+
+Run the example as a role with `synchro_operator` membership. That role must own the function.
+The extension evaluates the function as its owner in a security-restricted operation.
+Thus the owner must be able to read each relation that the function reads.
+The membership function for project rows must return the same `project:{project_id}` scope IDs.
+
+Registration rejects a function unless every rule below is true:
+
+- It is a plain `LANGUAGE sql` function with a parsed SQL-standard body, such as `BEGIN ATOMIC`.
+- It has exactly one `text` argument, with no default and no variadic form. The argument is the canonical user ID.
+- It returns `SETOF text`.
+- It is `STABLE` and not `SECURITY DEFINER`.
+- Its `search_path` setting is exactly `pg_catalog, synchro`.
+- The registration actor owns it.
+- `synchro_owner` has EXECUTE on it. PUBLIC does not have EXECUTE on it.
+- It calls no function outside `pg_catalog`.
+- It reads no relation in schema `synchro`.
+- The function owner has SELECT on each relation that the function reads and USAGE on the schema of that relation.
+
+The function runs with `search_path` set to `pg_catalog, synchro`.
+Schema-qualify every application relation in the function body.
+
+Only one assignment function can be registered.
+A second registration replaces the first registration.
+The second argument sets `max_scopes`, from 1 through 1000. The default is 1000.
+Use `synchro.synchro_unregister_assignment_function()` to remove the registration.
+
+Connect and pull call the function once with the canonical user ID.
+Each result must be non-null and nonempty after trim. A result must not start with `user:`.
+More than `max_scopes` distinct results is a failure.
+The server also confirms that the function exists and that its definition is unchanged since registration.
+A failure aborts the connect or pull and returns `500 sync_integrity_failure`. It changes no assignment state.
+After you change the function definition, register the function again.
+`synchro_health_detail` reports a failed assignment check when the function is missing or its definition changed.
+
+## Assignment reconciliation
+
+Connect and pull compute the assigned scope set with the same rule.
+A pull reconciles the set after all request validation passes and before it builds `scope_updates`.
+A grant, a revoke, or an application data change that alters the function results therefore takes effect at the next successful connect or pull.
+
+When the set changes:
+
+- `scope_set_version` advances by exactly one.
+- The same response reports the change in `scope_updates`.
+- An added scope has a null cursor and requires rebuild.
+- A removed scope causes local provenance cleanup.
+
+An unchanged set writes no assignment state. A failed pull writes no assignment state.
+Rebuild does not reconcile assignment. A rebuild of a scope that is no longer assigned returns `409 rebuild_restart_required`.
 
 ## Shared scope grouping
 

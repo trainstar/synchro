@@ -1,6 +1,6 @@
 {
   "name": "@trainstar/synchro-react-native",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "React Native bridge for Synchro sync SDK",
   "source": "./src/index.ts",
   "main": "./lib/module/index.js",

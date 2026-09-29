@@ -1712,9 +1712,9 @@ func TestRealIssue49FirstPushLateFailureRollsBackEveryDurableEffect(t *testing.T
 	}
 	mutations := []map[string]any{
 		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000001", recordIDs[0], "atomic-written"),
-		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000002", recordIDs[1], "atomic-suppressed"),
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000002", recordIDs[1], "atomic-failed"),
 	}
-	suppressIssue49ItemInsert(t, ctx, harness, recordIDs[1])
+	failIssue49ItemInsert(t, ctx, harness, recordIDs[1])
 
 	payload := phase4PushPayload(client, "00000000-0000-4000-8d05-000000000000", mutations)
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", payload)

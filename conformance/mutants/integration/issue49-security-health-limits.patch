@@ -1,30 +1,28 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-index aeafc6d..eae00d9 100644
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.3.sql
-@@ -2048,7 +2048,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+@@ -2135,7 +2135,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1108
-+-- synchro-pg/src/health.rs:1111
+--- synchro-pg/src/health.rs:1151
++-- synchro-pg/src/health.rs:1154
  -- synchro_pg::health::synchro_health_detail
  CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
-@@ -2260,7 +2260,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+@@ -2347,7 +2347,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1101
-+-- synchro-pg/src/health.rs:1104
+--- synchro-pg/src/health.rs:1144
++-- synchro-pg/src/health.rs:1147
  -- synchro_pg::health::synchro_readiness
  CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
-index 983d484..84383b3 100644
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -930,13 +930,16 @@ pub(crate) fn load_readiness_status_with_configuration(
+@@ -964,13 +964,16 @@
          status.set("worker", HealthCheck::failed("worker_not_configured"));
      }
      if configuration.max_heartbeat_age_seconds <= 0 {
@@ -42,5 +40,5 @@ index 983d484..84383b3 100644
 +        // Mutant: invalid finite limits are accepted as healthy.
 +        status.set("wal_time_lag", HealthCheck::ok());
      }
- 
-     let Some(worker_login) = configuration.worker_login.as_deref() else {
+     if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+         return status;

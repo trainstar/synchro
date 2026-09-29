@@ -1,12 +1,20 @@
 diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
 --- a/extensions/synchro-pg/src/push.rs
 +++ b/extensions/synchro-pg/src/push.rs
-@@ -2354,7 +2354,31 @@ fn push_insert(
+@@ -2518,14 +2518,38 @@ fn push_insert(
          table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
          pk = pg_quote_ident(&table_reg.pk_column),
      );
--    execute_push_dml(client, mutation_id, &sql, data, record_id)
-+    let outcome = execute_push_dml(client, mutation_id, &sql, data, record_id);
+-    execute_push_dml(
++    let outcome = execute_push_dml(
+         client,
+         mutation_id,
+         &sql,
+         data,
+         record_id,
+         mutation_is_push_unit,
+-    )
++    );
 +    if matches!(outcome, DmlOutcome::Applied) {
 +        client
 +            .update(

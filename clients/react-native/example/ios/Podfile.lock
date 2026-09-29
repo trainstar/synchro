@@ -2453,9 +2453,9 @@ PODS:
     - React-utils (= 0.83.0)
     - SocketRocket
   - SocketRocket (0.7.1)
-  - Synchro (0.3.3):
+  - Synchro (0.4.0):
     - GRDB.swift (~> 7.0)
-  - SynchroReactNative (0.3.3):
+  - SynchroReactNative (0.4.0):
     - boost
     - DoubleConversion
     - fast_float
@@ -2482,9 +2482,9 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.3.3)
+    - Synchro (= 0.4.0)
     - Yoga
-  - SynchroReactNative/Tests (0.3.3):
+  - SynchroReactNative/Tests (0.4.0):
     - boost
     - DoubleConversion
     - fast_float
@@ -2511,7 +2511,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.3.3)
+    - Synchro (= 0.4.0)
     - Yoga
   - Yoga (0.0.0)
 
@@ -2781,7 +2781,7 @@ SPEC CHECKSUMS:
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   GRDB.swift: a0ccf69e5d6dd631d9ae40d933eb624e790f5245
-  hermes-engine: fc57a7637bba9f81d419aeb7ac27debcbb097b42
+  hermes-engine: 4b560770f80d9057a267ac573e94b196759bed8a
   RCT-Folly: 59ec0ac1f2f39672a0c6e6cecdd39383b764646f
   RCTDeprecation: 2b70c6e3abe00396cefd8913efbf6a2db01a2b36
   RCTRequired: f3540eee8094231581d40c5c6d41b0f170237a81
@@ -2852,8 +2852,8 @@ SPEC CHECKSUMS:
   ReactCodegen: 10a61330b137caaad6f7fbe7f5d0e7a40d621700
   ReactCommon: c6cd81778336e767e27fe63c6707dd6b735fff5c
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: 63708c1f660b3108e5858adadcee410be3dd0a26
-  SynchroReactNative: 29742c5e3391870ef7a9c2e62634b089e73a0529
+  Synchro: 42fd7b811f7f94e1c0896cbd6997a3de92947a59
+  SynchroReactNative: 7d24b19787f5f81a6062c8ec716b6aecf938871b
   Yoga: 7a9f26c70daf0b08d82ec2f862e9a8872442129e
 
 PODFILE CHECKSUM: 998a4402881d1f26904986555a044010b453070d

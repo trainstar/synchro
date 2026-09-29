@@ -29,6 +29,7 @@ var closedOperationFields = map[string]operationFields{
 	"model/expire-client-generation":                {required: []string{"user_id", "client_id"}},
 	"model/install-current-contract":                {required: []string{"installation", "initial_schema", "initial_registry", "stream", "empty_scopes", "clients", "write_policies", "configured_limits"}},
 	"model/publish-schema":                          {required: []string{"schema", "body", "transition_class", "compatibility_floor", "tables", "affected_scopes"}},
+	"model/set-assignment-function":                 {required: []string{"function", "max_scopes", "evaluations"}},
 	"model/set-client-assignments":                  {required: []string{"user_id", "client_id", "assignments"}},
 	"model/stage-registry-membership-generation":    {required: []string{"registry_generation", "membership_generation", "batch_size", "activation_boundary", "affected_scopes", "scope_rules", "dependency_impacts"}},
 	"process/acknowledge-contiguous-prefix":         {required: []string{"stream_generation"}},
@@ -109,6 +110,9 @@ var closedPayloadShapes = map[string]*payloadShape{
 	}),
 	"model/install-current-contract": installContractShape(),
 	"model/publish-schema":           publishSchemaShape,
+	"model/set-assignment-function": shapeWith(closedOperationFields["model/set-assignment-function"], map[string]payloadChild{
+		"evaluations": arrayChild(shape(required("user_id", "scopes"))),
+	}),
 	"model/set-client-assignments": shapeWith(closedOperationFields["model/set-client-assignments"], map[string]payloadChild{
 		"assignments": arrayChild(shape(required("scope_id"))),
 	}),
@@ -122,7 +126,7 @@ var closedPayloadShapes = map[string]*payloadShape{
 		"scopes": arrayChild(shape(required("scope_id", "cursor_source"))),
 	}),
 	"push/submit": shapeWith(closedOperationFields["push/submit"], map[string]payloadChild{
-		"request": objectChild(shapeWith(required("client_id", "client_generation", "batch_id", "schema", "mutations"), map[string]payloadChild{
+		"request": objectChild(shapeWith(operationFields{required: []string{"client_id", "client_generation", "batch_id", "schema", "mutations"}, optional: []string{"atomic"}}, map[string]payloadChild{
 			"schema": objectChild(schemaReferenceShape),
 			"mutations": arrayChild(shapeWith(operationFields{required: []string{"mutation_id", "table", "pk", "authored_schema", "op", "client_version"}, optional: []string{"base_version", "columns"}}, map[string]payloadChild{
 				"pk":              dynamicObjectChild(),

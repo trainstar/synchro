@@ -94,6 +94,7 @@ export interface Spec extends TurboModule {
 
   // Transactions
   beginWriteTransaction(): Promise<string>;
+  beginAtomicWriteTransaction(): Promise<string>;
   beginReadTransaction(): Promise<string>;
   txQuery(
     txID: string,

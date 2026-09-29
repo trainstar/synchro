@@ -105,6 +105,43 @@ func TestNativeControllerAssignmentPreservesSharedScope(t *testing.T) {
 	}
 }
 
+func TestNativeControllerEmptyAssignmentRevokesEveryHeldScope(t *testing.T) {
+	controller := &NativeController{installation: &nativeInstallationBinding{
+		scopes:        map[string]string{"scope-a": "user:user-a", "scope-granted": "cf:global"},
+		runtimeScopes: map[string]string{"user:user-a": "scope-a", "cf:global": "scope-granted"},
+		userScopes:    map[string][]string{"user-a": {"scope-a"}},
+		clients:       []nativeInstalledClient{{UserID: "user-a", ClientID: "client-a"}},
+	}}
+	operation := scenarios.Operation{
+		ContractOperation: "model",
+		Name:              "set-client-assignments",
+		Payload:           json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[]}`),
+	}
+
+	observation, usesDefaultSharedScope, revocations, err := controller.setClientAssignments(operation)
+	if err != nil {
+		t.Fatalf("set empty client assignments: %v", err)
+	}
+	if observation.Disposition != "success" || usesDefaultSharedScope {
+		t.Fatalf("empty assignment result = %#v, shared = %t", observation, usesDefaultSharedScope)
+	}
+	if len(revocations) != 1 || revocations[0] != (nativeScopeRevocation{UserID: "user-a", RuntimeScope: "user:user-a"}) {
+		t.Fatalf("revocations = %#v, want the identity scope of user-a", revocations)
+	}
+	if held := controller.installation.userScopes["user-a"]; len(held) != 0 {
+		t.Fatalf("held scopes = %v, want none", held)
+	}
+
+	operation.Payload = json.RawMessage(`{"user_id":"user-a","client_id":"client-a","assignments":[{"scope_id":"scope-granted"}]}`)
+	_, usesDefaultSharedScope, revocations, err = controller.setClientAssignments(operation)
+	if err != nil {
+		t.Fatalf("grant the shared scope after revocation: %v", err)
+	}
+	if !usesDefaultSharedScope || len(revocations) != 0 {
+		t.Fatalf("grant after revocation shared = %t, revocations = %#v", usesDefaultSharedScope, revocations)
+	}
+}
+
 func TestNativeControllerAssignmentBindsUnresolvedPrivateScope(t *testing.T) {
 	controller := &NativeController{installation: &nativeInstallationBinding{
 		scopes:        map[string]string{},

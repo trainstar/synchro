@@ -483,9 +483,9 @@ func TestRealWALPipeline(t *testing.T) {
 	if replayedRecord != restartRecord || restart.AfterRestart.Records[0].ReplayCount != 1 ||
 		restart.AfterStages != restart.BeforeStages || !restart.AfterRestart.WorkerRunning ||
 		restart.AfterRestart.BlockingPoison || !restart.AfterRestart.ContiguousAcknowledged ||
-		!restart.AfterRestart.AcknowledgementMatchesObservedEnd || !restart.AfterRestart.SlotMatchesObservedEnd ||
-		restart.AfterRestart.AcknowledgedEndLSN != restartRecord.EndLSN ||
-		restart.AfterRestart.SlotConfirmedFlushLSN != restartRecord.EndLSN {
+		!restart.AfterRestart.SlotMatchesAcknowledgement ||
+		!realWALLSNAtOrAfter(restart.AfterRestart.AcknowledgedEndLSN, restartRecord.EndLSN) ||
+		restart.AfterRestart.ProcessedEndLSN != restart.AfterRestart.AcknowledgedEndLSN {
 		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
 	}
 

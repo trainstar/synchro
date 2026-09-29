@@ -3760,6 +3760,7 @@ fn activate_registry_and_runtime(
                   materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
+                 processed_end_lsn = $3::pg_lsn,
                  registry_generation = $2,
                  updated_at = now()
              WHERE singleton",

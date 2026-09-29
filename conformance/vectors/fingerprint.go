@@ -118,8 +118,18 @@ func ParseNormalizedBatch(authenticatedUserID string, raw json.RawMessage) (Norm
 	}
 	if err := requireObjectKeys(object, []string{
 		"client_id", "client_generation", "batch_id", "request_schema", "mutations",
-	}, nil); err != nil {
+	}, []string{"atomic"}); err != nil {
 		return NormalizedBatch{}, err
+	}
+	var atomic bool
+	if rawAtomic, present := object["atomic"]; present {
+		atomic, err = decodeBoolean(rawAtomic, "atomic")
+		if err != nil {
+			return NormalizedBatch{}, err
+		}
+		if !atomic {
+			return NormalizedBatch{}, errors.New("atomic must be true when present")
+		}
 	}
 	clientID, err := decodeRequiredString(object["client_id"], "client_id")
 	if err != nil {
@@ -163,6 +173,7 @@ func ParseNormalizedBatch(authenticatedUserID string, raw json.RawMessage) (Norm
 		ClientGeneration:    generation,
 		BatchID:             batchID,
 		RequestSchema:       requestSchema,
+		Atomic:              atomic,
 		Mutations:           mutations,
 	}
 	if _, err := canonicalNormalizedBatch(batch); err != nil {
@@ -410,6 +421,7 @@ func canonicalNormalizedBatch(batch NormalizedBatch) ([]byte, error) {
 		return nil, errors.New("batch mutation count is outside 1..1000")
 	}
 	seen := make(map[string]struct{}, len(batch.Mutations))
+	rows := make(map[string]struct{}, len(batch.Mutations))
 	normalizedMutations := make([]any, 0, len(batch.Mutations))
 	for _, mutation := range batch.Mutations {
 		if mutation.AuthenticatedUserID != batch.AuthenticatedUserID || mutation.ClientID != batch.ClientID {
@@ -423,10 +435,28 @@ func canonicalNormalizedBatch(batch NormalizedBatch) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if batch.Atomic {
+			pk, err := canonicalizeJCS(mutation.PK.Value)
+			if err != nil {
+				return nil, fmt.Errorf("canonicalize pk.value: %w", err)
+			}
+			row, err := json.Marshal([]any{mutation.TableID, mutation.PK.FieldID, json.RawMessage(pk)})
+			if err != nil {
+				return nil, fmt.Errorf("marshal atomic row identity: %w", err)
+			}
+			if _, duplicate := rows[string(row)]; duplicate {
+				return nil, fmt.Errorf("atomic batch repeats row %s", row)
+			}
+			rows[string(row)] = struct{}{}
+		}
 		normalizedMutations = append(normalizedMutations, json.RawMessage(normalized))
 	}
+	tag := "batch-v1"
+	if batch.Atomic {
+		tag = "atomic-batch-v1"
+	}
 	value := []any{
-		"batch-v1",
+		tag,
 		batch.AuthenticatedUserID,
 		batch.ClientID,
 		strconv.FormatUint(batch.ClientGeneration, 10),

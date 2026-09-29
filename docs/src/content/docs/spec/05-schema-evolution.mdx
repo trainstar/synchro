@@ -109,7 +109,8 @@ only client-visible fields. Server-only physical columns are absent from the
 manifest, pull rows, push rows, rebuild rows, and portable seeds. Every synced
 field has one immutable `field_id`, one canonical portable type, nullability,
 and writability. The primary-key and server-owned lifecycle fields are included
-in the projection and are not writable.
+in the projection and are not writable. A database-generated field is not
+writable. A `BY DEFAULT` identity field is writable.
 
 ### Primary Key And Replica Identity
 
@@ -132,6 +133,7 @@ The registry rejects all of the following:
 - a partial key
 - a non-primary unique index offered as a key
 - a primary-key column type that is not a built-in key type
+- a database-generated primary-key column for a registration with push policy `enabled`
 - a replica identity other than `DEFAULT` backed by the validated primary key
 
 The primary-key field ID and its declared portable type define every typed row

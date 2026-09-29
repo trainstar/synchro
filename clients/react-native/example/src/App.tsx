@@ -8,7 +8,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SynchroClient, TransactionTimeoutError } from '@trainstar/synchro-react-native';
+import {
+  AtomicGroupInvalidError,
+  SynchroClient,
+  TransactionTimeoutError,
+} from '@trainstar/synchro-react-native';
+import { SynchroInspection } from '@trainstar/synchro-react-native/inspection';
 import type {
   ConflictEvent,
   SyncEvent,
@@ -46,6 +51,8 @@ type ResultKey =
   | 'pushPull'
   | 'conflict'
   | 'multiUser'
+  | 'atomicGroup'
+  | 'atomicInvalid'
   | 'stop'
   | 'errorMap'
   | 'offlineFirst'
@@ -73,6 +80,8 @@ function createEmptyResults(): Results {
     pushPull: null,
     conflict: null,
     multiUser: null,
+    atomicGroup: null,
+    atomicInvalid: null,
     stop: null,
     errorMap: null,
     offlineFirst: null,
@@ -172,16 +181,16 @@ async function releaseClient(client: SynchroClient | null) {
   }
 }
 
+const INSERT_CUSTOMER_SQL =
+  "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, datetime('now'), datetime('now'))";
+
 async function insertCustomer(
   client: SynchroClient,
   id: string,
   userID: string,
   name: string
 ) {
-  await client.execute(
-    "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, datetime('now'), datetime('now'))",
-    [id, userID, name]
-  );
+  await client.execute(INSERT_CUSTOMER_SQL, [id, userID, name]);
 }
 
 function StatusBadge({ label, ok }: { label: string; ok: TestResult }) {
@@ -233,6 +242,7 @@ function StandardApp() {
   const [currentStep, setCurrentStep] = useState('idle');
   const [pendingConflictRecordID, setPendingConflictRecordID] = useState<string | null>(null);
   const [pendingMultiUserRecordID, setPendingMultiUserRecordID] = useState<string | null>(null);
+  const [atomicRecordIDs, setAtomicRecordIDs] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<LastResult>({
     key: null,
@@ -359,6 +369,7 @@ function StandardApp() {
     currentStepRef.current = 'reset:complete';
     setPendingConflictRecordID(null);
     setPendingMultiUserRecordID(null);
+    setAtomicRecordIDs(null);
     setLastError(null);
     setClient(createClient());
     setHarnessGeneration((generation) => generation + 1);
@@ -907,6 +918,132 @@ function StandardApp() {
     }
   }, [client, ensureStarted, stopSync, update]);
 
+  const runAtomicGroup = useCallback(async () => {
+    const runID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let atomicClient: SynchroClient | null = null;
+    try {
+      setLastError(null);
+      markStep('atomicGroup:start');
+      await releaseHarnessClient();
+      // A batch size of 1 splits ordinary writes, so one push that carries both
+      // rows proves that the group left the client as one atomic batch.
+      atomicClient = new SynchroClient({
+        dbPath: `synchro-atomic-${runID}.db`,
+        serverURL: SYNCHRO_TEST_URL,
+        authProvider: async () => USER1_JWT,
+        clientID: `rn-atomic-device-${runID}`,
+        appVersion: '1.0.0',
+        syncInterval: TEST_SYNC_INTERVAL_SECONDS,
+        pushDebounce: TEST_PUSH_DEBOUNCE_SECONDS,
+        pushBatchSize: 1,
+      });
+      const inspection = new SynchroInspection(atomicClient, {
+        transportObservationCapacity: 512,
+      });
+      await atomicClient.initialize();
+      await startAndWaitForScheduledPullRetry(atomicClient);
+      await syncAndWaitForScheduledPullRetry(atomicClient);
+      if (!(await waitForSyncedTable(atomicClient, 'customers'))) {
+        throw new Error('customers table was not ready after starting sync');
+      }
+      markStep('atomicGroup:started');
+
+      const lastSequenceBefore = (await inspection.transportObservations()).observations
+        .reduce((last, observation) => Math.max(last, observation.sequence), -1);
+      const firstID = uuid();
+      const secondID = uuid();
+      await atomicClient.atomicWriteTransaction(async (tx) => {
+        await tx.execute(INSERT_CUSTOMER_SQL, [firstID, USER1_ID, 'atomic-first']);
+        await tx.execute(INSERT_CUSTOMER_SQL, [secondID, USER1_ID, 'atomic-second']);
+      });
+      markStep('atomicGroup:committed');
+      await syncAndWaitForScheduledPullRetry(atomicClient);
+      markStep('atomicGroup:synced');
+
+      const drained = await waitForPendingDrain(atomicClient);
+      const rejected = (await atomicClient.inspectRejectedMutations()).filter(
+        (mutation) => mutation.recordID === firstID || mutation.recordID === secondID
+      );
+      const pushes = (await inspection.transportObservations()).observations.filter(
+        (observation) =>
+          observation.operationClass === 'push' && observation.sequence > lastSequenceBefore
+      );
+      const atomicOK =
+        drained &&
+        rejected.length === 0 &&
+        pushes.length === 1 &&
+        pushes[0].statusCode === 200 &&
+        pushes[0].requestFacts?.mutation_count === 2;
+      if (atomicOK) {
+        setAtomicRecordIDs(`${firstID},${secondID}`);
+      } else {
+        setLastError(JSON.stringify({ drained, rejected, pushes }));
+      }
+      update('atomicGroup', atomicOK);
+    } catch (error) {
+      captureError('atomicGroup', error);
+      update('atomicGroup', false);
+    } finally {
+      await releaseClient(atomicClient);
+    }
+  }, [captureError, markStep, releaseHarnessClient, update]);
+
+  const runAtomicInvalid = useCallback(async () => {
+    try {
+      setLastError(null);
+      markStep('atomicInvalid:start');
+      await ensureStarted();
+      await syncAndWaitForScheduledPullRetry(client);
+      if (!(await waitForSyncedTable(client, 'customers'))) {
+        throw new Error('customers table was not ready after starting sync');
+      }
+      await stopSync();
+      markStep('atomicInvalid:stopped');
+
+      const recordID = uuid();
+      const pendingBefore = await client.pendingChangeCount();
+      let failure: unknown = null;
+      try {
+        await client.atomicWriteTransaction(async (tx) => {
+          await tx.execute(INSERT_CUSTOMER_SQL, [recordID, USER1_ID, 'atomic-invalid']);
+          await tx.execute('DELETE FROM customers WHERE id = ?', [recordID]);
+          await tx.execute('UPDATE customers SET name = ? WHERE id = ?', ['after-delete', recordID]);
+        });
+      } catch (error) {
+        failure = error;
+      }
+      const row = await client.queryOne('SELECT id FROM customers WHERE id = ?', [recordID]);
+      const pendingAfter = await client.pendingChangeCount();
+      const invalidOK =
+        failure instanceof AtomicGroupInvalidError &&
+        failure.code === 'atomic_group_invalid' &&
+        failure.reason === 'deleteFollowedByWrite' &&
+        row === null &&
+        pendingAfter === pendingBefore;
+      if (!invalidOK) {
+        setLastError(
+          JSON.stringify({
+            failure: failure === null ? null : formatError(failure),
+            reason: (failure as { reason?: unknown } | null)?.reason ?? null,
+            row,
+            pendingBefore,
+            pendingAfter,
+          })
+        );
+      }
+      update('atomicInvalid', invalidOK);
+    } catch (error) {
+      captureError('atomicInvalid', error);
+      update('atomicInvalid', false);
+    } finally {
+      try {
+        await stopSync();
+      } catch {
+        // Best-effort cleanup for the harness.
+      }
+    }
+  }, [captureError, client, ensureStarted, formatError, markStep, stopSync, update]);
+
   const runStop = useCallback(async () => {
     try {
       setLastError(null);
@@ -1297,6 +1434,7 @@ function StandardApp() {
         <Text testID="error-value">{lastError ?? 'none'}</Text>
         <Text testID="conflict-record-id">{pendingConflictRecordID ?? 'none'}</Text>
         <Text testID="multi-user-record-id">{pendingMultiUserRecordID ?? 'none'}</Text>
+        <Text testID="atomic-record-ids">{atomicRecordIDs ?? 'none'}</Text>
 
         <View style={styles.buttons}>
           <TouchableOpacity style={styles.button} onPress={runInit} testID="btn-init">
@@ -1340,6 +1478,12 @@ function StandardApp() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runMultiUser} testID="btn-multiUser">
             <Text>Multi-User</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runAtomicGroup} testID="btn-atomicGroup">
+            <Text>Atomic Group</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.button} onPress={runAtomicInvalid} testID="btn-atomicInvalid">
+            <Text>Atomic Invalid</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.button} onPress={runStop} testID="btn-stop">
             <Text>Stop Sync</Text>

@@ -62,6 +62,8 @@ pub enum ContractViolation {
     MissingMutationColumns,
     UnexpectedMutationColumns,
     DuplicateMutationId,
+    InvalidAtomicMember,
+    DuplicateAtomicRow,
     InvalidPushOutcome,
     InvalidPushOutcomePartition,
     FinalPullChecksumsMissing,
@@ -106,6 +108,8 @@ impl fmt::Display for ContractViolation {
             Self::MissingMutationColumns => "mutation columns are missing",
             Self::UnexpectedMutationColumns => "mutation columns are unexpected",
             Self::DuplicateMutationId => "mutation ID is duplicated",
+            Self::InvalidAtomicMember => "atomic member must be true when present",
+            Self::DuplicateAtomicRow => "atomic batch repeats a row",
             Self::InvalidPushOutcome => "push outcome is invalid",
             Self::InvalidPushOutcomePartition => "push outcome partition is invalid",
             Self::FinalPullChecksumsMissing => "final pull checksums are missing",
@@ -198,6 +202,7 @@ pub enum MutationRejectionCode {
     TableNotSynced,
     PolicyRejected,
     ValidationFailed,
+    AtomicBatchRejected,
 }
 
 impl MutationRejectionCode {
@@ -215,6 +220,7 @@ impl MutationRejectionCode {
                 | Self::TableNotSynced
                 | Self::PolicyRejected
                 | Self::ValidationFailed
+                | Self::AtomicBatchRejected
         )
     }
 }
@@ -851,6 +857,12 @@ pub struct PushRequest {
     pub batch_id: String,
     pub schema: SchemaRef,
     pub mutations: Vec<Mutation>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub atomic: Option<bool>,
 }
 
 impl PushRequest {
@@ -862,11 +874,24 @@ impl PushRequest {
         if self.mutations.is_empty() || self.mutations.len() > MAX_PUSH_MUTATIONS {
             return Err(ContractViolation::InvalidPushOperation);
         }
+        let atomic = match self.atomic {
+            None => false,
+            Some(true) => true,
+            Some(false) => return Err(ContractViolation::InvalidAtomicMember),
+        };
         let mut mutation_ids = HashSet::with_capacity(self.mutations.len());
+        let mut rows = HashSet::new();
         for mutation in &self.mutations {
             mutation.validate()?;
             if !mutation_ids.insert(mutation.mutation_id.as_str()) {
                 return Err(ContractViolation::DuplicateMutationId);
+            }
+            if atomic {
+                let pk = crate::fingerprint::canonicalize(&mutation.pk)
+                    .map_err(|_| ContractViolation::InvalidPrimaryKey)?;
+                if !rows.insert((mutation.table.as_str(), pk)) {
+                    return Err(ContractViolation::DuplicateAtomicRow);
+                }
             }
         }
         Ok(())
@@ -1093,11 +1118,6 @@ impl PushResponse {
                     if outcome.table != mutation.table || outcome.pk != mutation.pk {
                         return Err(ContractViolation::InvalidPushOutcomePartition);
                     }
-                    if matches!(mutation.op, Operation::Insert | Operation::Update)
-                        && outcome.server_row.is_none()
-                    {
-                        return Err(ContractViolation::InvalidPushOutcomePartition);
-                    }
                     expected_accepted.push(mutation.mutation_id.as_str());
                 }
                 (None, Some(outcome)) => {
@@ -1120,6 +1140,21 @@ impl PushResponse {
                 .map(|outcome| outcome.mutation_id.as_str())
                 .ne(expected_rejected)
         {
+            return Err(ContractViolation::InvalidPushOutcomePartition);
+        }
+
+        let group_rejections = self
+            .rejected
+            .iter()
+            .filter(|outcome| outcome.code == MutationRejectionCode::AtomicBatchRejected)
+            .count();
+        let valid_group = if request.atomic == Some(true) {
+            self.rejected.is_empty()
+                || (self.accepted.is_empty() && group_rejections + 1 == self.rejected.len())
+        } else {
+            group_rejections == 0
+        };
+        if !valid_group {
             return Err(ContractViolation::InvalidPushOutcomePartition);
         }
         Ok(())
@@ -2097,6 +2132,7 @@ mod tests {
             batch_id: BATCH_ID.into(),
             schema: schema(),
             mutations: vec![mutation(Operation::Insert)],
+            atomic: None,
         }
     }
 
@@ -2264,6 +2300,9 @@ mod tests {
             "unexpected": true
         });
         assert!(serde_json::from_value::<PushRequest>(unknown).is_err());
+        let mut null_atomic = serde_json::to_value(push_request()).unwrap();
+        null_atomic["atomic"] = Value::Null;
+        assert!(serde_json::from_value::<PushRequest>(null_atomic).is_err());
 
         let null_optional = serde_json::json!({
             "client_id": "ios-device-123",
@@ -2343,6 +2382,120 @@ mod tests {
         let mut value = mutation(Operation::Insert);
         value.pk = serde_json::json!({ "a": "one", "b": "two" });
         assert_eq!(value.validate(), Err(ContractViolation::InvalidPrimaryKey));
+    }
+
+    #[test]
+    fn atomic_push_request_compares_rows_by_canonical_primary_key() {
+        let mut request = push_request();
+        request.atomic = Some(true);
+        request.mutations[0].pk = serde_json::json!({ "fld_documents_id": 1 });
+        let mut second = mutation(Operation::Delete);
+        second.mutation_id = "018f2b5e-7c42-7a1d-9d31-8a95bd674012".into();
+        second.pk = serde_json::json!({ "fld_documents_id": 1.0 });
+        request.mutations.push(second);
+        assert_eq!(
+            request.validate(),
+            Err(ContractViolation::DuplicateAtomicRow)
+        );
+        request.mutations[1].table = "tbl_other".into();
+        assert_eq!(request.validate(), Ok(()));
+    }
+
+    #[test]
+    fn atomic_push_response_requires_all_applied_or_one_failure() {
+        let mut request = push_request();
+        request.atomic = Some(true);
+        let mut second = mutation(Operation::Insert);
+        second.mutation_id = "018f2b5e-7c42-7a1d-9d31-8a95bd674013".into();
+        second.pk = serde_json::json!({ "fld_documents_id": "doc-2" });
+        request.mutations.push(second.clone());
+
+        let applied = |mutation: &Mutation| AcceptedMutation {
+            mutation_id: mutation.mutation_id.clone(),
+            pk: mutation.pk.clone(),
+            ..accepted_mutation()
+        };
+        let rejected = |mutation: &Mutation, status, code| RejectedMutation {
+            mutation_id: mutation.mutation_id.clone(),
+            pk: mutation.pk.clone(),
+            ..rejected_mutation(status, code)
+        };
+        let first = request.mutations[0].clone();
+        let conflict = rejected(
+            &first,
+            MutationStatus::Conflict,
+            MutationRejectionCode::RowAlreadyExists,
+        );
+        let terminal =
+            |mutation: &Mutation, code| rejected(mutation, MutationStatus::RejectedTerminal, code);
+        let group =
+            |mutation: &Mutation| terminal(mutation, MutationRejectionCode::AtomicBatchRejected);
+        let response = |accepted, rejected| PushResponse {
+            batch_id: BATCH_ID.into(),
+            server_time: server_time(),
+            accepted,
+            rejected,
+        };
+        let mut group_version = group(&second);
+        group_version.server_version = Some("opaque".into());
+        let mut group_retryable = group(&second);
+        group_retryable.retryable = Some(false);
+
+        for (valid, value) in [
+            (
+                true,
+                response(vec![applied(&first), applied(&second)], vec![]),
+            ),
+            (
+                true,
+                response(vec![], vec![conflict.clone(), group(&second)]),
+            ),
+            (
+                true,
+                response(
+                    vec![],
+                    vec![
+                        group(&first),
+                        terminal(&second, MutationRejectionCode::PolicyRejected),
+                    ],
+                ),
+            ),
+            (
+                false,
+                response(
+                    vec![],
+                    vec![
+                        conflict.clone(),
+                        terminal(&second, MutationRejectionCode::PolicyRejected),
+                    ],
+                ),
+            ),
+            (false, response(vec![], vec![group(&first), group(&second)])),
+            (
+                false,
+                response(
+                    vec![applied(&first)],
+                    vec![terminal(&second, MutationRejectionCode::PolicyRejected)],
+                ),
+            ),
+            (
+                false,
+                response(vec![], vec![conflict.clone(), group_version]),
+            ),
+            (
+                false,
+                response(vec![], vec![conflict.clone(), group_retryable]),
+            ),
+        ] {
+            assert_eq!(value.validate_for_request(&request).is_ok(), valid);
+        }
+
+        let atomic_failure = response(vec![], vec![conflict, group(&second)]);
+        request.atomic = None;
+        assert_eq!(
+            atomic_failure.validate_for_request(&request),
+            Err(ContractViolation::InvalidPushOutcomePartition)
+        );
     }
 
     #[test]
@@ -2818,6 +2971,7 @@ mod tests {
             MutationRejectionCode::TableNotSynced,
             MutationRejectionCode::PolicyRejected,
             MutationRejectionCode::ValidationFailed,
+            MutationRejectionCode::AtomicBatchRejected,
         ] {
             assert!(!code.is_conflict());
             assert!(code.is_terminal());
@@ -3460,6 +3614,11 @@ mod tests {
             }
             assert!(value.validate_for_request(&request).is_err(), "{kind}");
         }
+
+        let mut absent_after_unit = response.clone();
+        absent_after_unit.accepted[0].server_row = None;
+        absent_after_unit.accepted[0].row_checksum = None;
+        assert_eq!(absent_after_unit.validate_for_request(&request), Ok(()));
 
         let mut rejected_request = push_request();
         rejected_request.mutations[0].op = Operation::Delete;

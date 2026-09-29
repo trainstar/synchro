@@ -760,7 +760,7 @@ fn load_stored_client_state(
     })
 }
 
-fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<String> {
+pub(crate) fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<String> {
     let rows = client
         .select("SELECT scope_id FROM sync_shared_scopes", None, &[])
         .unwrap_or_else(|err| pgrx::error!("loading authoritative client scopes: {}", err));
@@ -793,8 +793,8 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
             .unwrap_or_else(|| pgrx::error!("authoritative client scope is missing"));
         scopes.push(scope_id);
     }
-    // A granted scope is the only assignment a user can gain and lose. The
-    // identity scope is unconditional and a shared scope belongs to every user.
+    // Grants and assignment function results are the per-user assignments a
+    // user can gain and lose. A shared scope belongs to every user.
     let granted = client
         .select(
             "SELECT scope_id FROM sync_user_scopes
@@ -810,6 +810,11 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
             .unwrap_or_else(|err| pgrx::error!("reading granted user scope: {}", err))
             .unwrap_or_else(|| pgrx::error!("granted user scope is missing"));
         if !scopes.iter().any(|existing| existing == &scope_id) {
+            scopes.push(scope_id);
+        }
+    }
+    for scope_id in crate::portable_seed::load_assigned_scopes(client, user_id) {
+        if !scopes.contains(&scope_id) {
             scopes.push(scope_id);
         }
     }
@@ -876,30 +881,14 @@ fn propose_client_connect_state(
 
     let scope_set_version = if client_was_new {
         1
-    } else if prior_scopes != server_scopes {
-        prior_scope_set_version
-            .checked_add(1)
-            .filter(|version| *version <= MAX_SAFE_INTEGER)
-            .unwrap_or_else(|| pgrx::error!("scope set version allocation overflow"))
     } else {
-        prior_scope_set_version
+        next_scope_set_version(&prior_scopes, prior_scope_set_version, server_scopes)
     };
-    let (assigned_history, removed_history) = if client_was_new || generation_renewed {
-        (server_scopes.to_vec(), Vec::new())
-    } else {
-        (
-            server_scopes
-                .iter()
-                .filter(|scope| !prior_scopes.contains(scope))
-                .cloned()
-                .collect(),
-            prior_scopes
-                .iter()
-                .filter(|scope| !server_scopes.contains(scope))
-                .cloned()
-                .collect(),
-        )
-    };
+    let (assigned_history, removed_history) = scope_history_changes(
+        &prior_scopes,
+        server_scopes,
+        client_was_new || generation_renewed,
+    );
 
     Ok(ClientConnectProposal {
         state: ClientConnectState {
@@ -994,6 +983,103 @@ fn persist_client_connect_state(
             )
             .unwrap_or_else(|err| pgrx::error!("invalidating expired client checkpoints: {}", err));
     }
+    persist_scope_transition(
+        client,
+        user_id,
+        &request.client_id,
+        proposal.state.client_generation,
+        proposal.state.scope_set_version,
+        server_scopes,
+        &proposal.assigned_history,
+        &proposal.removed_history,
+    );
+}
+
+/// Returns the scopes that a transition assigns and removes. A full history
+/// records every new scope as assigned, for a new or renewed generation.
+fn scope_history_changes(
+    prior_scopes: &[String],
+    new_scopes: &[String],
+    full_history: bool,
+) -> (Vec<String>, Vec<String>) {
+    if full_history {
+        return (new_scopes.to_vec(), Vec::new());
+    }
+    (
+        new_scopes
+            .iter()
+            .filter(|scope| !prior_scopes.contains(scope))
+            .cloned()
+            .collect(),
+        prior_scopes
+            .iter()
+            .filter(|scope| !new_scopes.contains(scope))
+            .cloned()
+            .collect(),
+    )
+}
+
+pub(crate) fn next_scope_set_version(
+    prior_scopes: &[String],
+    prior_version: i64,
+    new_scopes: &[String],
+) -> i64 {
+    if prior_scopes == new_scopes {
+        return prior_version;
+    }
+    prior_version
+        .checked_add(1)
+        .filter(|version| *version <= MAX_SAFE_INTEGER)
+        .unwrap_or_else(|| pgrx::error!("scope set version allocation overflow"))
+}
+
+pub(crate) fn persist_pull_scope_transition(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    prior_scopes: &[String],
+    new_scopes: &[String],
+    scope_set_version: i64,
+) {
+    client
+        .update(
+            "UPDATE sync_clients
+             SET bucket_subs = $3, scope_set_version = $4, updated_at = now()
+             WHERE user_id = $1 AND client_id = $2",
+            None,
+            &[
+                user_id.into(),
+                client_id.into(),
+                new_scopes.to_vec().into(),
+                scope_set_version.into(),
+            ],
+        )
+        .unwrap_or_else(|err| pgrx::error!("persisting reconciled client scopes: {}", err));
+    let (assigned, removed) = scope_history_changes(prior_scopes, new_scopes, false);
+    persist_scope_transition(
+        client,
+        user_id,
+        client_id,
+        client_generation,
+        scope_set_version,
+        new_scopes,
+        &assigned,
+        &removed,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_scope_transition(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    scope_set_version: i64,
+    new_scopes: &[String],
+    assigned: &[String],
+    removed: &[String],
+) {
     client
         .update(
             "INSERT INTO sync_scope_state (scope_id, stream_generation)
@@ -1003,25 +1089,25 @@ fn persist_client_connect_state(
              WHERE rs.singleton = true
              ON CONFLICT (scope_id) DO NOTHING",
             None,
-            &[server_scopes.to_vec().into()],
+            &[new_scopes.to_vec().into()],
         )
         .unwrap_or_else(|err| pgrx::error!("persisting scope generation state: {}", err));
     persist_scope_history(
         client,
         user_id,
-        &request.client_id,
-        proposal.state.client_generation,
-        proposal.state.scope_set_version,
-        &proposal.assigned_history,
+        client_id,
+        client_generation,
+        scope_set_version,
+        assigned,
         true,
     );
     persist_scope_history(
         client,
         user_id,
-        &request.client_id,
-        proposal.state.client_generation,
-        proposal.state.scope_set_version,
-        &proposal.removed_history,
+        client_id,
+        client_generation,
+        scope_set_version,
+        removed,
         false,
     );
     client
@@ -1035,11 +1121,7 @@ fn persist_client_connect_state(
              WHERE rs.singleton = true
              ON CONFLICT (user_id, client_id, bucket_id) DO NOTHING",
             None,
-            &[
-                user_id.into(),
-                request.client_id.as_str().into(),
-                server_scopes.to_vec().into(),
-            ],
+            &[user_id.into(), client_id.into(), new_scopes.to_vec().into()],
         )
         .unwrap_or_else(|err| pgrx::error!("persisting sync client checkpoints: {}", err));
 }
@@ -1070,7 +1152,11 @@ fn persist_scope_history(
                              WHERE granted.user_id = $1
                                AND granted.scope_id = scope.scope_id
                          ) THEN 'assignment_rule'
-                         ELSE 'shared' END,
+                         WHEN EXISTS (
+                             SELECT 1 FROM sync_shared_scopes shared
+                             WHERE shared.scope_id = scope.scope_id
+                         ) THEN 'shared'
+                         ELSE 'assignment_rule' END,
                     state.membership_generation, state.retention_generation
              FROM unnest($6::text[]) AS scope(scope_id)
              JOIN sync_scope_state state ON state.scope_id = scope.scope_id",

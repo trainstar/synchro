@@ -60,7 +60,7 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-PG-LINUX-X64-001", []string{"TestRealReleaseRegisteredFunctionContract"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
 	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-001-FAULT-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys"}},
-	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys", "TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm", "TestRealRegistryRejectsDeferrablePrimaryKey"}},
+	{"SCN-PERF-FANOUT-001", "OBL-PERF-FANOUT-REGISTRY-002-PG-LINUX-X64-001", []string{"TestRealIssue49RegistryIdentityAndKeyDrift", "TestRealIssue49SecurityRegistryIdentityAndKeys", "TestRealRegistryAcceptsOnlyKeyTypesWithOneTextForm", "TestRealRegistryRejectsDeferrablePrimaryKey", "TestRealRegistryRejectsDatabaseGeneratedPushKey"}},
 	{"SCN-PERF-WARM-CONNECT-001", "OBL-PERF-WARM-CONNECT-PG-LINUX-X64-001", []string{"TestRealIssue49ConnectRejectsFreshReuseAndInvalidEnvelopeValues", "TestRealIssue49SemanticVersionPrecedence", "TestRealIssue49PortableIntegerBoundariesAndCounterOverflow"}},
 	{"SCN-PERF-REBUILD-REQUESTS-001", "OBL-PERF-REBUILD-REQUESTS-PG-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor", "TestRealIssue49RemainingSemantics", "TestRealS05SelectiveRebuildPreservesCheckpoints"}},
 	{"SCN-PERF-REBUILD-REQUESTS-001", "OBL-PERF-REBUILD-REQUESTS-REPLAY-009-FAULT-LINUX-X64-001", []string{"TestRealIssue49RebuildReplayEpochAndMonotonicCursor"}},
@@ -130,6 +130,12 @@ var serverProofBindings = []serverProofBinding{
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-PG-LINUX-X64-001", []string{"TestRealIssue49MembershipActivationIsStagedAndScoped"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-MEMBERSHIP-BACKFILL-FAULT-LINUX-X64-001", []string{"TestRealIssue49MembershipBackfillRetainsContinuationAcrossWorkerLoss"}},
 	{"SCN-PERF-MULTI-SCOPE-PROVENANCE-001", "OBL-PERF-MULTI-SCOPE-REBUILD-001-PG-LINUX-X64-001", []string{"TestRealS05SelectiveRebuildPreservesCheckpoints"}},
+	{"SCN-SCOPE-ASSIGNMENT-PULL-001", "OBL-SCOPE-ASSIGNMENT-PULL-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentPullReconciliation"}},
+	{"SCN-SCOPE-ASSIGNMENT-BOUND-001", "OBL-SCOPE-ASSIGNMENT-BOUND-PG-LINUX-X64-001", []string{"TestRealScopeAssignmentBoundFailsClosed"}},
+	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-PG-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
+	{"SCN-ATOMIC-GROUP-001", "OBL-ATOMIC-GROUP-FAULT-LINUX-X64-001", []string{"TestRealAtomicGroupAppliesAllOrNone"}},
+	{"SCN-PUSH-UNIT-CONSTRAINTS-001", "OBL-PUSH-UNIT-CONSTRAINTS-PG-LINUX-X64-001", []string{"TestRealPushUnitConstraintBoundary"}},
+	{"SCN-PUSH-UNIT-CONSTRAINTS-001", "OBL-PUSH-UNIT-CONSTRAINTS-FAULT-LINUX-X64-001", []string{"TestRealPushUnitConstraintBoundary"}},
 }
 
 var nonScenarioRealTests = map[string]string{
@@ -167,6 +173,12 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealDatasetAuthoredFlow":                                   "regression",
 	"TestRealDatasetCharacterization":                               "benchmark",
 	"TestRealSourceAdmissionRecovery":                               "regression",
+	"TestRealWorkerIdleWritesFollowHeartbeatLimit":                  "regression",
+	"TestRealPushRowStateRereadYieldsToDirectWriter":                "regression",
+	"TestRealWALIdleAcknowledgementFollowsFlush":                    "regression",
+	"TestRealWALIdleAcknowledgementDoesNotSkipTransactions":         "regression",
+	"TestRealWALIdleAcknowledgementCrashRecovery":                   "regression",
+	"TestRealWorkerStartupIdentityFailureRestarts":                  "regression",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {
