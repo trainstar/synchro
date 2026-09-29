@@ -64,7 +64,7 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 	for _, id := range selected {
 		t.Run(id, func(t *testing.T) {
 			if attached {
-				resetContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				resetContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				err := blackbox.ResetAttachedDatabase(resetContext, environment)
 				cancel()
 				if err != nil {
