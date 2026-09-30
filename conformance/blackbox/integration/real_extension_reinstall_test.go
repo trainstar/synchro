@@ -395,6 +395,11 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			t.Fatalf("release prior WAL worker: %v", err)
 		}
 		workerReleased = true
+		// An unbound worker never drops an existing configured slot, so the
+		// documented reinstall drops the slot that the prior worker releases.
+		if err := harness.DropReleasedWorkerSlot(ctx, harness.Names().ReplicationSlot); err != nil {
+			t.Fatalf("drop released prior slot: %v", err)
+		}
 
 		var slotBoundary string
 		deadline := time.Now().Add(90 * time.Second)

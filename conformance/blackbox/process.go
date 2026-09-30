@@ -2686,7 +2686,7 @@ func (h *Harness) ReinstallExtension(ctx context.Context) (result ExtensionReins
 		return ExtensionReinstallResult{}, fmt.Errorf("release WAL worker gate after extension reinstall: %w", err)
 	}
 	if boundSlot.Valid {
-		if err := h.dropReleasedWorkerSlot(ctx, boundSlot.String); err != nil {
+		if err := h.DropReleasedWorkerSlot(ctx, boundSlot.String); err != nil {
 			return ExtensionReinstallResult{}, err
 		}
 	}
@@ -2792,7 +2792,9 @@ func (h *Harness) ResetScenarioServer(ctx context.Context) error {
 	return nil
 }
 
-func (h *Harness) dropReleasedWorkerSlot(ctx context.Context, slot string) error {
+// DropReleasedWorkerSlot waits until the prior worker releases the slot and
+// then drops it, as the documented reinstall procedure does.
+func (h *Harness) DropReleasedWorkerSlot(ctx context.Context, slot string) error {
 	database, err := h.openDatabase(ctx, h.names.Database, h.env.Admin, false)
 	if err != nil {
 		return errors.New("open released worker slot connection failed")
