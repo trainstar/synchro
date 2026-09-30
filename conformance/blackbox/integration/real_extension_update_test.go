@@ -127,7 +127,9 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 					                  WHERE mutation.user_id = $1 AND mutation.client_id = $2),
 					    'versions', (SELECT jsonb_agg(to_jsonb(version) ORDER BY version.record_id)
 					                 FROM synchro.sync_row_versions version WHERE version.record_id = $3),
-					    'source', (SELECT to_jsonb(item) FROM public.cf_items item WHERE item.id = $3::uuid)
+					    'source', (SELECT jsonb_build_object('id', item.id, 'owner_id', item.owner_id, 'value', item.value,
+					                                         'updated_at', item.updated_at, 'deleted_at', item.deleted_at)
+					               FROM public.cf_items item WHERE item.id = $3::uuid)
 					)::text`, clientUser, clientID, pushedID).Scan(&state); err != nil {
 					t.Fatalf("observe retained client state: %v", err)
 				}
@@ -207,6 +209,21 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				)
 			}
 
+			catalogs, err := harness.ObserveExtensionCatalogs(ctx)
+			if err != nil {
+				t.Fatalf("observe extension catalogs: %v", err)
+			}
+			if onlyUpdated, onlyClean := extensionCatalogDifference(catalogs.Updated, catalogs.Clean); len(onlyUpdated) != 0 || len(onlyClean) != 0 {
+				t.Fatalf(
+					"extension objects updated from %s differ from a clean installation: differences=%d\nonly updated:\n%s\nonly clean:\n%s",
+					origin.version,
+					len(onlyUpdated)+len(onlyClean),
+					strings.Join(firstLines(onlyUpdated, 20), "\n"),
+					strings.Join(firstLines(onlyClean, 20), "\n"),
+				)
+			}
+			t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
+
 			// The same client continues with its predecessor identity and cursors.
 			if state := retainedClientState(); state != predecessorState {
 				t.Fatalf("update from %s changed retained client state:\nbefore=%s\nafter=%s", origin.version, predecessorState, state)
@@ -254,21 +271,6 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			requireOnlyChange(pullRealClient(t, ctx, harness, clientToken, updateClient),
 				successorID, "successor-source", successorChanges.Records[0].RowVersion)
 			acknowledgeRealClientCursors(t, ctx, harness, clientToken, updateClient)
-
-			catalogs, err := harness.ObserveExtensionCatalogs(ctx)
-			if err != nil {
-				t.Fatalf("observe extension catalogs: %v", err)
-			}
-			if onlyUpdated, onlyClean := extensionCatalogDifference(catalogs.Updated, catalogs.Clean); len(onlyUpdated) != 0 || len(onlyClean) != 0 {
-				t.Fatalf(
-					"extension objects updated from %s differ from a clean installation: differences=%d\nonly updated:\n%s\nonly clean:\n%s",
-					origin.version,
-					len(onlyUpdated)+len(onlyClean),
-					strings.Join(firstLines(onlyUpdated, 20), "\n"),
-					strings.Join(firstLines(onlyClean, 20), "\n"),
-				)
-			}
-			t.Logf("extension catalog snapshot lines: updated=%d clean=%d", len(catalogs.Updated), len(catalogs.Clean))
 
 			// Without a recorded source requirement, the generation waits for the
 			// operator bootstrap and then activates as Class 3.
