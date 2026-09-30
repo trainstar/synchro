@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -147,6 +148,94 @@ func TestRealPushAcceptsSourceFilledInsertAndTriggerWrites(t *testing.T) {
 	).Scan(&missingRows); err != nil || missingRows != 0 {
 		t.Fatalf("source-filled missing-value write persisted a source row: rows=%d error=%v", missingRows, err)
 	}
+
+	t.Run("trigger writes peer row", func(t *testing.T) {
+		sourceID := "00000000-0000-4000-8f01-000000000011"
+		// The zz_cf_source_filled_items_peer trigger in schema.sql writes this row.
+		peerID := "00000000-0000-4000-8f01-000000000012"
+		status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", phase4PushPayload(
+			client,
+			"00000000-0000-4000-8f01-000000000013",
+			[]map[string]any{{
+				"mutation_id":     "00000000-0000-4000-8f01-000000000014",
+				"table":           table.ID,
+				"pk":              map[string]any{table.PrimaryKeyField: sourceID},
+				"authored_schema": client.Schema,
+				"op":              "insert",
+				"client_version":  phase4ClientVersion,
+				"columns":         map[string]any{table.ValueField: "peer-trigger-source"},
+			}},
+		))
+		if status != http.StatusOK {
+			t.Fatalf("peer trigger insert status = %d, want 200: %#v", status, response)
+		}
+		accepted := requireOutcomeList(t, response, "accepted")
+		if len(accepted) != 1 || len(requireOutcomeList(t, response, "rejected")) != 0 ||
+			accepted[0]["status"] != "applied" {
+			t.Fatalf("peer trigger insert outcome is invalid: %#v", response)
+		}
+		version, versionOK := accepted[0]["server_version"].(string)
+		checksum, checksumOK := accepted[0]["row_checksum"].(map[string]any)
+		if !versionOK || !uuidPattern.MatchString(version) || !checksumOK {
+			t.Fatalf("peer trigger insert response lacks the pushed row identity: %#v", accepted[0])
+		}
+		fences := loadRealPeerTriggerFences(t, ctx, admin, sourceID, peerID)
+		if !fences.samePush || fences.sourceVersion != version {
+			t.Fatalf("peer trigger insert version is not the pushed-row fence version: version=%s fences=%+v", version, fences)
+		}
+		if !uuidPattern.MatchString(fences.peerVersion) || fences.peerVersion == version {
+			t.Fatalf("peer row does not have its own fence version: version=%s fences=%+v", version, fences)
+		}
+		waitForRealSourceFilledPull(t, ctx, harness, token, client, table, sourceID, version, checksum)
+		waitForRealSourceFilledPull(t, ctx, harness, token, client, table, peerID, fences.peerVersion, nil)
+	})
+}
+
+type realPeerTriggerFences struct {
+	sourceVersion string
+	peerVersion   string
+	// samePush reports that one push transaction and mutation wrote both rows.
+	samePush bool
+}
+
+func loadRealPeerTriggerFences(
+	t *testing.T,
+	ctx context.Context,
+	admin *sql.DB,
+	sourceID, peerID string,
+) realPeerTriggerFences {
+	t.Helper()
+	var fences realPeerTriggerFences
+	if err := admin.QueryRowContext(ctx, `
+		WITH fence AS (
+			SELECT fence.new_record_id, fence.row_version, fence.dml_ordinal,
+			       fence.transaction_xid, fence.mutation_id
+			FROM synchro.sync_write_fences fence
+			WHERE fence.physical_schema = 'public'
+			  AND fence.physical_relation = 'cf_source_filled_items'
+			  AND fence.new_record_id IN ($1, $2)
+		)
+		SELECT COALESCE((
+		           SELECT row_version::text FROM fence
+		           WHERE new_record_id = $1 ORDER BY dml_ordinal DESC LIMIT 1
+		       ), ''),
+		       COALESCE((
+		           SELECT row_version::text FROM fence
+		           WHERE new_record_id = $2 ORDER BY dml_ordinal DESC LIMIT 1
+		       ), ''),
+		       (
+		           SELECT count(DISTINCT transaction_xid::text) = 1
+		                  AND count(DISTINCT mutation_id) = 1
+		                  AND count(mutation_id) = count(*)
+		                  AND count(DISTINCT new_record_id) = 2
+		           FROM fence
+		       )`,
+		sourceID,
+		peerID,
+	).Scan(&fences.sourceVersion, &fences.peerVersion, &fences.samePush); err != nil {
+		t.Fatalf("load peer trigger fences: %v", err)
+	}
+	return fences
 }
 
 func waitForRealSourceFilledTable(
@@ -169,6 +258,8 @@ func waitForRealSourceFilledTable(
 	return realSchemaTableReference{}
 }
 
+// waitForRealSourceFilledPull waits until pull returns the record at version.
+// A nil checksum matches the version only.
 func waitForRealSourceFilledPull(
 	t *testing.T,
 	ctx context.Context,
@@ -213,7 +304,8 @@ func waitForRealSourceFilledPull(
 				continue
 			}
 			lastMatch = change
-			if change["server_version"] == version && reflect.DeepEqual(change["row_checksum"], checksum) {
+			if change["server_version"] == version &&
+				(checksum == nil || reflect.DeepEqual(change["row_checksum"], checksum)) {
 				return
 			}
 		}
