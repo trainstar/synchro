@@ -125,6 +125,15 @@ func TestRealWALIdleAcknowledgementFollowsFlush(t *testing.T) {
 	})
 	t.Logf("idle acknowledgement follow delay=%s", followDelay)
 
+	// A long heartbeat limit disables the heartbeat-age acknowledgement during the burst on any host speed.
+	// The barrier acknowledgement below needs a worker poll that starts after the reload.
+	setRealWALIdleHeartbeatLimit(t, ctx, admin, "ALTER SYSTEM SET synchro.max_worker_heartbeat_age_seconds = 86400")
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = admin.ExecContext(cleanupContext, "ALTER SYSTEM RESET synchro.max_worker_heartbeat_age_seconds")
+		_, _ = admin.ExecContext(cleanupContext, "SELECT pg_catalog.pg_reload_conf()")
+	})
 	firstID := "00000000-0000-4000-8231-000000000001"
 	insertRealWALIdleRow(t, ctx, harness, firstID, "idle-acknowledgement-barrier")
 	// The slot advance is visible before the acknowledgement transaction commits.
@@ -153,7 +162,6 @@ func TestRealWALIdleAcknowledgementFollowsFlush(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, "SELECT pg_catalog.pg_current_wal_lsn()::text").Scan(&burstStart); err != nil {
 		t.Fatalf("load WAL position before the unpublished burst: %v", err)
 	}
-	// The burst writes more than the limit before the heartbeat-age acknowledgement is due.
 	// Only the acknowledgement at half the byte lag limit can keep the check ok.
 	burstStarted := time.Now()
 	for row := 0; row < 80; row++ {
@@ -178,6 +186,7 @@ func TestRealWALIdleAcknowledgementFollowsFlush(t *testing.T) {
 	burstEnd := loadRealWALFlushLSN(t, ctx, admin)
 	sampleBurst()
 	t.Logf("idle acknowledgement burst WAL=%d duration=%s largest WAL byte lag=%d", burstBytes, burstDuration, largestByteLag)
+	setRealWALIdleHeartbeatLimit(t, ctx, admin, "ALTER SYSTEM RESET synchro.max_worker_heartbeat_age_seconds")
 
 	retentionDelay := waitForRealWALIdleCondition(t, 90*time.Second, "slot did not release retained WAL after the burst", func() (bool, any) {
 		sample := loadRealWALIdleSample(t, ctx, admin)
@@ -450,6 +459,16 @@ func holdRealWALIdleWorkerGate(t *testing.T, ctx context.Context, harness *black
 		if err := release(ctx); err != nil {
 			t.Fatalf("release WAL worker gate: %v", err)
 		}
+	}
+}
+
+func setRealWALIdleHeartbeatLimit(t *testing.T, ctx context.Context, admin *sql.DB, statement string) {
+	t.Helper()
+	if _, err := admin.ExecContext(ctx, statement); err != nil {
+		t.Fatalf("change the worker heartbeat limit: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_reload_conf()"); err != nil {
+		t.Fatalf("reload the worker heartbeat limit: %v", err)
 	}
 }
 
