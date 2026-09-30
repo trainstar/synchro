@@ -179,6 +179,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWALIdleAcknowledgementDoesNotSkipTransactions":         "regression",
 	"TestRealWALIdleAcknowledgementCrashRecovery":                   "regression",
 	"TestRealWorkerStartupIdentityFailureRestarts":                  "regression",
+	"TestRealScenarioResetLeavesPublicationEqualToRestoredRegistry": "framework",
 }
 
 func TestServerProofMapMatchesAuthoredScenariosAndRealTests(t *testing.T) {
