@@ -16,6 +16,7 @@
         let materialized_commit = literal(materialized.map(|(commit, _)| commit));
         let materialized_end = literal(materialized.map(|(_, end)| end));
         let acknowledged = literal(acknowledged);
+        lock_wal_progress_writers();
         Spi::run(&format!(
             "DO $control$
              DECLARE
@@ -131,6 +132,7 @@
         let generation_start = crate::stream_position::format_lsn(generation_start);
         let acknowledged = acknowledged.map(crate::stream_position::format_lsn);
         let processed = crate::stream_position::format_lsn(processed);
+        lock_wal_progress_writers();
         Spi::run_with_args(
             "UPDATE synchro.sync_wal_progress
              SET generation_start_lsn = $1::pg_lsn,
@@ -338,6 +340,7 @@
 
     #[pg_test]
     fn wal_progress_order_rejects_commit_before_processed_boundary() {
+        lock_wal_progress_writers();
         Spi::run(
             "UPDATE synchro.sync_wal_progress
              SET generation_start_lsn = '0/10',
@@ -421,6 +424,7 @@
             .expect("load readiness test database")
             .expect("readiness test database");
 
+        lock_wal_progress_writers();
         Spi::run_with_args(
             "UPDATE synchro.sync_wal_progress
              SET generation_start_lsn = $1::pg_lsn,

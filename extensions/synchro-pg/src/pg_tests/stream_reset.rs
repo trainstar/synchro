@@ -1079,6 +1079,9 @@
             .as_str()
             .expect("projection bootstrap identity")
             .to_string();
+        // Bootstrap staging locks WAL progress without the WAL worker gate.
+        // This transaction then activates the bootstrap, which takes the gate.
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             crate::stream_reset::lock_stream_reset_sources_for_test(client, &bootstrap_id)?;
             crate::stream_reset::stage_projection_bootstrap_for_test(

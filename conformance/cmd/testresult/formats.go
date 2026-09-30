@@ -71,6 +71,7 @@ type xcResultSummary struct {
 	FinishTime       float64           `json:"finishTime"`
 	PassedTests      int               `json:"passedTests"`
 	Result           string            `json:"result"`
+	RuntimeWarnings  []json.RawMessage `json:"runtimeWarnings"`
 	SkippedTests     int               `json:"skippedTests"`
 	StartTime        float64           `json:"startTime"`
 	Statistics       []json.RawMessage `json:"statistics"`
@@ -308,6 +309,9 @@ func validateXCResult(input io.Reader) (formatSummary, error) {
 	}
 	if result.Result != "Passed" || result.PassedTests != result.TotalTestCount || result.FailedTests != 0 || result.SkippedTests != 0 || result.ExpectedFailures != 0 {
 		return formatSummary{}, errors.New("xcresult contains skipped or failed tests")
+	}
+	if len(result.RuntimeWarnings) != 0 {
+		return formatSummary{}, errors.New("xcresult contains runtime warnings")
 	}
 	if len(result.Devices) == 0 {
 		return formatSummary{}, errors.New("xcresult contains no device result")

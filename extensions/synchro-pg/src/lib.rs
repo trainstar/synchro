@@ -2615,6 +2615,7 @@ mod tests {
     }
 
     fn activate_pending_registry_for_test() {
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             let active_generation = client
                 .select(
@@ -3360,6 +3361,7 @@ mod tests {
 
     /// Insert a changelog entry directly for test fixtures.
     fn insert_changelog(bucket_id: &str, table_name: &str, record_id: &str, operation: i16) {
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             let registry = crate::registry::load_registry_from_client(client)?;
             let registration = registry
@@ -3586,8 +3588,22 @@ mod tests {
         .unwrap();
     }
 
+    /// Parallel tests share one database. Production writers take the WAL
+    /// worker gate before they lock WAL progress, and tests must do the same.
+    /// Without the gate, two tests can each hold a progress lock that the
+    /// other test needs. Call this after table registration, because the
+    /// registry lock comes before the gate.
+    fn lock_wal_progress_writers() {
+        Spi::run_with_args(
+            "SELECT pg_catalog.pg_advisory_xact_lock($1)",
+            &[crate::WAL_WORKER_GATE_LOCK_KEY.into()],
+        )
+        .expect("lock WAL progress writers");
+    }
+
     /// Insert a bucket edge directly for test fixtures.
     fn insert_edge(table_name: &str, record_id: &str, bucket_id: &str) {
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             let registry = crate::registry::load_registry_from_client(client)?;
             let table = registry
