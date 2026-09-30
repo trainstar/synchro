@@ -589,6 +589,87 @@ final class IntegrationTests: XCTestCase {
         }
     }
 
+    func testPushBatchAtRequestLimitAcceptsResponseAboveItAgainstExtension() async throws {
+        let userID = UUID().uuidString.lowercased()
+        let clientID = UUID().uuidString.lowercased()
+        // The long debounce keeps local writes queued until syncNow sends them.
+        let writer = try SynchroClient(config: makeConfig(
+            userID: userID, clientID: clientID, dbPath: tempDBPath(), pushDebounce: 999
+        ))
+        let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
+        addTeardownBlock {
+            await self.stopAndClose(writer)
+            await self.stopAndClose(reader)
+        }
+        try await writer.start()
+        try await syncAndWaitForScheduledRetry(writer)
+
+        let rowCount = 80
+        let probeID = UUID().uuidString.lowercased()
+        _ = try writer.executeBatch([customerInsert(customerID: probeID, userID: userID, name: "")])
+        let probe = try XCTUnwrap(writer.inspectPendingMutations().first { $0.recordID == probeID })
+        let element = try pushMeasure(probe).element
+        let reserve = try PushLimits.envelopeReserve(
+            clientID: clientID,
+            batchID: UUID().uuidString.lowercased(),
+            schemaHash: probe.authoredSchema.hash,
+            atomic: false,
+            encoder: JSONEncoder.synchroEncoder()
+        )
+        // Each row differs from the probe only by fixed-width identifiers and its ASCII
+        // name, so the names fill the batch to exactly the client request measure.
+        let nameOctets = PushLimits.maxRequestOctets - (rowCount - 1) - max(
+            reserve.body + rowCount * element.body,
+            reserve.canonical + rowCount * element.canonical
+        )
+        var names = [probeID: ""]
+        for index in 1..<rowCount {
+            let length = nameOctets / (rowCount - 1) + (index <= nameOctets % (rowCount - 1) ? 1 : 0)
+            names[UUID().uuidString.lowercased()] = String(
+                repeating: String(UnicodeScalar(UInt8(97 + index % 26))), count: length
+            )
+        }
+        _ = try writer.executeBatch(names.filter { $0.key != probeID }.map { customerID, name in
+            customerInsert(customerID: customerID, userID: userID, name: name)
+        })
+        let queued = try writer.inspectPendingMutations().enumerated().reduce(reserve) { octets, entry in
+            octets.appending(try pushMeasure(entry.element).element, afterElement: entry.offset > 0)
+        }
+        XCTAssertEqual(max(queued.body, queued.canonical), PushLimits.maxRequestOctets)
+
+        try await syncAndWaitForScheduledRetry(writer)
+
+        XCTAssertEqual(try writer.pendingChangeCount(), 0)
+        let capture = try writer.inspectClientStateCapture(maximumRecords: 1)
+        XCTAssertEqual(capture.sealedBatchCount, 1)
+        XCTAssertEqual(capture.mutationOutcomeCount, rowCount)
+        XCTAssertEqual(capture.rejectedMutationCount, 0)
+        XCTAssertTrue(try writer.inspectRetainedMutations().isEmpty)
+        let request = try XCTUnwrap(writer.queryOne(
+            "SELECT length(CAST(request_json AS BLOB)) AS octets FROM _synchro_push_batches", params: nil
+        )?["octets"] as Int?)
+        XCTAssertLessThanOrEqual(request, PushLimits.maxRequestOctets)
+        // The stored outcomes are exact slices of the push response, so their sum is a
+        // lower bound of the response octets.
+        let outcomes = try XCTUnwrap(writer.queryOne(
+            """
+            SELECT COUNT(*) AS count, SUM(length(CAST(accepted_json AS BLOB))) AS octets
+            FROM _synchro_pending_changes WHERE lifecycle_state = 'accepted'
+            """,
+            params: nil
+        ))
+        XCTAssertEqual(outcomes["count"] as Int?, rowCount)
+        let responseLowerBound = try XCTUnwrap(outcomes["octets"] as Int?)
+        print("request octets = \(request), accepted outcome octets = \(responseLowerBound)")
+        XCTAssertGreaterThan(responseLowerBound, PushLimits.maxRequestOctets)
+        XCTAssertEqual(try customerNames(writer, userID: userID), names)
+        try await reader.start()
+        try await waitForCondition(timeoutNanoseconds: 30_000_000_000) {
+            try await self.syncAndWaitForScheduledRetry(reader)
+            return try self.customerNames(reader, userID: userID) == names
+        }
+    }
+
     func testPushAppliesNormalizedMutationLimitAgainstExtension() async throws {
         let userID = UUID().uuidString.lowercased()
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
