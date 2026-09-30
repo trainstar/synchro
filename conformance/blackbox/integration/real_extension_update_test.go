@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -48,6 +50,90 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				t.Fatalf("insert source row before extension update: %v", err)
 			}
 			waitForRealWALRecords(t, ctx, harness, "cf_items", beforeID)
+
+			// A client of another user syncs with the predecessor. Its rows stay
+			// apart from the diagnostic-user rows that the retained generation
+			// changes, so each later pull has an exact expected change set.
+			const (
+				clientUser      = "extension-update-user"
+				clientUserScope = "user:" + clientUser
+				clientID        = "extension-update-client"
+				pushedID        = "00000000-0000-4000-8c07-000000000041"
+				successorID     = "00000000-0000-4000-8c07-000000000046"
+			)
+			clientToken, err := harness.NativeBearerToken(ctx, clientUser, time.Now())
+			if err != nil {
+				t.Fatalf("sign extension update client token: %v", err)
+			}
+			if err := harness.Source().ExecContext(ctx,
+				"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, 'predecessor-source')",
+				pushedID, clientUser); err != nil {
+				t.Fatalf("insert predecessor client row: %v", err)
+			}
+			waitForRealWALRecords(t, ctx, harness, "cf_items", pushedID)
+			if err := harness.StartUpdateBaselineAdapter(ctx); err != nil {
+				t.Fatalf("start the adapter on %s: %v; %s", origin.version, err, harness.FailureDiagnostics())
+			}
+			updateClient := connectRealProtocolClient(t, ctx, harness, clientToken, clientID, "cf:global", clientUserScope)
+			rebuildRealScope(t, ctx, harness, clientToken, updateClient, "cf:global", "00000000-0000-4000-8c07-000000000044")
+			clientRecords, _ := rebuildRealScope(t, ctx, harness, clientToken, updateClient, clientUserScope, "00000000-0000-4000-8c07-000000000045")
+			clientTable := requireRealTable(t, updateClient, "cf_items")
+			baseVersion := requireRebuildRecordVersion(t, clientRecords, clientTable, pushedID, "predecessor-source")
+			// This pull stores the server checkpoints that the update must keep.
+			acknowledgeRealClientCursors(t, ctx, harness, clientToken, updateClient)
+			pushPayload := realPushPayload(realPushAttempt{
+				client:        updateClient,
+				batchID:       "00000000-0000-4000-8c07-000000000042",
+				mutationID:    "00000000-0000-4000-8c07-000000000043",
+				clientVersion: "2032-01-01T00:00:00.000000Z",
+				value:         "predecessor-push",
+			}, clientTable, pushedID, baseVersion)
+			firstPush, firstPushBody := issue49RawSync(t, ctx, harness.AdapterURL(), clientToken, "/sync/push", pushPayload)
+			pushOutcomes := requireOutcomeList(t, firstPushBody, "accepted")
+			if firstPush.Status != http.StatusOK || len(pushOutcomes) != 1 || pushOutcomes[0]["status"] != "applied" ||
+				len(requireOutcomeList(t, firstPushBody, "rejected")) != 0 {
+				t.Fatalf("predecessor push on %s was not applied: status=%d body=%s", origin.version, firstPush.Status, firstPush.Body)
+			}
+			pushOutcome := pushOutcomes[0]
+			assertOutcomeValue(t, pushOutcome, clientTable, "predecessor-push")
+			// The source insert and the push each create one change of the row.
+			waitForRealWALEffects(t, ctx, harness, "cf_items", 2, pushedID)
+			pushedChanges, err := harness.Operator().ObserveWALRecordsForTable(ctx, "cf_items", []string{pushedID})
+			if err != nil || len(pushedChanges.Records) != 2 || pushedChanges.Records[1].RowVersion != pushOutcome["server_version"] {
+				t.Fatalf("predecessor WAL did not keep the push version %v: %#v, %v", pushOutcome["server_version"], pushedChanges, err)
+			}
+			if err := harness.StopUpdateBaselineAdapter(ctx); err != nil {
+				t.Fatalf("stop the adapter on %s: %v", origin.version, err)
+			}
+			// The client identity, its checkpoints, the push ledger, and the row
+			// state are the durable state that the update must keep.
+			retainedClientState := func() string {
+				t.Helper()
+				var state string
+				if err := admin.QueryRowContext(ctx, `
+					SELECT jsonb_build_object(
+					    'client', (SELECT jsonb_build_object(
+					                   'generation', client_generation, 'scope_set_version', scope_set_version,
+					                   'scopes', bucket_subs, 'write_epoch', accepted_write_epoch, 'active', is_active)
+					               FROM synchro.sync_clients WHERE user_id = $1 AND client_id = $2),
+					    'checkpoints', (SELECT jsonb_agg(to_jsonb(checkpoint) ORDER BY checkpoint.bucket_id)
+					                    FROM synchro.sync_client_checkpoints checkpoint
+					                    WHERE checkpoint.user_id = $1 AND checkpoint.client_id = $2),
+					    'batches', (SELECT jsonb_agg(to_jsonb(batch) ORDER BY batch.batch_id)
+					                FROM synchro.sync_push_batches batch
+					                WHERE batch.user_id = $1 AND batch.client_id = $2),
+					    'mutations', (SELECT jsonb_agg(to_jsonb(mutation) ORDER BY mutation.mutation_id)
+					                  FROM synchro.sync_push_mutations mutation
+					                  WHERE mutation.user_id = $1 AND mutation.client_id = $2),
+					    'versions', (SELECT jsonb_agg(to_jsonb(version) ORDER BY version.record_id)
+					                 FROM synchro.sync_row_versions version WHERE version.record_id = $3),
+					    'source', (SELECT to_jsonb(item) FROM public.cf_items item WHERE item.id = $3::uuid)
+					)::text`, clientUser, clientID, pushedID).Scan(&state); err != nil {
+					t.Fatalf("observe retained client state: %v", err)
+				}
+				return state
+			}
+			predecessorState := retainedClientState()
 
 			// The predecessor validates a field addition, but its worker waits on
 			// the gate and never activates it. The restart of the update ends the
@@ -120,6 +206,54 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 					update.WorkerStableBeforeUpdate,
 				)
 			}
+
+			// The same client continues with its predecessor identity and cursors.
+			if state := retainedClientState(); state != predecessorState {
+				t.Fatalf("update from %s changed retained client state:\nbefore=%s\nafter=%s", origin.version, predecessorState, state)
+			}
+			replay, _ := issue49RawSync(t, ctx, harness.AdapterURL(), clientToken, "/sync/push", pushPayload)
+			if replay.Status != firstPush.Status || !bytes.Equal(replay.Body, firstPush.Body) {
+				t.Fatalf("push replay after the update from %s changed its response:\nfirst=%d %s\nreplay=%d %s",
+					origin.version, firstPush.Status, firstPush.Body, replay.Status, replay.Body)
+			}
+			if state := retainedClientState(); state != predecessorState {
+				t.Fatalf("push replay after the update from %s changed durable state:\nbefore=%s\nafter=%s", origin.version, predecessorState, state)
+			}
+			requireOnlyChange := func(response map[string]any, recordID, value, version string) map[string]any {
+				t.Helper()
+				changes, ok := response["changes"].([]any)
+				if !ok || len(changes) != 1 {
+					t.Fatalf("pull after the update from %s returned %d changes, want only record %s: %v", origin.version, len(changes), recordID, response["changes"])
+				}
+				change, _ := changes[0].(map[string]any)
+				pk, _ := change["pk"].(map[string]any)
+				row, _ := change["row"].(map[string]any)
+				if change["scope"] != clientUserScope || change["table"] != clientTable.ID || change["op"] != "upsert" ||
+					len(pk) != 1 || pk[clientTable.PrimaryKeyField] != recordID || row[clientTable.ValueField] != value ||
+					change["server_version"] != version {
+					t.Fatalf("pull after the update from %s returned %v, want record %s value %s version %s", origin.version, change, recordID, value, version)
+				}
+				return change
+			}
+			pushedChange := requireOnlyChange(pullRealClient(t, ctx, harness, clientToken, updateClient),
+				pushedID, "predecessor-push", pushedChanges.Records[1].RowVersion)
+			if !reflect.DeepEqual(pushedChange["row"], pushOutcome["server_row"]) ||
+				!reflect.DeepEqual(pushedChange["row_checksum"], pushOutcome["row_checksum"]) {
+				t.Fatalf("pull after the update from %s differs from the push outcome: pull=%v push=%v", origin.version, pushedChange, pushOutcome)
+			}
+			if err := harness.Source().ExecContext(ctx,
+				"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, 'successor-source')",
+				successorID, clientUser); err != nil {
+				t.Fatalf("insert successor client row: %v", err)
+			}
+			waitForRealWALRecords(t, ctx, harness, "cf_items", successorID)
+			successorChanges, err := harness.Operator().ObserveWALRecordsForTable(ctx, "cf_items", []string{successorID})
+			if err != nil || len(successorChanges.Records) != 1 {
+				t.Fatalf("observe successor WAL change: %#v, %v", successorChanges, err)
+			}
+			requireOnlyChange(pullRealClient(t, ctx, harness, clientToken, updateClient),
+				successorID, "successor-source", successorChanges.Records[0].RowVersion)
+			acknowledgeRealClientCursors(t, ctx, harness, clientToken, updateClient)
 
 			catalogs, err := harness.ObserveExtensionCatalogs(ctx)
 			if err != nil {
