@@ -793,6 +793,7 @@
         let before: Option<i64> =
             Spi::get_one("SELECT max(schema_version) FROM sync_schema_manifest").unwrap();
 
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             client.update(
                 "UPDATE sync_registry_generations
