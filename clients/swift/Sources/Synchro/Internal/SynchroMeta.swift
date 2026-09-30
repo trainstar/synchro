@@ -74,7 +74,7 @@ struct LocalBackoffRecord: Sendable, Equatable {
 
 struct LocalRejectedMutation: Sendable, Equatable {
     let mutationID: String
-    let localOrder: Int64
+    let localOrder: Int64?
     let tableName: String
     let recordID: String
     let status: String
@@ -408,7 +408,6 @@ enum SynchroMeta {
         return try rows.map { row in
             guard
                 let mutationID: String = row["mutation_id"],
-                let localOrder: Int64 = row["local_order"],
                 let tableName: String = row["table_name"],
                 let recordID: String = row["record_id"],
                 let status: String = row["status"],
@@ -420,7 +419,7 @@ enum SynchroMeta {
             }
             return LocalRejectedMutation(
                 mutationID: mutationID,
-                localOrder: localOrder,
+                localOrder: row["local_order"],
                 tableName: tableName,
                 recordID: recordID,
                 status: status,

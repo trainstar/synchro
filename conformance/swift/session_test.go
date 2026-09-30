@@ -139,11 +139,13 @@ func TestSessionCancellationKillsUnresponsiveRunner(t *testing.T) {
 func TestSessionBoundsStderr(t *testing.T) {
 	t.Setenv(helperEnabled, "1")
 	session := startTestSession(t, "stderr")
-	defer closeTestSession(t, session)
 
 	if _, err := session.Execute(context.Background(), Request{Operation: "capture"}); err != nil {
 		t.Fatalf("execute stderr command: %v", err)
 	}
+	// The response can arrive before the stderr copy ends. Close waits for
+	// the process, and the wait completes the copy.
+	closeTestSession(t, session)
 	if size := session.process.stderrSize(); size != maximumRunnerStderr {
 		t.Fatalf("stderr size = %d, want %d", size, maximumRunnerStderr)
 	}

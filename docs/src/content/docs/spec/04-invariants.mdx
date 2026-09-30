@@ -206,7 +206,7 @@ A stream reset MUST use a permanent candidate logical slot created through the r
 
 ### Commit Ordered Registry Activation
 
-Each source transaction MUST use exactly the latest validated registry generation whose activation precedes it in commit order, and all events in that transaction MUST use that generation. Activation by notification alone or switching generation within a transaction is a violation of Registry activation and relation drift in [ADR 001].
+Each source row event MUST use exactly the latest validated registry generation whose activation precedes that event in source order. An activation precedes an event when an earlier source transaction commits it, or when its activation message precedes the event in the same source transaction. Activation by notification alone, or a generation switch at any position other than an activation message, is a violation of Registry activation and relation drift in [ADR 001].
 
 ### Qualified Registered Relation Identity
 
@@ -226,7 +226,7 @@ Every actual registered source row operation MUST emit exactly one row-level `AF
 
 ### Reset Baseline Fence Coverage
 
-During reset, every accepted fence visible in the imported candidate-slot snapshot MUST have immutable verified baseline coverage and complete projected row/version state, while every later fence MUST reconcile through candidate-slot WAL. Activation MUST wait until every accepted fence through the barrier has exactly one of those coverage modes. Clearing a fence by LSN guess, fabricating an event, omitting a pre-boundary accepted write, or leaving a covered fence permanently pending is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
+During reset, every accepted fence visible in the imported candidate-slot snapshot MUST have immutable verified baseline coverage and complete projected row/version state, while every later fence MUST reconcile through candidate-slot WAL. Activation MUST wait until every accepted fence through the barrier has exactly one of those coverage modes. The projected row/version state is the final state in that snapshot. It is separate from historical coverage. For a row with a pending fence in that snapshot, the final source-owned version MUST come from a covered fence of that row. If the snapshot does not contain a row and its source version is live, the baseline has no row or version for that row. The reset MUST NOT invent an event or tombstone for such a row. A deletion version in that snapshot MUST remain staged, including a version that a soft-delete update sets. Clearing a fence by LSN guess, fabricating an event, omitting a pre-boundary accepted write, or leaving a covered fence permanently pending is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
 
 ## Scope And Membership Invariants
 
@@ -240,7 +240,7 @@ Membership and impact functions MUST satisfy the exact registered signatures and
 
 ### Dependency Driven Membership Propagation
 
-Every declared external dependency change MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
+Every declared dependency change, including a same-relation sibling dependency, MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
 
 ### Membership Generation Invalidation
 
@@ -518,7 +518,7 @@ Logs, metrics labels, traces, readiness output, and quarantine text MUST NOT con
 
 ### Pgrx Installation Authority
 
-pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
+pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership, except for the reviewed update scripts `synchro_pg--<from>--<to>.sql` in `extensions/synchro-pg/sql`. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
 
 ### Extension Migration Baseline
 

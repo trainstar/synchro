@@ -7,11 +7,11 @@ private struct PackagedSmokeConfig: Decodable {
     let platform: String
     let serverURL: String
     let token: String
-    let userID: String
     let clientID: String
-    let customerID: String
-    let orderID: String
     let phase: String
+    let initialSQL: [String]
+    let durableSQL: [String]
+    let observeSQL: String
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -19,11 +19,11 @@ private struct PackagedSmokeConfig: Decodable {
         case platform
         case serverURL = "server_url"
         case token
-        case userID = "user_id"
         case clientID = "client_id"
-        case customerID = "customer_id"
-        case orderID = "order_id"
         case phase
+        case initialSQL = "initial_sql"
+        case durableSQL = "durable_sql"
+        case observeSQL = "observe_sql"
     }
 }
 
@@ -33,6 +33,7 @@ private struct PackagedSmokePhaseResult: Encodable {
     let status = "passed"
     let pid: Int32
     let pendingChangeCount: Int
+    let observed: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -40,6 +41,7 @@ private struct PackagedSmokePhaseResult: Encodable {
         case status
         case pid
         case pendingChangeCount = "pending_change_count"
+        case observed
     }
 }
 
@@ -170,80 +172,101 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             }
             // start() returns after local recovery and runs the first cycle
             // in the background, so the server schema is not applied yet.
-            // The customers insert requires that schema.
+            // The dataset inserts require that schema.
             try await runAndWaitForScheduledRetry(client) {
                 try await client.syncNow()
             }
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            _ = try client.execute(
-                "INSERT INTO customers (id, user_id, name, balance, is_active, created_at, updated_at) VALUES (?, ?, ?, 0, 1, ?, ?)",
-                params: [smoke.customerID, smoke.userID, "Packaged Consumer", timestamp, timestamp]
-            )
-            _ = try client.execute(
-                "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
-                params: [
-                    smoke.orderID,
-                    smoke.customerID,
-                    smoke.userID,
-                    #"{"street":"Packaged Initial"}"#,
-                    timestamp,
-                    timestamp,
-                ]
-            )
-            try await runAndWaitForScheduledRetry(client) {
-                try await client.syncNow()
+            for statement in smoke.initialSQL {
+                _ = try client.execute(statement)
             }
-            guard try client.pendingChangeCount() == 0 else {
-                throw CocoaError(.fileWriteUnknown)
+            try await awaitConvergence(client, smoke)
+            for statement in smoke.durableSQL {
+                _ = try client.execute(statement)
             }
-            _ = try client.execute(
-                "UPDATE orders SET ship_address = ?, updated_at = ? WHERE id = ?",
-                params: [
-                    #"{"street":"Packaged Durable"}"#,
-                    ISO8601DateFormatter().string(from: Date()),
-                    smoke.orderID,
-                ]
-            )
             let pending = try client.pendingChangeCount()
-            guard pending == 1 else {
+            guard pending == smoke.durableSQL.count else {
                 throw CocoaError(.fileWriteUnknown)
             }
-            try writePhaseResult(phase: smoke.phase, pendingCount: pending, documents: documents)
+            try writePhaseResult(
+                phase: smoke.phase,
+                pendingCount: pending,
+                observed: try observe(client, smoke),
+                documents: documents
+            )
             return
         }
 
-        let durable = try client.queryOne(
-            "SELECT ship_address FROM orders WHERE id = ?",
-            params: [smoke.orderID]
-        )?["ship_address"] as? String
-        let pendingBeforeResume = try client.pendingChangeCount()
-        guard durable == #"{"street":"Packaged Durable"}"#, pendingBeforeResume > 0 else {
+        guard try client.pendingChangeCount() > 0 else {
             throw CocoaError(.fileReadCorruptFile)
         }
         try await runAndWaitForScheduledRetry(client) {
             try await client.start()
         }
-        try await runAndWaitForScheduledRetry(client) {
-            try await client.syncNow()
-        }
+        // The harness authors remote rows while this process is dead. Only
+        // ordinary synchronization can deliver them to the local query path.
+        try await awaitConvergence(client, smoke)
         let pendingAfterResume = try client.pendingChangeCount()
-        guard pendingAfterResume == 0 else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        let observed = try observe(client, smoke)
         await client.stop()
         try await client.close()
         try writePhaseResult(
             phase: smoke.phase,
             pendingCount: pendingAfterResume,
+            observed: observed,
             documents: documents
         )
     }
 
-    private func writePhaseResult(phase: String, pendingCount: Int, documents: URL) throws {
+    // Waits until the queue is empty and the pulled server total equals the
+    // sum of the local sets. Only a server rollup and a pull can make them equal.
+    private func awaitConvergence(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) async throws {
+        let deadline = Date().addingTimeInterval(90)
+        while true {
+            try await runAndWaitForScheduledRetry(client) {
+                try await client.syncNow()
+            }
+            if try client.pendingChangeCount() == 0,
+               try client.queryOne(smoke.observeSQL)?["converged"] as? String == "1" {
+                return
+            }
+            guard Date() < deadline else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    // Reports each observation column as the text of the value that the
+    // public query path returned. An INTEGER value arrives as an Int64.
+    private func observe(_ client: SynchroClient, _ smoke: PackagedSmokeConfig) throws -> [String: String] {
+        guard let row = try client.queryOne(smoke.observeSQL) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        var observed: [String: String] = [:]
+        for field in row.columnNames where field != "converged" {
+            switch row[field] {
+            case let value as String:
+                observed[field] = value
+            case let value as Int64:
+                observed[field] = String(value)
+            default:
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+        return observed
+    }
+
+    private func writePhaseResult(
+        phase: String,
+        pendingCount: Int,
+        observed: [String: String],
+        documents: URL
+    ) throws {
         let result = PackagedSmokePhaseResult(
             phase: phase,
             pid: ProcessInfo.processInfo.processIdentifier,
-            pendingChangeCount: pendingCount
+            pendingChangeCount: pendingCount,
+            observed: observed
         )
         let destination = documents.appendingPathComponent("\(phase)-result.json")
         try JSONEncoder().encode(result).write(to: destination, options: .atomic)

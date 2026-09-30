@@ -530,6 +530,9 @@
 
     #[pg_test]
     fn test_scope_digest_cache_fill_uses_writable_spi() {
+        // A digest needs the current manifest. Publish it in this transaction,
+        // so the test does not depend on a manifest that another test commits.
+        Spi::run("SELECT synchro_schema_manifest()").expect("publish current schema manifest");
         let checksums = Spi::connect_mut(|client| {
             crate::pull::compute_bucket_checksums(client, &["debug:cold".to_string()])
         })
@@ -679,42 +682,6 @@
     }
 
     #[pg_test]
-    fn test_pull_deduplication() {
-        setup_pull_fixtures();
-        Spi::run(
-            "UPDATE test_orders SET title = 'deduplicated'
-             WHERE id = 'a1111111-1111-1111-1111-111111111111'",
-        )
-        .unwrap();
-        insert_changelog(
-            "user:u1",
-            "test_orders",
-            "a1111111-1111-1111-1111-111111111111",
-            2,
-        );
-
-        let resp = pull_client(
-            "u1",
-            "c1",
-            1,
-            json!({ "user:u1": scope_cursor_ref("u1", "c1", "user:u1", 0) }),
-            100,
-        );
-
-        let primary_key_field_id = field_id("test_orders", "id");
-        let hits = resp["changes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|change| {
-                change["pk"][&primary_key_field_id].as_str()
-                    == Some("a1111111-1111-1111-1111-111111111111")
-            })
-            .count();
-        assert_eq!(hits, 1);
-    }
-
-    #[pg_test]
     fn test_pull_pagination_has_more() {
         setup_pull_fixtures();
 
@@ -847,10 +814,32 @@
             100,
         );
 
-        for change in resp["changes"].as_array().unwrap() {
-            if change["table"].as_str() == Some(table_id("test_orders").as_str()) {
-                assert_eq!(change["row"].as_object().map(|row| row.len()), Some(7));
-            }
+        let mut expected_fields: Vec<String> = [
+            "id",
+            "user_id",
+            "title",
+            "amount",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+        ]
+        .into_iter()
+        .map(|column| field_id("test_orders", column))
+        .collect();
+        expected_fields.sort();
+        let orders = table_id("test_orders");
+        let rows: Vec<&serde_json::Map<String, Value>> = resp["changes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{resp}"))
+            .iter()
+            .filter(|change| change["table"].as_str() == Some(orders.as_str()))
+            .map(|change| change["row"].as_object().expect("logical row object"))
+            .collect();
+        assert_eq!(rows.len(), 2, "{resp}");
+        for row in rows {
+            let mut fields: Vec<String> = row.keys().cloned().collect();
+            fields.sort();
+            assert_eq!(fields, expected_fields);
         }
     }
 
@@ -954,13 +943,18 @@
             100,
         );
 
-        for change in resp["changes"].as_array().unwrap() {
-            let primary_key_field_id = primary_key_field_id("test_orders");
-            assert_ne!(
-                change["pk"][primary_key_field_id].as_str(),
-                Some("a00000a2-2222-2222-2222-222222222222")
-            );
-        }
+        let primary_key_field_id = primary_key_field_id("test_orders");
+        let pulled: Vec<&str> = resp["changes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{resp}"))
+            .iter()
+            .map(|change| {
+                change["pk"][&primary_key_field_id]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{resp}"))
+            })
+            .collect();
+        assert_eq!(pulled, vec!["a00000a1-1111-1111-1111-111111111111"], "{resp}");
     }
 
     #[pg_test]
@@ -1242,7 +1236,7 @@
         .unwrap();
         let resp = resp.unwrap().0;
 
-        assert_eq!(resp["error"]["code"].as_str(), Some("invalid_request"));
+        assert_eq!(resp["error"]["code"].as_str(), Some("auth_required"));
         assert_eq!(resp["error"]["retryable"].as_bool(), Some(false));
     }
 

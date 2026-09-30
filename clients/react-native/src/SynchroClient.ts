@@ -28,6 +28,8 @@ import type {
   MutationRejectionCode,
   PendingMutationInspection,
   RejectedMutationInspection,
+  RetainedMutationInspection,
+  RetainedRejectionInspection,
   ClientStateInspection,
   ScopeStateInspection,
   ScopeRowInspection,
@@ -439,6 +441,40 @@ function parsePendingMutationInspection(
   };
 }
 
+export function parseRetainedMutationInspection(
+  value: unknown,
+  index: number
+): RetainedMutationInspection {
+  const name = `pending mutation at index ${index}`;
+  if (!isRecord(value)) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+  }
+  if (value.representation === 'current') {
+    return { representation: 'current', ...parsePendingMutationInspection(value, index) };
+  }
+  if (value.representation !== 'legacy') {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} representation`);
+  }
+  if (!MUTATION_OPERATIONS.includes(value.operation as never)) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} operation`);
+  }
+  if (!LOCAL_MUTATION_STATUSES.includes(value.status as never)) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} status`);
+  }
+  return {
+    representation: 'legacy',
+    mutationID: requiredString(value.mutationID, `${name} ID`),
+    localOrder: requiredSafeInteger(value.localOrder, `${name} local order`),
+    tableName: requiredString(value.tableName, `${name} table name`),
+    recordID: requiredString(value.recordID, `${name} record ID`),
+    operation: value.operation as PendingMutationInspection['operation'],
+    baseVersion: nullableString(value.baseVersion, `${name} base version`),
+    clientVersion: requiredString(value.clientVersion, `${name} client version`),
+    status: value.status as PendingMutationInspection['status'],
+    sourceKind: requiredString(value.sourceKind, `${name} source kind`),
+  };
+}
+
 function parseRejectedMutationInspection(
   value: unknown,
   index: number
@@ -462,6 +498,39 @@ function parseRejectedMutationInspection(
     serverVersion: nullableString(value.serverVersion, `${name} server version`),
     mutationJSON: requiredString(value.mutationJSON, `${name} mutation JSON`),
     rejectionJSON: requiredString(value.rejectionJSON, `${name} rejection JSON`),
+    createdAt: requiredString(value.createdAt, `${name} creation time`),
+    updatedAt: requiredString(value.updatedAt, `${name} update time`),
+  };
+}
+
+export function parseRetainedRejectionInspection(
+  value: unknown,
+  index: number
+): RetainedRejectionInspection {
+  const name = `rejected mutation at index ${index}`;
+  if (!isRecord(value)) {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
+  }
+  if (value.representation === 'current') {
+    return { representation: 'current', ...parseRejectedMutationInspection(value, index) };
+  }
+  if (value.representation !== 'legacy') {
+    throw new InvalidResponseError(`Native bridge returned an invalid ${name} representation`);
+  }
+  const code = parseRejectionCode(value.code);
+  if (code === null) {
+    throw new InvalidResponseError(`Native bridge returned a missing ${name} code`);
+  }
+  return {
+    representation: 'legacy',
+    mutationID: requiredString(value.mutationID, `${name} ID`),
+    tableName: requiredString(value.tableName, `${name} table name`),
+    recordID: requiredString(value.recordID, `${name} record ID`),
+    status: parseMutationStatus(value.status),
+    code,
+    message: nullableString(value.message, `${name} message`),
+    serverRowJSON: nullableString(value.serverRowJSON, `${name} server row JSON`),
+    serverVersion: nullableString(value.serverVersion, `${name} server version`),
     createdAt: requiredString(value.createdAt, `${name} creation time`),
     updatedAt: requiredString(value.updatedAt, `${name} update time`),
   };
@@ -1044,6 +1113,11 @@ export class SynchroClient {
     }
   }
 
+  /**
+   * Returns the unresolved queue records.
+   * @deprecated Use {@link SynchroClient.inspectRetainedMutationRecords}. This method keeps its
+   * published behavior. It rejects when the native queue holds a legacy import.
+   */
   async inspectPendingMutations(): Promise<PendingMutationInspection[]> {
     try {
       return parseNativeArray(
@@ -1055,6 +1129,11 @@ export class SynchroClient {
     }
   }
 
+  /**
+   * Returns every retained queue record, including local terminal states.
+   * @deprecated Use {@link SynchroClient.inspectRetainedMutationRecords}. This method keeps its
+   * published behavior. It rejects when the native queue holds a legacy import.
+   */
   async inspectRetainedMutations(): Promise<PendingMutationInspection[]> {
     try {
       return parseNativeArray(
@@ -1066,12 +1145,41 @@ export class SynchroClient {
     }
   }
 
+  /** Returns every retained queue record in its stored representation. */
+  async inspectRetainedMutationRecords(): Promise<RetainedMutationInspection[]> {
+    try {
+      return parseNativeArray(
+        await this.native.inspectRetainedMutationRecords(),
+        'retained mutation inspection'
+      ).map(parseRetainedMutationInspection);
+    } catch (error) {
+      throw mapNativeError(error);
+    }
+  }
+
+  /**
+   * Returns the retained terminal outcomes.
+   * @deprecated Use {@link SynchroClient.inspectRejectedMutationRecords}. This method keeps its
+   * published behavior. It rejects when a legacy rejection is present.
+   */
   async inspectRejectedMutations(): Promise<RejectedMutationInspection[]> {
     try {
       return parseNativeArray(
         await this.native.inspectRejectedMutations(),
         'rejected mutation inspection'
       ).map(parseRejectedMutationInspection);
+    } catch (error) {
+      throw mapNativeError(error);
+    }
+  }
+
+  /** Returns the retained terminal outcomes in their stored representation. */
+  async inspectRejectedMutationRecords(): Promise<RetainedRejectionInspection[]> {
+    try {
+      return parseNativeArray(
+        await this.native.inspectRejectedMutationRecords(),
+        'rejected mutation inspection'
+      ).map(parseRetainedRejectionInspection);
     } catch (error) {
       throw mapNativeError(error);
     }

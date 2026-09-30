@@ -337,11 +337,11 @@ The operation-specific shapes are:
 
 | Operation | `base_version` | `columns` | `client_version` |
 | --- | --- | --- | --- |
-| `insert` | absent | required nonempty set of authored writable field IDs and values | required |
+| `insert` | absent | required set of authored writable field IDs and values, which can be empty | required |
 | `update` | required nonempty opaque token | required nonempty patch of authored writable field IDs and values | required |
 | `delete` | required nonempty opaque token | absent | required |
 
-Present `null` does not satisfy an absent or required field rule. An empty object is not a nonempty patch. Unknown operations, missing common fields, invalid UUIDs, duplicate mutation IDs, and violations of this presence matrix make the whole request `400 invalid_request`.
+Present `null` does not satisfy an absent or required field rule. An empty object is a valid insert set and is not a nonempty update patch. Unknown operations, missing common fields, invalid UUIDs, duplicate mutation IDs, and violations of this presence matrix make the whole request `400 invalid_request`.
 
 `client_version` is a required client-authored RFC 3339 UTC diagnostic timestamp. It records which local intent produced the mutation. It is not a row precondition, server version, source-row timestamp, ordering key, or conflict input. A client timestamp that is equal to, behind, or ahead of server time has exactly the same conflict authority: none.
 

@@ -814,6 +814,59 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 	scopeRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 10)
 	scopeRequest["predicate"] = scopeCanary
 	_, _ = postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", scopeRequest)
+
+	// The extension parsers receive these type errors. A parser detail can quote the submitted value.
+	pullParserCanary := "security210-pull-limit-5c19a2"
+	pullParserRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 10)
+	pullParserRequest["limit"] = pullParserCanary
+	pullParserStatus, pullParserResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", pullParserRequest)
+	pushParserCanary := "security210-push-generation-7be41d"
+	pushParserRequest := phase4PushPayload(client, "00000000-0000-4000-8a05-000000000004", []map[string]any{
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8a05-000000000005", "00000000-0000-4000-8a05-000000000006", "security210-unused"),
+	})
+	pushParserRequest["client_generation"] = pushParserCanary
+	pushParserStatus, pushParserResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", pushParserRequest)
+
+	// A digest mismatch reaches the handled rebuild warning with the record identity in scope.
+	admin := openIssue49Admin(t, ctx, harness)
+	flipRecordChecksum := func() {
+		t.Helper()
+		if _, err := admin.ExecContext(ctx, `
+			WITH captured AS (
+				UPDATE synchro.sync_captured_rows
+				SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+				WHERE record_id = $1
+				RETURNING record_id
+			)
+			UPDATE synchro.sync_bucket_edges
+			SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+			WHERE record_id IN (SELECT record_id FROM captured)`, recordCanary,
+		); err != nil {
+			t.Fatalf("flip captured row checksum: %v", err)
+		}
+	}
+	flipRecordChecksum()
+	rebuildFailureStatus, rebuildFailureResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/rebuild", map[string]any{
+		"client_id":         client.ID,
+		"client_generation": client.Generation,
+		"schema":            client.Schema,
+		"scope":             "user:diagnostic-user",
+		"rebuild_id":        "00000000-0000-4000-8a05-000000000007",
+		"cursor":            nil,
+		"limit":             100,
+	})
+	flipRecordChecksum()
+	recovered, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8a05-000000000008")
+	requireRebuildRecordVersion(t, recovered, table, recordCanary, valueCanary)
+	parserAndRebuildOutputs := make([][]byte, 0, 3)
+	for _, response := range []map[string]any{pullParserResponse, pushParserResponse, rebuildFailureResponse} {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			t.Fatalf("encode diagnostic response: %v", err)
+		}
+		parserAndRebuildOutputs = append(parserAndRebuildOutputs, encoded)
+	}
+
 	readyStatus, readyBody := getIssue49Readiness(t, ctx, harness.AdapterURL())
 	for readyStatus == http.StatusServiceUnavailable && bytes.Equal(readyBody, []byte(`{"ready":false}`)) {
 		select {
@@ -823,7 +876,6 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		}
 		readyStatus, readyBody = getIssue49Readiness(t, ctx, harness.AdapterURL())
 	}
-	admin := openIssue49Admin(t, ctx, harness)
 	health := loadIssue49Health(t, ctx, admin)
 	wALDiagnostic, diagnosticErr := harness.Operator().WALDiagnostics(ctx)
 	if diagnosticErr != nil {
@@ -849,9 +901,11 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		valueCanary,
 		mutationCanary,
 		scopeCanary,
+		pullParserCanary,
+		pushParserCanary,
 		token,
 	}, credentialCanaries...)
-	outputs := [][]byte{
+	outputs := append([][]byte{
 		[]byte(diagnostics),
 		readyBody,
 		healthJSON,
@@ -859,7 +913,7 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		[]byte(quarantine),
 		metricsBody,
 		tracesBody,
-	}
+	}, parserAndRebuildOutputs...)
 	logDisclosure, err := harness.StopAdapterAndObserveLogDisclosure(ctx, canaries)
 	if err != nil {
 		t.Fatalf("observe operational logs: %v", err)
@@ -872,6 +926,9 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		if status != http.StatusOK || readyStatus != http.StatusOK || !bytes.Equal(readyBody, []byte(`{"ready":true}`)) {
 			t.Fatalf("redaction exercise did not reach healthy operational output: push=%d ready=%d body=%q", status, readyStatus, readyBody)
 		}
+		requireRealProtocolError(t, pullParserStatus, pullParserResponse, http.StatusBadRequest, "invalid_request")
+		requireRealProtocolError(t, pushParserStatus, pushParserResponse, http.StatusBadRequest, "invalid_request")
+		requireRealProtocolError(t, rebuildFailureStatus, rebuildFailureResponse, http.StatusInternalServerError, "sync_integrity_failure")
 		if metricsStatus != http.StatusNotFound || tracesStatus != http.StatusNotFound {
 			t.Fatalf("unconfigured metric or trace output became public: metrics=%d traces=%d", metricsStatus, tracesStatus)
 		}

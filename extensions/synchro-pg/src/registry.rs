@@ -237,6 +237,7 @@ struct CatalogFunction {
 
 #[derive(Debug, Clone)]
 struct StagedReconfiguration {
+    generation: i64,
     sync_columns: Vec<String>,
     exclude_columns: Vec<String>,
 }
@@ -628,10 +629,14 @@ fn synchro_register_table(
             fields,
             capture_fields: Vec::new(),
         };
-        if retained.is_some_and(|active| same_registration_content(active, &registration)) {
+        if let Some(active) =
+            retained.filter(|active| same_registration_content(active, &registration))
+        {
             if !affected_scopes.is_empty() {
                 pgrx::error!("affected scopes require a membership rule transition");
             }
+            // An unchanged request must not conceal drift in the live controls.
+            validate_unchanged_registration(client, active)?;
             return Ok(());
         }
 
@@ -777,6 +782,7 @@ fn synchro_register_table(
             }),
         )?;
         validate_registered_columns_are_published(client, &registration)?;
+        validate_published_relation_identities(client, registration.registry_generation)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -1006,6 +1012,7 @@ fn synchro_register_capture_dependency(
             }),
         )?;
         validate_registered_columns_are_published(client, &registration)?;
+        validate_published_relation_identities(client, registration.registry_generation)?;
         validate_generation_entries(client, registration.registry_generation)?;
         mark_generation_validated(client, registration.registry_generation)?;
         emit_registry_activation_when_ready(client, registration.registry_generation)?;
@@ -1064,6 +1071,9 @@ fn synchro_unregister_table(p_table_name: &str) {
 /// Declare the bounded impact rule from a captured dependency relation to a
 /// synced target relation.
 ///
+/// The dependency and the target can be the same relation. That self-impact
+/// declaration names the sibling rows whose membership a row change affects.
+///
 /// The declaration is copied with the complete registry generation. The worker
 /// evaluates this function after it applies all source projections for a WAL
 /// transaction.
@@ -1090,7 +1100,7 @@ fn synchro_register_membership_dependency(
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
         let base = latest_complete_generation(client)?;
-        let registrations = load_registry_generation_entries(client, base.generation, false)?;
+        let registrations = load_registry_generation_entries(client, base.generation, true, false)?;
         let dependency = registered_relation_for_dependency_reference(
             client,
             &registrations,
@@ -1101,9 +1111,6 @@ fn synchro_register_membership_dependency(
             &registrations,
             p_target_table_name,
         )?;
-        if dependency.relation_id == target.relation_id {
-            pgrx::error!("membership dependency cannot target itself");
-        }
         if !target.is_synced() {
             pgrx::error!("membership dependency target must be a synced relation");
         }
@@ -2791,7 +2798,8 @@ fn load_and_validate_primary_key(
                 a.attgenerated::text AS generated
          FROM pg_catalog.pg_class c
          JOIN pg_catalog.pg_index i ON i.indrelid = c.oid AND i.indisprimary
-         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= i.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute a
            ON a.attrelid = c.oid AND a.attnum = key.attnum AND NOT a.attisdropped
          WHERE c.oid = $1::oid
@@ -3157,17 +3165,21 @@ fn create_next_generation(
     Ok(new_generation)
 }
 
+/// Validate the pending generation and record its source requirement in one
+/// checked update. Every registration path uses this writer.
 fn mark_generation_validated(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
+    let requirement = crate::schema::evaluate_source_requirement(client, generation)?;
     let count = client
         .update(
             "UPDATE synchro.sync_registry_generations
-             SET validated = true
-             WHERE generation = $1 AND state = 'pending' AND NOT validated",
+             SET validated = true, source_requirement = $2
+             WHERE generation = $1 AND state = 'pending' AND NOT validated
+               AND source_requirement IS NULL",
             None,
-            &[generation.into()],
+            &[generation.into(), requirement.into()],
         )?
         .len();
     if count != 1 {
@@ -3176,34 +3188,29 @@ fn mark_generation_validated(
     Ok(())
 }
 
-/// Queue the activation while the runtime has no bound slot.
+/// Preserve the activation when a replacement slot can start after this transaction commits.
 ///
-/// The initial slot binding emits every queued activation once. A direct
-/// emission from an unbound runtime can commit after the replacement slot
-/// boundary, so the worker would decode the same activation twice.
+/// The direct message still follows, so the new slot can decode the
+/// activation of one generation twice. The worker ignores a repeated
+/// activation of a generation that the active chain already contains.
 fn queue_registry_activation_if_unbound(
     client: &mut SpiClient<'_>,
     generation: i64,
-) -> Result<bool, spi::Error> {
-    client
-        .update(
-            "WITH unbound AS (
-                 SELECT singleton
-                 FROM synchro.sync_runtime_state
-                 WHERE singleton AND active_slot_name IS NULL
-                 FOR UPDATE
-             ), queued AS (
-                 INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
-                 SELECT $1 FROM unbound
-                 ON CONFLICT (registry_generation) DO NOTHING
-             )
-             SELECT EXISTS (SELECT 1 FROM unbound) AS unbound",
-            None,
-            &[generation.into()],
-        )?
-        .first()
-        .get_by_name::<bool, &str>("unbound")
-        .map(|unbound| unbound.unwrap_or(false))
+) -> Result<(), spi::Error> {
+    client.update(
+        "WITH unbound AS (
+             SELECT singleton
+             FROM synchro.sync_runtime_state
+             WHERE singleton AND active_slot_name IS NULL
+             FOR UPDATE
+         )
+         INSERT INTO synchro.sync_registry_activation_requests (registry_generation)
+         SELECT $1 FROM unbound
+         ON CONFLICT (registry_generation) DO NOTHING",
+        None,
+        &[generation.into()],
+    )?;
+    Ok(())
 }
 
 fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
@@ -3223,9 +3230,10 @@ fn emit_registry_activation(client: &mut SpiClient<'_>, generation: i64) -> Resu
     Ok(())
 }
 
-/// Class 3 generations remain pending until the operator has staged and
-/// verified an exported-snapshot projection bootstrap. Other generations keep
-/// the normal commit-ordered WAL activation path.
+/// A pending path with a recorded or unknown bootstrap requirement remains
+/// pending until the operator has staged and verified an exported-snapshot
+/// projection bootstrap. Other generations keep the normal commit-ordered WAL
+/// activation path.
 fn emit_registry_activation_when_ready(
     client: &mut SpiClient<'_>,
     generation: i64,
@@ -3233,9 +3241,7 @@ fn emit_registry_activation_when_ready(
     if crate::schema::generation_requires_projection_bootstrap(client, generation)? {
         return Ok(());
     }
-    if queue_registry_activation_if_unbound(client, generation)? {
-        return Ok(());
-    }
+    queue_registry_activation_if_unbound(client, generation)?;
     emit_registry_activation(client, generation)
 }
 
@@ -3901,7 +3907,7 @@ fn ensure_publication_membership(
         }
     } else {
         let create_sql = format!(
-            "CREATE PUBLICATION {} FOR TABLE {}",
+            "CREATE PUBLICATION {} FOR TABLE {} WITH (publish_via_partition_root = true)",
             crate::pull::pg_quote_ident(&publication),
             qualified_relation_name(&relation.schema, &relation.relation),
         );
@@ -3924,6 +3930,65 @@ fn ensure_publication_membership(
             pgrx::error!("configured publication member must not use a column list or a row filter")
         }
     }
+}
+
+/// Rejects a generation when pgoutput would publish a registered relation under another identity.
+///
+/// A partitioned table needs `publish_via_partition_root`, because pgoutput otherwise publishes
+/// each change under its leaf partition. A registered partition is hidden when the publication
+/// publishes it through an ancestor. Registration never changes the
+/// option of an existing publication, because other subscribers can share that publication.
+fn validate_published_relation_identities(
+    client: &SpiClient<'_>,
+    registry_generation: i64,
+) -> Result<(), spi::Error> {
+    let publication = configured_publication_name();
+    let rows = client.select(
+        "SELECT registry.physical_schema::text AS physical_schema,
+                registry.physical_relation::text AS physical_relation,
+                relation.relkind = 'p' AS partitioned,
+                publication.pubviaroot AS via_root
+         FROM synchro.sync_registry registry
+         JOIN pg_catalog.pg_class relation
+           ON relation.oid = registry.physical_relation_oid
+         JOIN pg_catalog.pg_publication publication
+           ON publication.pubname = $2
+         WHERE registry.registry_generation = $1
+           AND NOT EXISTS (
+               SELECT 1
+               FROM pg_catalog.pg_get_publication_tables(publication.pubname::text) published
+               WHERE published.relid = registry.physical_relation_oid
+           )
+         ORDER BY registry.physical_schema, registry.physical_relation
+         LIMIT 1",
+        None,
+        &[registry_generation.into(), publication.as_str().into()],
+    )?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(());
+    };
+    let relation = qualified_relation_name(
+        &row.get_by_name::<String, &str>("physical_schema")?
+            .unwrap_or_default(),
+        &row.get_by_name::<String, &str>("physical_relation")?
+            .unwrap_or_default(),
+    );
+    let partitioned = row
+        .get_by_name::<bool, &str>("partitioned")?
+        .unwrap_or(false);
+    let via_root = row.get_by_name::<bool, &str>("via_root")?.unwrap_or(false);
+    if partitioned && !via_root {
+        pgrx::error!(
+            "registered partitioned table {} requires publication {:?} to set publish_via_partition_root = true",
+            relation,
+            publication
+        );
+    }
+    pgrx::error!(
+        "registered relation {} is not published under its own identity in publication {:?}",
+        relation,
+        publication
+    );
 }
 
 /// Rejects a registered column that pgoutput does not send for the configured publication.
@@ -4562,7 +4627,8 @@ fn load_catalog_for_registrations(
            ON relation.oid = registry.physical_relation_oid
          JOIN pg_catalog.pg_index index
            ON index.indrelid = relation.oid AND index.indisprimary
-         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality) ON true
+         JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+           ON key.ordinality <= index.indnkeyatts
          LEFT JOIN pg_catalog.pg_attribute attribute
            ON attribute.attrelid = relation.oid
           AND attribute.attnum = key.attnum
@@ -4855,6 +4921,7 @@ fn load_catalog_for_registrations(
 
     let staged_rows = client.select(
         "SELECT registry.relation_id::text AS relation_id,
+                registry.registry_generation,
                 registry.sync_columns, registry.exclude_columns
          FROM synchro.sync_registry registry
          JOIN synchro.sync_registry_generations generation
@@ -4875,6 +4942,9 @@ fn load_catalog_for_registrations(
         staged_reconfigurations
             .entry(relation_id)
             .or_insert(StagedReconfiguration {
+                generation: row
+                    .get_by_name::<i64, &str>("registry_generation")?
+                    .unwrap_or_else(|| pgrx::error!("staged registry generation is missing")),
                 sync_columns: row
                     .get_by_name::<Vec<String>, &str>("sync_columns")?
                     .unwrap_or_default(),
@@ -4963,21 +5033,32 @@ fn validate_generation_entries(
     Ok(())
 }
 
+// A stage moves forward only from a parent generation that this transaction
+// created. A committed parent already has an activation message in WAL, so the
+// worker must find that parent's stage unchanged when it activates it.
 fn carry_pending_membership_stage(
     client: &mut SpiClient<'_>,
     generation: i64,
 ) -> Result<(), spi::Error> {
     client.update(
         "WITH lineage AS (
-             SELECT parent_generation
-             FROM synchro.sync_registry_generations
-             WHERE generation = $1 AND state = 'pending'
+             SELECT generation.parent_generation,
+                    parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())
+                        AS parent_in_transaction
+             FROM synchro.sync_registry_generations generation
+             JOIN synchro.sync_registry_generations parent
+               ON parent.generation = generation.parent_generation
+             WHERE generation.generation = $1 AND generation.state = 'pending'
          ), candidate_stages AS (
              SELECT stage.target_relation_ids, stage.affected_scopes
              FROM lineage
              JOIN synchro.sync_registry_membership_stages stage
-               ON stage.registry_generation IN ($1, lineage.parent_generation)
-              AND stage.state = 'pending'
+               ON stage.state = 'pending'
+              AND (
+                  stage.registry_generation = $1
+                  OR (lineage.parent_in_transaction
+                      AND stage.registry_generation = lineage.parent_generation)
+              )
          ), candidate_targets AS (
              SELECT DISTINCT target_relation_id
              FROM candidate_stages stage
@@ -5019,9 +5100,12 @@ fn carry_pending_membership_stage(
     client.update(
         "DELETE FROM synchro.sync_registry_membership_stages stage
          USING synchro.sync_registry_generations generation
+         JOIN synchro.sync_registry_generations parent
+           ON parent.generation = generation.parent_generation
          WHERE generation.generation = $1
            AND stage.registry_generation = generation.parent_generation
-           AND stage.state = 'pending'",
+           AND stage.state = 'pending'
+           AND parent.xmin = pg_catalog.xid(pg_catalog.pg_current_xact_id())",
         None,
         &[generation.into()],
     )?;
@@ -5055,7 +5139,7 @@ pub(crate) fn load_registry_generation_from_client(
     client: &SpiClient<'_>,
     generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, generation, true)
+    load_registry_generation_entries(client, generation, true, true)
 }
 
 /// Load prior metadata for the transaction that activates a validated generation.
@@ -5065,8 +5149,8 @@ pub(crate) fn load_registry_generation_for_activation(
     active_generation: i64,
     final_generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, final_generation, true)?;
-    load_registry_generation_entries(client, active_generation, false)
+    load_registry_generation_entries(client, final_generation, true, true)?;
+    load_registry_generation_entries(client, active_generation, true, false)
 }
 
 /// Load the active decoder registry after a committed registration transaction.
@@ -5104,12 +5188,16 @@ pub(crate) fn load_registry_generation_for_worker(
     }
 }
 
-fn load_registry_generation_entries(
+/// Load one stored generation. `require_validated` rejects a generation that
+/// its validation writer has not recorded. `validate_capture_controls` checks
+/// the live catalog against the stored definition.
+pub(crate) fn load_registry_generation_entries(
     client: &SpiClient<'_>,
     generation: i64,
+    require_validated: bool,
     validate_capture_controls: bool,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    validate_complete_generation(client, generation)?;
+    validate_generation_identity(client, generation, require_validated)?;
     let rows = client.select(
         "SELECT registry_generation,
                  relation_id::text AS relation_id,
@@ -5167,7 +5255,7 @@ fn load_registry_generation_entries(
     }
     let catalog = load_catalog_for_registrations(client, generation, &registrations)?;
     for registration in &registrations {
-        validate_loaded_registration_from_catalog(registration, &catalog)?;
+        validate_loaded_registration_from_catalog(client, registration, &catalog)?;
     }
     let dependencies =
         load_membership_dependencies_from_catalog(client, generation, &registrations, &catalog)?;
@@ -5332,27 +5420,29 @@ fn validate_generation_function_projections(
             {
                 pgrx::error!("membership function reads an undeclared projection field");
             }
-            if source.relation_id != target.relation_id {
-                let dependency = dependencies
-                    .iter()
-                    .find(|dependency| {
-                        dependency.dependency_relation_id == source.relation_id
-                            && dependency.target_relation_id == target.relation_id
-                    })
-                    .unwrap_or_else(|| {
-                        pgrx::error!("membership function has no declared impact dependency")
-                    });
-                let declared: std::collections::HashSet<&str> = dependency
-                    .dependency_columns
-                    .iter()
-                    .map(String::as_str)
-                    .collect();
-                if columns
-                    .iter()
-                    .any(|column| !declared.contains(column.as_str()))
-                {
-                    pgrx::error!("membership function dependency fields are incomplete");
-                }
+            // Catalog dependencies cannot show which rows a read selects. Without a
+            // self-impact declaration, the contract limits an own-projection read to
+            // the supplied row. A declaration must cover every column that it reads.
+            let dependency = dependencies.iter().find(|dependency| {
+                dependency.dependency_relation_id == source.relation_id
+                    && dependency.target_relation_id == target.relation_id
+            });
+            if source.relation_id == target.relation_id && dependency.is_none() {
+                continue;
+            }
+            let dependency = dependency.unwrap_or_else(|| {
+                pgrx::error!("membership function has no declared impact dependency")
+            });
+            let declared: std::collections::HashSet<&str> = dependency
+                .dependency_columns
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if columns
+                .iter()
+                .any(|column| !declared.contains(column.as_str()))
+            {
+                pgrx::error!("membership function dependency fields are incomplete");
             }
         }
     }
@@ -5594,8 +5684,7 @@ fn load_membership_dependencies_from_catalog(
         else {
             pgrx::error!("membership dependency target relation is not registered");
         };
-        if dependency_relation_id == target_relation_id
-            || dependency_registration_kind != dependency_registration.registration_kind
+        if dependency_registration_kind != dependency_registration.registration_kind
             || !target_registration.is_synced()
             || target_table_id != target_registration.table_id
             || dependency_columns.is_empty()
@@ -5656,10 +5745,6 @@ fn load_membership_dependencies_from_catalog(
         });
     }
     Ok(dependencies)
-}
-
-fn validate_complete_generation(client: &SpiClient<'_>, generation: i64) -> Result<(), spi::Error> {
-    validate_generation_identity(client, generation, true)
 }
 
 fn validate_generation_identity(
@@ -6132,19 +6217,22 @@ fn capture_triggers_match_catalog(
     found_guard && found_fence && found_truncate
 }
 
+/// Return the pending generation whose staged column set owns this relation's
+/// live catalog.
 fn staged_reconfiguration_owns_live_catalog_from_catalog(
     registration: &TableRegistration,
     catalog: &GenerationCatalog,
-) -> Result<bool, spi::Error> {
+) -> Result<Option<i64>, spi::Error> {
     let Some(staged) = catalog
         .staged_reconfigurations
         .get(&registration.relation_id)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if staged.sync_columns.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
+    let staged_generation = staged.generation;
     let actual = catalog
         .columns
         .get(&registration.physical_relation_oid)
@@ -6159,7 +6247,7 @@ fn staged_reconfiguration_owns_live_catalog_from_catalog(
         .chain(staged.exclude_columns.iter())
         .map(String::as_str)
         .collect::<std::collections::HashSet<_>>();
-    Ok(staged == actual)
+    Ok((staged == actual).then_some(staged_generation))
 }
 
 fn validate_registration_metadata_from_catalog(
@@ -6318,20 +6406,53 @@ pub(crate) fn validate_loaded_registration(
         registration.registry_generation,
         std::slice::from_ref(registration),
     )?;
-    validate_loaded_registration_from_catalog(registration, &catalog)
+    validate_loaded_registration_from_catalog(client, registration, &catalog)
+}
+
+/// Validate a stored registration against the live catalog before a
+/// registration call reports that nothing changed.
+fn validate_unchanged_registration(
+    client: &SpiClient<'_>,
+    registration: &TableRegistration,
+) -> Result<(), spi::Error> {
+    let catalog = load_catalog_for_registrations(
+        client,
+        registration.registry_generation,
+        std::slice::from_ref(registration),
+    )?;
+    validate_loaded_registration_from_catalog(client, registration, &catalog)
 }
 
 fn validate_loaded_registration_from_catalog(
+    client: &SpiClient<'_>,
     registration: &TableRegistration,
     catalog: &GenerationCatalog,
 ) -> Result<(), spi::Error> {
-    if staged_reconfiguration_owns_live_catalog_from_catalog(registration, catalog)? {
+    if let Some(staged_generation) =
+        staged_reconfiguration_owns_live_catalog_from_catalog(registration, catalog)?
+    {
         // A pending validated generation staged this relation's live shape,
         // so the loaded registration mismatches the catalog by design until
-        // activation. True drift stays detectable because tolerance requires
-        // the staged shape to match the catalog exactly. Issue #43.
-        return Ok(());
+        // activation. The staged registration must still match every live
+        // identity, privilege, key, trigger, and publication control. Issue #43.
+        let staged = load_registry_generation_entries(client, staged_generation, true, false)?
+            .into_iter()
+            .find(|staged| staged.relation_id == registration.relation_id)
+            .unwrap_or_else(|| pgrx::error!("staged registration is missing"));
+        let staged_catalog = load_catalog_for_registrations(
+            client,
+            staged_generation,
+            std::slice::from_ref(&staged),
+        )?;
+        return validate_live_registration_from_catalog(&staged, &staged_catalog);
     }
+    validate_live_registration_from_catalog(registration, catalog)
+}
+
+fn validate_live_registration_from_catalog(
+    registration: &TableRegistration,
+    catalog: &GenerationCatalog,
+) -> Result<(), spi::Error> {
     validate_registration_metadata_from_catalog(registration, catalog)?;
     validate_capture_triggers_from_catalog(registration, catalog)?;
     validate_publication_membership_from_catalog(registration.physical_relation_oid, catalog)?;

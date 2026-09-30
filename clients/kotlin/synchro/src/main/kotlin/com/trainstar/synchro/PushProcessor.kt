@@ -661,6 +661,7 @@ internal class PushProcessor(
     /**
      * Selects the leading eligible mutations without a group that one request can hold.
      * A mutation that is larger than a per-mutation limit gets the push limit state.
+     * A mutation that an empty request with the reserved envelope cannot hold gets it too.
      * The result is empty only when there is no eligible mutation or a group is first.
      */
     private fun selectWithinPushLimits(
@@ -671,6 +672,20 @@ internal class PushProcessor(
         while (true) {
             val candidates = eligibleForSealing(db, batchSize).takeWhile { it.atomicGroupID == null }
             if (candidates.isEmpty()) return emptyList()
+            // An envelope above a request limit is a configuration failure, not an
+            // oversized action. The exception rolls back this transaction, so every
+            // action keeps its state.
+            if (!envelope.withinLimit) {
+                throw SynchroError.BlockingFailure(
+                    SyncFailure(
+                        operation = SyncOperationKind.PUSHING,
+                        code = SyncFailureCode.INVALID_REQUEST,
+                        retryable = false,
+                        message = "The push request envelope exceeds the request limit.",
+                        recoveryAction = SyncRecoveryAction.NONE,
+                    ),
+                )
+            }
             val selection = mutableListOf<Pair<PendingChange, Mutation>>()
             var size = envelope
             for (candidate in candidates) {
@@ -680,12 +695,12 @@ internal class PushProcessor(
                 } catch (_: IllegalArgumentException) {
                     throw SynchroError.InvalidResponse("stored mutation has an invalid portable value")
                 }
-                if (!mutationSize.withinLimits) {
+                val next = size.adding(mutationSize)
+                if (!mutationSize.withinLimits || (selection.isEmpty() && !next.withinLimit)) {
                     markExceedsPushLimit(db, candidate.mutationID)
                     continue
                 }
-                val next = size.adding(mutationSize)
-                if (selection.isNotEmpty() && !next.withinLimit) break
+                if (!next.withinLimit) break
                 selection += candidate to mutation
                 size = next
             }
@@ -985,7 +1000,7 @@ internal class PushProcessor(
             }
             recordID(mutation.pk.getValue(table.primaryKeyFieldID), primaryKey.logicalType)
             when (mutation.op) {
-                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns.isNullOrEmpty()) {
+                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns == null) {
                     throw SynchroError.InvalidResponse("stored insert has an invalid shape")
                 }
                 Operation.UPDATE -> if (mutation.baseVersion.isNullOrEmpty() || mutation.columns.isNullOrEmpty()) {
@@ -1380,7 +1395,7 @@ internal class PushProcessor(
             val values = when (intent.operation) {
                 "insert", "update" -> {
                     val authored = changeTracker.valuesForMutation(db, intent.mutationID)
-                    if (authored.isEmpty()) return null
+                    if (intent.operation == "update" && authored.isEmpty()) return null
                     authored.map { value ->
                         val column = columnsByID[value.fieldID] ?: return null
                         if (column.logicalType != value.logicalType) return null

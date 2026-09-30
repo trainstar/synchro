@@ -44,6 +44,15 @@ Use one of these modes when the adapter validates bearer tokens:
 the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
 the canonical user claim and defaults to `sub`.
 
+The adapter checks the token signature and algorithm. It rejects a token with
+a past `exp` or a future `nbf`. It does not require `exp`, and it does not check
+`aud` or `iss`. The user claim must be a nonempty string. Every rejected token
+returns `401 auth_required`.
+
+A key set refreshes every hour. When a token names an unknown `kid`, the
+adapter also fetches the key set again, at most once in five minutes. Publish a
+new key before the identity provider signs tokens with it.
+
 ```go
 jwksContext, cancelJWKS := context.WithCancel(context.Background())
 defer cancelJWKS()
@@ -102,6 +111,11 @@ Put product authorization in application tables that the function reads. See
 The next successful connect or pull reconciles each assignment change. An added
 scope has a null cursor and rebuilds. A removed scope causes local provenance
 cleanup. A client cannot invent, grant, or retain an unassigned scope.
+
+Pull reconciles the scope set after request validation. A changed set advances
+`scope_set_version` by exactly one and appears in `scope_updates` of the same
+response. A pull that fails validation writes no assignment state. Rebuild does
+not reconcile assignment, and a rebuild of a revoked scope is rejected.
 
 ## Read next
 

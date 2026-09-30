@@ -1,7 +1,7 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -549,11 +549,7 @@ BEGIN
+@@ -553,11 +553,7 @@
         AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
          RETURN NEW;
      END IF;
@@ -14,7 +14,7 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
          RETURN OLD;
      END IF;
      RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
-@@ -566,11 +562,7 @@ RETURNS trigger
+@@ -570,11 +566,7 @@
  LANGUAGE plpgsql
  AS $$
  BEGIN
@@ -27,7 +27,7 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
          RETURN OLD;
      END IF;
      IF TG_OP = 'DELETE'
-@@ -2139,7 +2131,7 @@ AS 'MODULE_PATHNAME', 'synchro_health_detail_wrapper';
+@@ -2144,7 +2136,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
@@ -36,19 +36,19 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchr
  -- synchro_pg::compaction::synchro_inject_client_retention_expiry
  CREATE  FUNCTION "synchro_inject_client_retention_expiry"(
  	"p_user_id" TEXT, /* core::option::Option<&str> */
-@@ -2562,7 +2554,7 @@ CREATE FUNCTION "synchro_capture_fence"()
+@@ -2567,7 +2559,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/lib.rs:2011
-+-- synchro-pg/src/lib.rs:2003
+--- synchro-pg/src/lib.rs:2016
++-- synchro-pg/src/lib.rs:2008
  -- finalize
  
  DO $roles$
 diff --git a/extensions/synchro-pg/src/compaction.rs b/extensions/synchro-pg/src/compaction.rs
 --- a/extensions/synchro-pg/src/compaction.rs
 +++ b/extensions/synchro-pg/src/compaction.rs
-@@ -68,6 +68,16 @@ fn synchro_compact(
+@@ -68,6 +68,16 @@
          validate_stale_inputs(client, p_stale_threshold);
          let deactivated = deactivate_stale_clients(client, p_stale_threshold, p_batch_size);
          let (deleted_entries, last_deleted_seq) = delete_acknowledged_effects(client, p_batch_size);
@@ -68,7 +68,7 @@ diff --git a/extensions/synchro-pg/src/compaction.rs b/extensions/synchro-pg/src
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -578,11 +578,7 @@ BEGIN
+@@ -582,11 +582,7 @@
         AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at THEN
          RETURN NEW;
      END IF;
@@ -81,7 +81,7 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
          RETURN OLD;
      END IF;
      RAISE EXCEPTION 'push ledger rows are immutable outside client retirement'
-@@ -595,11 +591,7 @@ RETURNS trigger
+@@ -599,11 +595,7 @@
  LANGUAGE plpgsql
  AS $$
  BEGIN

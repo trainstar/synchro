@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
+	"github.com/trainstar/synchro/api/go/internal/jsonnumber"
 	_ "modernc.org/sqlite"
 )
 
@@ -407,6 +409,12 @@ func loadPortableSeedPage(
 	).Scan(&raw); err != nil {
 		return portableSeedPage{}, fmt.Errorf("loading portable seed page: %w", err)
 	}
+	// PostgreSQL prints JSONB numbers as numeric text, for example 1e-7 as
+	// 0.0000001. Float verification requires the RFC 8785 spelling.
+	raw, err := jsonnumber.CanonicalizeTokens(raw)
+	if err != nil {
+		return portableSeedPage{}, fmt.Errorf("decoding portable seed page: %w", err)
+	}
 
 	var page portableSeedPage
 	if err := decodeJSON(raw, &page); err != nil {
@@ -416,6 +424,9 @@ func loadPortableSeedPage(
 }
 
 func decodeJSON(raw []byte, target any) error {
+	if !pairedSurrogateEscapes(raw) {
+		return errors.New("JSON contains an unpaired UTF-16 surrogate escape")
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
@@ -429,6 +440,41 @@ func decodeJSON(raw []byte, target any) error {
 		return err
 	}
 	return nil
+}
+
+// pairedSurrogateEscapes rejects an unpaired \uD800-\uDFFF escape. The Go
+// decoder silently replaces one with U+FFFD, while the protocol rejects it.
+func pairedSurrogateEscapes(raw []byte) bool {
+	escapeUnit := func(index int) (rune, bool) {
+		if index+6 > len(raw) || raw[index] != '\\' || raw[index+1] != 'u' {
+			return 0, false
+		}
+		unit, err := strconv.ParseUint(string(raw[index+2:index+6]), 16, 16)
+		return rune(unit), err == nil
+	}
+	for index := 0; index < len(raw); index++ {
+		if raw[index] != '\\' {
+			continue
+		}
+		unit, ok := escapeUnit(index)
+		if !ok {
+			index++
+			continue
+		}
+		switch {
+		case utf16.IsSurrogate(unit) && unit < 0xdc00:
+			low, ok := escapeUnit(index + 6)
+			if !ok || low < 0xdc00 || low > 0xdfff {
+				return false
+			}
+			index += 11
+		case utf16.IsSurrogate(unit):
+			return false
+		default:
+			index += 5
+		}
+	}
+	return true
 }
 
 func positiveSafeInteger(value int64) bool {

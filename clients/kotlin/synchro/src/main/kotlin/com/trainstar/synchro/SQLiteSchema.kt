@@ -91,24 +91,6 @@ object SQLiteSchema {
                 )
             """.trimIndent().replace("\n", " ")
         }
-        val intentHasWritable = if (writable.isEmpty()) {
-            "0"
-        } else {
-            val writableColumnNames = writable.joinToString(", ") { column ->
-                "'${SQLiteHelpers.escapeSQLString(column.name)}'"
-            }
-            """
-                EXISTS (
-                    SELECT 1
-                    FROM _synchro_capture_context AS context
-                    JOIN _synchro_capture_fields AS field
-                      ON field.statement_token = context.statement_token
-                    WHERE context.singleton = 1
-                      AND context.table_name = '$safeName'
-                      AND field.column_name IN ($writableColumnNames)
-                )
-            """.trimIndent().replace("\n", " ")
-        }
         val triggers = mutableListOf<String>()
 
         // DROP existing triggers first (for re-creation on schema update)
@@ -140,14 +122,16 @@ object SQLiteSchema {
         )
 
         // Inserts have no server base. They retain every authored writable field.
+        // An insert that authors no writable field is a key-only create with empty columns.
+        // An insert without its own context did not come through the SDK, so its
+        // authored fields are unknown.
         triggers.add("""
             CREATE TRIGGER $quotedTriggerInsert
             AFTER INSERT ON $quoted
             WHEN $lockCheck
             BEGIN
                 $schemaGuard
-                ${if (writable.isEmpty()) "SELECT RAISE(ABORT, 'synced insert has no writable fields');" else ""}
-                ${if (writable.isEmpty()) "" else "SELECT CASE WHEN NOT ($intentHasWritable) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"}
+                SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM _synchro_capture_context AS context WHERE context.singleton = 1 AND context.table_name = '$safeName') THEN RAISE(ABORT, 'synced insert has no authored capture context') END;
                 $insertMutation
                 ${writable.joinToString("\n") {
                     valueInsertSQL(

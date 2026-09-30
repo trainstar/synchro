@@ -62,7 +62,6 @@ type ForgedCursorCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 	Database   string
 }
 
@@ -444,9 +443,6 @@ func NewForgedCursorCoordinator(config ForgedCursorCoordinatorConfig) (*ForgedCu
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native forged-cursor auth token is empty and harness is unavailable")
 	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
-	}
 	serverURL := config.ServerURL
 	if serverURL == "" && config.Harness != nil {
 		serverURL = config.Harness.AdapterURL()
@@ -667,6 +663,11 @@ func (c *ForgedCursorCoordinator) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errCoordinatorUnavailable
 	}
+	// An exchange holds mu while it waits for a proxy barrier, so release every
+	// barrier before acquiring mu.
+	c.recordProxyFailure(errors.New("React Native forged-cursor coordinator closed"))
+	c.releasePushResponse()
+	c.releaseForgedPage()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -674,8 +675,6 @@ func (c *ForgedCursorCoordinator) Close(ctx context.Context) error {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.releasePushResponse()
-	c.releaseForgedPage()
 	shutdownErr, listenerErr := c.server.Shutdown(ctx), c.listener.Close()
 	if shutdownErr != nil {
 		return fmt.Errorf("shut down React Native forged-cursor server: %w", shutdownErr)
@@ -1324,6 +1323,13 @@ func (c *ForgedCursorCoordinator) bindAndMaterializePush(ctx context.Context) er
 	result, err := c.config.Controller.ProcessStep(ctx, nil, materialize.Operation)
 	if err != nil || result.Disposition != materialize.ExpectedOutcome.Disposition {
 		return fmt.Errorf("materialize React Native forged-cursor step %s: disposition=%q want=%q error=%v", materialize.ID, result.Disposition, materialize.ExpectedOutcome.Disposition, err)
+	}
+	acknowledgement, err := scenarios.AcknowledgementOf(materialize.Operation)
+	if err != nil {
+		return err
+	}
+	if result, err := c.config.Controller.ProcessStep(ctx, nil, acknowledgement); err != nil || result.Disposition != "success" {
+		return fmt.Errorf("await React Native forged-cursor push acknowledgement: disposition=%q error=%v", result.Disposition, err)
 	}
 	return nil
 }

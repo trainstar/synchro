@@ -777,6 +777,38 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 	return nil
 }
 
+// DatabaseFamily lists the files in application-private database storage that
+// belong to client: the destination, its SQLite sidecars, and any seed
+// installation candidate with its sidecars. It reads the device through adb,
+// so it needs no instrumentation session and changes no file.
+func (p *Platform) DatabaseFamily(ctx context.Context, client Client) ([]string, error) {
+	if err := validateClient(client); err != nil {
+		return nil, err
+	}
+	// Session.adb reads only the adb configuration.
+	output, err := (&Session{config: p.config}).adb(ctx, "shell", "run-as", p.config.ApplicationID,
+		"sh", "-c", "'if [ -d databases ]; then ls -a databases; fi'")
+	if err != nil {
+		return nil, fmt.Errorf("list Kotlin Android database storage: %w", err)
+	}
+	return databaseFamily(output, androidDatabaseName(client.DatabaseKey)), nil
+}
+
+// databaseFamily selects the names in one database directory listing that the
+// Kotlin SDK creates for key during open or seed installation.
+func databaseFamily(listing, key string) []string {
+	family := make([]string, 0)
+	for _, name := range strings.Split(listing, "\n") {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == key, name == key+"-journal", name == key+"-wal", name == key+"-shm",
+			strings.HasPrefix(name, "."+key+".seed-"):
+			family = append(family, name)
+		}
+	}
+	return family
+}
+
 func (p *Platform) isInstalled() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1279,7 +1311,7 @@ func (p *Platform) BeginCall(ctx context.Context, request CallRequest) (ClientCa
 		if err != nil {
 			return ClientCallResult{}, err
 		}
-		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable == nil || *connect[0].Retryable {
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable != nil {
 			return ClientCallResult{}, errors.New("Kotlin Android staged call setup connect did not succeed")
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
@@ -2024,7 +2056,7 @@ func restartCaptureExceedsDetailBounds(capture Result) bool {
 		*capture.ProvenanceCount > maximumRecords ||
 		*capture.RowMetadataCount > maximumRecords ||
 		*capture.RebuildAttemptCount > maximumRecords ||
-		*capture.RebuildReceiptCount > maximumRecords
+		!presentJSON(capture.RebuildReceiptProofs)
 }
 
 func restartInvariantClientObservation(client Client, capture Result, restartBoundary bool) (invariants.ClientObservation, error) {
@@ -2332,9 +2364,7 @@ func mapTransportObservation(observation TransportObservation) (StepObservation,
 	if observation.ErrorCode != nil {
 		facts.ErrorCode = clonePointer(observation.ErrorCode)
 	}
-	if observation.Retryable != nil {
-		facts.Retryable = *observation.Retryable
-	}
+	facts.Retryable = wireRetryable(observation)
 	if observation.RequestFacts != nil && observation.RequestFacts.MutationCount != nil {
 		value := *observation.RequestFacts.MutationCount
 		facts.MutationCount = &value
@@ -2350,7 +2380,7 @@ func mapTransportOperations(operations []scenarios.Operation, observations []Tra
 			return nil, err
 		}
 		implicitConnect := observations[0]
-		if operationClass == "connect" || validateTransportObservation(implicitConnect) != nil || implicitConnect.StatusCode != http.StatusOK || implicitConnect.ErrorCode != nil || implicitConnect.Retryable == nil || *implicitConnect.Retryable {
+		if operationClass == "connect" || validateTransportObservation(implicitConnect) != nil || implicitConnect.StatusCode != http.StatusOK || implicitConnect.ErrorCode != nil || implicitConnect.Retryable != nil {
 			return nil, errors.New("Kotlin Android implicit connect observation is invalid")
 		}
 		observations = observations[1:]
@@ -2817,6 +2847,8 @@ func captureClientState(ctx context.Context, client *platformClient) (Result, er
 		return Result{}, errors.New("encode Kotlin Android captured application rows failed")
 	}
 	baseline.ApplicationRows = encoded
+	// The merge does not align storage classes with the added rows.
+	baseline.ApplicationRowStorageClasses = nil
 	return baseline, nil
 }
 
@@ -2842,8 +2874,9 @@ func validateCapturedClientState(result Result) error {
 		(*result.ScopeRowCount <= maximumRecords) != presentJSON(result.ScopeRows) ||
 		(*result.RowMetadataCount <= maximumRecords) != presentJSON(result.RowMetadata) ||
 		(*result.RebuildAttemptCount <= maximumRecords) != presentJSON(result.RebuildAttempts) ||
-		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceipts) ||
-		(*result.RebuildReceiptCount <= maximumRecords) != presentJSON(result.RebuildReceiptProofs) {
+		// Receipt details are bounded by (scope, rebuild) group. The count is in pages.
+		presentJSON(result.RebuildReceipts) != presentJSON(result.RebuildReceiptProofs) ||
+		(!presentJSON(result.RebuildReceiptProofs) && *result.RebuildReceiptCount <= maximumRecords) {
 		return errors.New("Kotlin Android capture detail bounds are inconsistent")
 	}
 	if *result.ScopeRowCount <= maximumRecords {
@@ -2891,7 +2924,7 @@ func validateCapturedClientState(result Result) error {
 			return errors.New("Kotlin Android rebuild-attempt count does not match detail")
 		}
 	}
-	if *result.RebuildReceiptCount <= maximumRecords {
+	if presentJSON(result.RebuildReceiptProofs) {
 		proofs, err := androidRebuildReceiptProofs(result.RebuildReceiptProofs)
 		if err != nil {
 			return err
@@ -2924,8 +2957,8 @@ func androidApplicationRows(raw json.RawMessage) ([]map[string]json.RawMessage, 
 }
 
 func equalAndroidCaptureState(left, right Result) bool {
-	left.ApplicationRows = nil
-	right.ApplicationRows = nil
+	left.ApplicationRows, left.ApplicationRowStorageClasses = nil, nil
+	right.ApplicationRows, right.ApplicationRowStorageClasses = nil, nil
 	return reflect.DeepEqual(left, right)
 }
 

@@ -397,8 +397,13 @@ binding failed and does not process any scope in that request.
 
 ## Normal scope movement
 
-Scope assignment is evaluated by the server on every connect and pull. Scope
-movement has these exact outcomes:
+Scope assignment is evaluated by the server on every connect and pull. Connect
+and pull compute the assigned scope set with the same rule. Pull reconciles the
+set after request validation and before it builds `scope_updates`. A changed
+set advances `scope_set_version` by exactly one and appears in `scope_updates`
+of that response. A failed pull writes no assignment state. Rebuild does not
+reconcile assignment, and a rebuild of a scope that is no longer assigned is
+rejected. Scope movement has these exact outcomes:
 
 - A newly assigned scope appears in `scope_updates.add` with `cursor: null` and
   in `rebuild`. It has no incremental progress until its rebuild finality is

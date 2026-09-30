@@ -179,6 +179,7 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     exit 1
   fi
 
+  python3 "$tool" author-remote --config "$work_dir/initial-config.json" --output "$work_dir/remote.json"
   cp "$work_dir/resume-config.json" "$container/Documents/packaged-smoke-config.json"
   launch_output=$(launch_app "$simulator_udid" "$bundle_id")
   resume_pid=${launch_output##*: }
@@ -220,20 +221,20 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
 
   cp "$container/Documents/initial-result.json" "$work_dir/initial.json"
   cp "$container/Documents/resume-result.json" "$work_dir/resume.json"
+  python3 "$tool" verify-server --config "$work_dir/initial-config.json" --remote "$work_dir/remote.json" --output "$work_dir/server.json"
   set -- python3 "$tool" complete-cell \
     --repo-root "$repo_root" \
     --cell "$PACKAGED_SMOKE_CELL_ID" \
     --output "$cell_result" \
     --initial "$work_dir/initial.json" \
     --resume "$work_dir/resume.json" \
-    --killed-pid "$initial_pid"
+    --killed-pid "$initial_pid" \
+    --remote "$work_dir/remote.json" \
+    --server-verification "$work_dir/server.json"
   distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$archive}
   for artifact in $distribution_artifacts; do
     set -- "$@" --artifact "$artifact"
   done
-  if [ -n "${PACKAGED_SMOKE_EXTRA_ARTIFACT:-}" ]; then
-    set -- "$@" --artifact "$PACKAGED_SMOKE_EXTRA_ARTIFACT"
-  fi
   for expected_hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES is required}; do
     set -- "$@" --expected-artifact-hash "$expected_hash"
   done

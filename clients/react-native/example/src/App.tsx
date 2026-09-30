@@ -427,7 +427,11 @@ function StandardApp() {
         );
         return rows[0]?.name;
       });
-      update('writeTx', value === 'txtest');
+      const committed = await client.queryOne(
+        'SELECT name FROM test_items WHERE id = ? AND note IS ?',
+        [recordID, null]
+      );
+      update('writeTx', value === 'txtest' && committed?.name === 'txtest');
     } catch {
       update('writeTx', false);
     }
@@ -437,23 +441,31 @@ function StandardApp() {
     try {
       await ensureLocalTable();
       const rollbackID = uuid();
+      let insertObserved = false;
+      let rejected = false;
       try {
         await client.writeTransaction(async (tx) => {
-          await tx.execute(
+          const inserted = await tx.execute(
             'INSERT INTO test_items (id, name, note) VALUES (?, ?, ?)',
             [rollbackID, 'should-not-persist', null]
           );
+          const observed = await tx.queryOne(
+            'SELECT name FROM test_items WHERE id = ?',
+            [rollbackID]
+          );
+          insertObserved =
+            inserted.rowsAffected === 1 && observed?.name === 'should-not-persist';
           throw new Error('intentional rollback');
         });
       } catch {
-        // expected
+        rejected = true;
       }
 
       const row = await client.queryOne(
         'SELECT * FROM test_items WHERE id = ?',
         [rollbackID]
       );
-      update('rollbackTx', row === null);
+      update('rollbackTx', insertObserved && rejected && row === null);
     } catch {
       update('rollbackTx', false);
     }
@@ -787,7 +799,39 @@ function StandardApp() {
           (await client.pendingChangeCount()) === 0
         );
       });
-      if (!conflictResolved) {
+      // The native client persists the rejection before it emits the conflict event.
+      const rejection = (await client.inspectRejectedMutationRecords()).find(
+        (record) => record.tableName === 'customers' && record.recordID === pendingRecordID
+      );
+      let rejectionRecorded = false;
+      if (rejection?.representation === 'current') {
+        const mutation = JSON.parse(rejection.mutationJSON) as {
+          mutation_id?: unknown;
+          op?: unknown;
+          columns?: Record<string, unknown>;
+        };
+        const outcome = JSON.parse(rejection.rejectionJSON) as {
+          mutation_id?: unknown;
+          status?: unknown;
+          code?: unknown;
+        };
+        const serverRow =
+          rejection.serverRowJSON === null
+            ? {}
+            : (JSON.parse(rejection.serverRowJSON) as Record<string, unknown>);
+        rejectionRecorded =
+          rejection.status === 'conflict' &&
+          rejection.code === 'version_conflict' &&
+          mutation.mutation_id === rejection.mutationID &&
+          outcome.mutation_id === rejection.mutationID &&
+          outcome.status === 'conflict' &&
+          outcome.code === 'version_conflict' &&
+          mutation.op === 'update' &&
+          Object.values(mutation.columns ?? {}).includes('client-version') &&
+          Object.values(serverRow).includes('server-version');
+      }
+      const conflictOK = conflictResolved && rejectionRecorded;
+      if (!conflictOK) {
         setLastError(
           JSON.stringify({
             conflicts: conflictsRef.current,
@@ -796,12 +840,13 @@ function StandardApp() {
               [pendingRecordID]
             ),
             pendingCount: await client.pendingChangeCount(),
+            rejection,
           })
         );
       }
       pendingConflictRecordRef.current = null;
       setPendingConflictRecordID(null);
-      update('conflict', conflictResolved);
+      update('conflict', conflictOK);
     } catch (error) {
       captureError('conflict', error);
       update('conflict', false);
@@ -1161,12 +1206,21 @@ function StandardApp() {
         (mutation) =>
           mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
       );
+      // The record method returns the same native record with its representation.
+      const records = await seedClient.inspectRetainedMutationRecords();
+      const record = records.find(
+        (mutation) =>
+          mutation.tableName === 'categories' && mutation.recordID === insertedCategoryID
+      );
       const seedInitOK =
         (initialStatus.status === 'uninitialized' || initialStatus.status === 'local_ready') &&
         seededRow?.id === seededCategoryID &&
         seededRow?.name === 'Seed Category' &&
         pending?.tableName === 'categories' &&
-        pending?.operation === 'insert';
+        pending?.operation === 'insert' &&
+        pending.authoredFields.some((field) => field.value === 'Seed Init Category') &&
+        records.length === 1 &&
+        JSON.stringify(record) === JSON.stringify({ representation: 'current', ...pending });
 
       if (!seedInitOK) {
         setLastError(
@@ -1174,6 +1228,7 @@ function StandardApp() {
             initialStatus,
             seededRow,
             pending,
+            records,
           })
         );
       }

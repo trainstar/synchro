@@ -17,6 +17,11 @@ public final class ApplicationTransaction {
         self.writeExecutor = writeExecutor
     }
 
+    /// A view for an inspection snapshot. The caller keeps the connection read-only.
+    convenience init(readOnlyDatabase database: GRDB.Database) {
+        self.init(database: database)
+    }
+
     @discardableResult
     public func execute(
         _ sql: String,
@@ -37,8 +42,7 @@ public final class ApplicationTransaction {
         params: [(any DatabaseValueConvertible)?]? = nil
     ) throws -> [Row] {
         try Row.fetchAll(
-            database,
-            sql: sql,
+            readOnlyStatement(sql),
             arguments: StatementArguments(params ?? [])
         )
     }
@@ -48,10 +52,40 @@ public final class ApplicationTransaction {
         params: [(any DatabaseValueConvertible)?]? = nil
     ) throws -> Row? {
         try Row.fetchOne(
-            database,
-            sql: sql,
+            readOnlyStatement(sql),
             arguments: StatementArguments(params ?? [])
         )
+    }
+
+    /// The query methods use the writable transaction connection. A write with
+    /// RETURNING must fail before it runs, because it bypasses `execute`.
+    private func readOnlyStatement(_ sql: String) throws -> GRDB.Statement {
+        let statement = try database.makeStatement(sql: sql)
+        guard statement.isReadonly else {
+            throw SynchroError.databaseError(underlying: ApplicationTransactionError.writableQuery)
+        }
+        return statement
+    }
+}
+
+/// Local failures at the managed application write boundary.
+enum ApplicationTransactionError: LocalizedError {
+    case writableQuery
+    case captureContextCleanupFailed(cleanup: any Error, write: (any Error)?)
+    case captureContextRemains
+
+    var errorDescription: String? {
+        switch self {
+        case .writableQuery:
+            return "Application queries must be read-only"
+        case .captureContextCleanupFailed(let cleanup, let write?):
+            return "Capture context cleanup failed: \(cleanup.localizedDescription). "
+                + "The write also failed: \(write.localizedDescription)"
+        case .captureContextCleanupFailed(let cleanup, nil):
+            return "Capture context cleanup failed: \(cleanup.localizedDescription)"
+        case .captureContextRemains:
+            return "Application write left capture context before commit"
+        }
     }
 }
 
@@ -85,6 +119,7 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
         var syncedTables: Set<String> = []
         var captureTriggers: Set<String> = []
         var sdkWriteWindowDepth = 0
+        var managedWriteDepth = 0
     }
 
     private let state = NSLock()
@@ -115,6 +150,22 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
     func closeSDKWriteWindow() {
         state.lock()
         protectedState.sdkWriteWindowDepth -= 1
+        state.unlock()
+    }
+
+    /// An application COMMIT or SAVEPOINT would end or split the managed
+    /// transaction before its commit-time checks. The scope covers only the
+    /// application callback. GRDB compiles its own BEGIN, COMMIT, and ROLLBACK
+    /// outside the scope.
+    func openManagedWriteScope() {
+        state.lock()
+        protectedState.managedWriteDepth += 1
+        state.unlock()
+    }
+
+    func closeManagedWriteScope() {
+        state.lock()
+        protectedState.managedWriteDepth -= 1
         state.unlock()
     }
 
@@ -188,6 +239,9 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
 
         case SQLITE_ATTACH, SQLITE_DETACH:
             return SQLITE_DENY
+
+        case SQLITE_TRANSACTION, SQLITE_SAVEPOINT:
+            return snapshot.managedWriteDepth > 0 ? SQLITE_DENY : SQLITE_OK
 
         case SQLITE_PRAGMA:
             return authorizePragma(name: first, argument: second)
@@ -308,7 +362,7 @@ final class ApplicationDatabase: @unchecked Sendable {
     }
 
     func write<T>(_ body: (ApplicationTransaction) throws -> T) throws -> T {
-        try queue.write { database in
+        try managedWrite { database in
             try body(capturingTransaction(database))
         }
     }
@@ -321,7 +375,7 @@ final class ApplicationDatabase: @unchecked Sendable {
         validate: (GRDB.Database, String) throws -> Void,
         _ body: (ApplicationTransaction) throws -> T
     ) throws -> T {
-        try queue.write { database in
+        try managedWrite { database in
             let groupID = UUID().uuidString.lowercased()
             try sdkWrite {
                 try database.execute(
@@ -357,15 +411,46 @@ final class ApplicationDatabase: @unchecked Sendable {
         context: ApplicationCaptureContext,
         _ body: (ApplicationTransaction) throws -> T
     ) throws -> T {
-        try queue.write { database in
+        try managedWrite { database in
             try withCaptureContext(context, database: database) {
                 try body(ApplicationTransaction(database: database))
             }
         }
     }
 
+    /// GRDB begins the transaction before this closure and commits or rolls
+    /// back after it, so the transaction-control scope ends before either.
+    private func managedWrite<T>(_ body: (GRDB.Database) throws -> T) throws -> T {
+        try queue.write { database in
+            policy.openManagedWriteScope()
+            defer { policy.closeManagedWriteScope() }
+            let result = try body(database)
+            try requireNoCaptureContext(database)
+            return result
+        }
+    }
+
+    /// A callback can catch a statement error and continue. Residual context
+    /// changes later capture, so the managed write must not commit it.
+    private func requireNoCaptureContext(_ database: GRDB.Database) throws {
+        let residual = try Bool.fetchOne(
+            database,
+            sql: """
+                SELECT EXISTS (SELECT 1 FROM _synchro_capture_context)
+                    OR EXISTS (SELECT 1 FROM _synchro_capture_fields)
+                """
+        )
+        guard residual == false else {
+            throw SynchroError.databaseError(underlying: ApplicationTransactionError.captureContextRemains)
+        }
+    }
+
+    /// Only INSERT needs an inferred context: it names the authored columns.
+    /// UPDATE and DELETE statements are still validated here, but the update
+    /// trigger captures changed writable fields when no context exists.
     private func captureContext(for sql: String) throws -> ApplicationCaptureContext? {
-        guard let statement = try ApplicationWriteStatement.parse(sql) else { return nil }
+        guard let statement = try ApplicationWriteStatement.parse(sql),
+              statement.operation == "insert" else { return nil }
         writableColumnsLock.lock()
         let table = syncedTablesByName[normalized(statement.tableName)]
         writableColumnsLock.unlock()
@@ -392,15 +477,32 @@ final class ApplicationDatabase: @unchecked Sendable {
         _ body: () throws -> T
     ) throws -> T {
         let token = UUID().uuidString
-        try sdkWrite {
-            try installCaptureContext(context, token: token, database: database)
+        let outcome = Result<T, any Error> {
+            try sdkWrite {
+                try installCaptureContext(context, token: token, database: database)
+            }
+            return try body()
         }
-        defer {
-            try? sdkWrite {
+        do {
+            try sdkWrite {
                 try clearCaptureContext(token: token, database: database)
             }
+        } catch {
+            let writeError: (any Error)?
+            switch outcome {
+            case .success:
+                writeError = nil
+            case let .failure(failure):
+                writeError = failure
+            }
+            throw SynchroError.databaseError(
+                underlying: ApplicationTransactionError.captureContextCleanupFailed(
+                    cleanup: error,
+                    write: writeError
+                )
+            )
         }
-        return try body()
+        return try outcome.get()
     }
 
     private func installCaptureContext(

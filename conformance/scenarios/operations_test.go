@@ -1,11 +1,12 @@
 package scenarios
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
 
-func TestClosedOperationClasses(t *testing.T) {
+func TestClosedOperationKeys(t *testing.T) {
 	want := []string{
 		"artifact/install-portable-seed",
 		"connect/send",
@@ -36,24 +37,6 @@ func TestClosedOperationClasses(t *testing.T) {
 	}
 	if got := OperationKeys(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("OperationKeys() = %v, want %v", got, want)
-	}
-
-	for _, key := range want {
-		class, found := LookupOperationClass(key)
-		if !found {
-			t.Fatalf("LookupOperationClass(%q) did not find a closed operation", key)
-		}
-		wantClass := OperationClassReference
-		if key == "workload/prepare" {
-			wantClass = OperationClassModelRunnerMacro
-		}
-		if class != wantClass {
-			t.Fatalf("LookupOperationClass(%q) = %q, want %q", key, class, wantClass)
-		}
-	}
-
-	if class, found := LookupOperationClass("local/start-sync"); found || class != "" {
-		t.Fatalf("LookupOperationClass accepted a removed operation: %q, %v", class, found)
 	}
 }
 
@@ -196,5 +179,19 @@ func TestSealedRetryPushWireFaultIsClosedAndTargeted(t *testing.T) {
 	}
 	if _, enabled, err := TemporaryUnavailablePushTarget(operation); err != nil || enabled {
 		t.Fatalf("sealed retry enabled temporary unavailable target: %t, %v", enabled, err)
+	}
+}
+
+func TestAcknowledgementOfNamesTheMaterializedStream(t *testing.T) {
+	materialize := Operation{ContractOperation: "process", Name: "materialize-source-transaction", Payload: json.RawMessage(`{"stream_generation":"stream-1","commit_lsn":"10"}`)}
+	acknowledgement, err := AcknowledgementOf(materialize)
+	if err != nil {
+		t.Fatalf("acknowledgement of materialize: %v", err)
+	}
+	if OperationKey(acknowledgement) != "process/acknowledge-contiguous-prefix" || string(acknowledgement.Payload) != `{"stream_generation":"stream-1"}` || ValidateOperation(acknowledgement) != nil {
+		t.Fatalf("acknowledgement = %s %s", OperationKey(acknowledgement), acknowledgement.Payload)
+	}
+	if _, err := AcknowledgementOf(Operation{ContractOperation: "push", Name: "submit", Payload: materialize.Payload}); err == nil {
+		t.Fatal("acknowledgement of a non-materialize operation was accepted")
 	}
 }

@@ -468,7 +468,7 @@
         "operator": "replace",
         "parameters": {
           "scenario": "activate a validated registry generation between two source transactions with notifications reordered",
-          "defect": "select by notification or use two generations within one transaction"
+          "defect": "select by notification or switch generation at a position other than an activation message"
         }
       }
     },

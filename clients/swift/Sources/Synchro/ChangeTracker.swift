@@ -266,75 +266,126 @@ final class ChangeTracker: @unchecked Sendable {
         self.database = database
     }
 
+    /// Returns current records only. A legacy import throws, as in the published releases.
     func inspectPendingMutations() throws -> [PendingMutationInspection] {
-        try inspectMutations(includeTerminal: false)
+        try database.readTransaction { try inspectMutations($0, includeTerminal: false) }.map(Self.currentMutation)
     }
 
+    /// Returns current records only. A legacy import throws, as in the published releases.
     func inspectRetainedMutations() throws -> [PendingMutationInspection] {
-        try inspectMutations(includeTerminal: true)
+        try inspectRetainedMutationRecords().map(Self.currentMutation)
     }
 
-    private func inspectMutations(includeTerminal: Bool) throws -> [PendingMutationInspection] {
-        try database.readTransaction { db in
-            let terminalStates = includeTerminal ? ", 'rejected', 'exceeds_push_limit'" : ""
-            let rows = try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
-                           pk_logical_type, operation, base_version, client_version,
-                           authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
-                           dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
-                    FROM _synchro_pending_changes
-                    WHERE lifecycle_state IN (
-                        'unsealed', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
-                        'superseded_before_send', 'cancelled_before_send'\(terminalStates)
-                    )
-                    ORDER BY local_order
-                    """
-            )
-            return try rows.map { row in
-                let change = PendingChange(row: row)
-                guard let tableID = change.tableID,
-                      let primaryKeyFieldID = change.pkFieldID,
-                      let primaryKeyLogicalType = change.pkLogicalType,
-                      let schemaVersion = change.authoredSchemaVersion,
-                      let schemaHash = change.authoredSchemaHash,
-                      let operation = inspectableOperation(for: change.operation),
-                      let status = localMutationStatus(for: change.lifecycleState) else {
-                    throw SynchroError.invalidResponse(message: "stored mutation cannot be inspected")
-                }
-                let authoredFields = try loadFieldValues(db, mutationID: change.mutationID)
-                    .values
-                    .sorted { $0.fieldID < $1.fieldID }
-                    .map { value in
-                        AuthoredMutationField(
-                            fieldID: value.fieldID,
-                            logicalType: value.logicalType,
-                            value: try value.immutableValue()
-                        )
-                    }
-                return PendingMutationInspection(
-                    mutationID: change.mutationID,
-                    localOrder: change.localOrder,
-                    tableID: tableID,
-                    tableName: change.tableName,
-                    recordID: change.recordID,
-                    primaryKeyFieldID: primaryKeyFieldID,
-                    primaryKeyLogicalType: primaryKeyLogicalType,
-                    operation: operation,
-                    authoredSchema: SchemaRef(version: schemaVersion, hash: schemaHash),
-                    baseVersion: change.baseUpdatedAt,
-                    clientVersion: change.clientUpdatedAt,
-                    status: status,
-                    sourceKind: change.sourceKind,
-                    dependsOnMutationID: change.dependencyMutationID,
-                    normalizedMutationID: change.normalizedMutationID,
-                    sealedBatchID: change.sealedBatchID,
-                    sealedOrdinal: change.sealedOrdinal.flatMap(Int.init),
-                    authoredFields: authoredFields
-                )
-            }
+    func inspectRetainedMutationRecords() throws -> [RetainedMutationInspection] {
+        try database.readTransaction { try inspectMutations($0, includeTerminal: true) }
+    }
+
+    private static func currentMutation(_ record: RetainedMutationInspection) throws -> PendingMutationInspection {
+        guard let mutation = record.current else {
+            throw SynchroError.invalidResponse(message: "stored mutation cannot be inspected")
         }
+        return mutation
+    }
+
+    func inspectMutations(_ db: GRDB.Database, includeTerminal: Bool) throws -> [RetainedMutationInspection] {
+        let terminalStates = includeTerminal ? ", 'rejected', 'exceeds_push_limit'" : ""
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT mutation_id, local_order, table_id, record_id, table_name, pk_field_id,
+                       pk_logical_type, operation, base_version, client_version,
+                       authored_schema_version, authored_schema_hash, lifecycle_state, source_kind,
+                       dependency_mutation_id, normalized_mutation_id, sealed_batch_id, sealed_ordinal
+                FROM _synchro_pending_changes
+                WHERE lifecycle_state IN (
+                    'unsealed', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
+                    'superseded_before_send', 'cancelled_before_send'\(terminalStates)
+                )
+                ORDER BY local_order
+                """
+        )
+        return try rows.map { row in
+            let change = PendingChange(row: row)
+            guard let operation = inspectableOperation(for: change.operation),
+                  let status = localMutationStatus(for: change.lifecycleState) else {
+                throw SynchroError.invalidResponse(message: "stored mutation cannot be inspected")
+            }
+            let storedFields = try loadFieldValues(db, mutationID: change.mutationID)
+            if let legacy = legacyInspection(change, operation: operation, status: status, hasFields: !storedFields.isEmpty) {
+                return .legacy(legacy)
+            }
+            guard let tableID = change.tableID,
+                  let primaryKeyFieldID = change.pkFieldID,
+                  let primaryKeyLogicalType = change.pkLogicalType,
+                  let schemaVersion = change.authoredSchemaVersion,
+                  let schemaHash = change.authoredSchemaHash else {
+                throw SynchroError.invalidResponse(message: "stored mutation cannot be inspected")
+            }
+            let authoredFields = try storedFields
+                .values
+                .sorted { $0.fieldID < $1.fieldID }
+                .map { value in
+                    AuthoredMutationField(
+                        fieldID: value.fieldID,
+                        logicalType: value.logicalType,
+                        value: try value.immutableValue()
+                    )
+                }
+            return .current(PendingMutationInspection(
+                mutationID: change.mutationID,
+                localOrder: change.localOrder,
+                tableID: tableID,
+                tableName: change.tableName,
+                recordID: change.recordID,
+                primaryKeyFieldID: primaryKeyFieldID,
+                primaryKeyLogicalType: primaryKeyLogicalType,
+                operation: operation,
+                authoredSchema: SchemaRef(version: schemaVersion, hash: schemaHash),
+                baseVersion: change.baseUpdatedAt,
+                clientVersion: change.clientUpdatedAt,
+                status: status,
+                sourceKind: change.sourceKind,
+                dependsOnMutationID: change.dependencyMutationID,
+                normalizedMutationID: change.normalizedMutationID,
+                sealedBatchID: change.sealedBatchID,
+                sealedOrdinal: change.sealedOrdinal.flatMap(Int.init),
+                authoredFields: authoredFields
+            ))
+        }
+    }
+
+    /// Returns a legacy record only when the row has the complete legacy-import
+    /// shape. A row with only some modern bindings is not inspectable.
+    private func legacyInspection(
+        _ change: PendingChange,
+        operation: Operation,
+        status: LocalMutationStatus,
+        hasFields: Bool
+    ) -> LegacyMutationInspection? {
+        guard change.sourceKind == "legacy_import",
+              change.tableID == nil,
+              change.pkFieldID == nil,
+              change.pkLogicalType == nil,
+              change.authoredSchemaVersion == nil,
+              change.authoredSchemaHash == nil,
+              change.dependencyMutationID == nil,
+              change.normalizedMutationID == nil,
+              change.sealedBatchID == nil,
+              change.sealedOrdinal == nil,
+              !hasFields else {
+            return nil
+        }
+        return LegacyMutationInspection(
+            mutationID: change.mutationID,
+            localOrder: change.localOrder,
+            tableName: change.tableName,
+            recordID: change.recordID,
+            operation: operation,
+            baseVersion: change.baseUpdatedAt,
+            clientVersion: change.clientUpdatedAt,
+            status: status,
+            sourceKind: change.sourceKind
+        )
     }
 
     func pendingChanges(limit: Int = 100) throws -> [PendingChange] {
@@ -729,11 +780,16 @@ final class ChangeTracker: @unchecked Sendable {
     func pendingChangeCount() throws -> Int {
         try database.writeTransaction { db in
             try normalizeUnsealedChains(db)
-            return try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')"
-            ) ?? 0
+            return try countPendingChanges(db)
         }
+    }
+
+    /// Counts pending changes without normalization, so a read-only snapshot can use it.
+    func countPendingChanges(_ db: GRDB.Database) throws -> Int {
+        try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state NOT IN ('accepted', 'rejected', 'exceeds_push_limit', 'superseded_before_send', 'cancelled_before_send')"
+        ) ?? 0
     }
 
     // MARK: - Immutable capture normalization

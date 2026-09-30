@@ -36,14 +36,13 @@ func loadScopeEmptyPullScenario(t *testing.T) (scenarios.Scenario, scopeEmptyPul
 }
 
 func scopeEmptyPullTestPull(sequence uint64, rebuildScopes int) TransportObservation {
-	retryable := false
 	generation := int64(1)
 	version := int64(1)
 	scopes := 0
 	limit := 100
 	complete := true
 	return TransportObservation{
-		Sequence: sequence, OperationClass: "pull", StatusCode: 200, Retryable: &retryable, DurationNanoseconds: 1,
+		Sequence: sequence, OperationClass: "pull", StatusCode: 200, DurationNanoseconds: 1,
 		CursorFingerprints: []string{}, CursorFingerprintsComplete: &complete,
 		RequestFacts: &TransportRequestFacts{ClientGeneration: &generation, SchemaVersion: 1, SchemaHash: strings.Repeat("a", 64), ScopeSetVersion: &version, ScopeCount: &scopes, Limit: &limit},
 		PullResponseFacts: &TransportPullResponseFacts{
@@ -54,19 +53,17 @@ func scopeEmptyPullTestPull(sequence uint64, rebuildScopes int) TransportObserva
 }
 
 func scopeEmptyPullTestStart() SynchronizationResult {
-	retryable := false
 	protocol := 3
 	version := int64(0)
 	scopes := 0
 	connect := TransportObservation{
-		Sequence: 1, OperationClass: "connect", StatusCode: 200, Retryable: &retryable, DurationNanoseconds: 1,
+		Sequence: 1, OperationClass: "connect", StatusCode: 200, DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{SchemaVersion: 1, SchemaHash: strings.Repeat("a", 64), ProtocolVersion: &protocol, ScopeSetVersion: &version, ScopeCount: &scopes},
 	}
 	return SynchronizationResult{Completion: "idle", transportObservations: []TransportObservation{connect, scopeEmptyPullTestPull(2, 0)}}
 }
 
 func scopeEmptyPullTestSync() SynchronizationResult {
-	retryable := false
 	generation := int64(1)
 	limit := 100
 	present := false
@@ -74,7 +71,7 @@ func scopeEmptyPullTestSync() SynchronizationResult {
 	rebuildID := cursorFingerprint(scopeEmptyPullTestEvidence.rebuildID)
 	finalCursor := cursorFingerprint(scopeEmptyPullTestCursor)
 	rebuild := TransportObservation{
-		Sequence: 4, OperationClass: "rebuild", StatusCode: 200, Retryable: &retryable, DurationNanoseconds: 1,
+		Sequence: 4, OperationClass: "rebuild", StatusCode: 200, DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{ClientGeneration: &generation, SchemaVersion: 1, SchemaHash: strings.Repeat("a", 64), Limit: &limit, ScopeFingerprint: &scope, RebuildIDFingerprint: &rebuildID, CursorPresent: &present},
 		RebuildResponseFacts: &TransportRebuildResponseFacts{
 			RecordCount: 1, HasFinalScopeCursor: true, HasChecksum: true,

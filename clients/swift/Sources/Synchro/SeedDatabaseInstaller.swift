@@ -98,6 +98,7 @@ private enum SeedDatabaseValidator {
         "synchro_v16_capture_storage_validation",
         "synchro_v17_push_limit_capture_dependency",
         "synchro_v18_atomic_groups",
+        "synchro_v18_key_only_insert_capture",
     ]
 
     private static let emptyWorkTables = [

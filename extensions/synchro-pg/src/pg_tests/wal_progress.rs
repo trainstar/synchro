@@ -453,11 +453,11 @@
             "INSERT INTO synchro.sync_wal_transactions (
                  stream_generation, commit_lsn, end_lsn, source_xid,
                  registry_generation, event_count, effect_count, content_hash,
-                 commit_timestamp
+                 content_hash_format, commit_timestamp
              )
              SELECT runtime.stream_generation, '0/A', '0/B', '1'::xid,
                     progress.registry_generation, 0, 0,
-                    pg_catalog.decode(repeat('00', 32), 'hex'), now()
+                    pg_catalog.decode(repeat('00', 32), 'hex'), 2, now()
              FROM synchro.sync_runtime_state runtime
              CROSS JOIN synchro.sync_wal_progress progress
              WHERE runtime.singleton AND progress.singleton;

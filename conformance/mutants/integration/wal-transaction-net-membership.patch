@@ -1,0 +1,68 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+index 6ab84a7..acf552a 100644
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3538,7 +3538,7 @@ fn materialize_transaction(
+     let mut active_generation = generation;
+     let mut effect_bases = HashMap::new();
+     let mut existed_before = HashMap::new();
+-    let mut segments = Vec::with_capacity(applicable_segments.len());
++    let mut effect_count = 0i64;
+     let mut membership_transitions = Vec::with_capacity(activations.len());
+     for (segment, applicable) in applicable_segments.iter().enumerate() {
+         let registry = &registries[segment];
+@@ -3570,15 +3570,6 @@ fn materialize_transaction(
+                 .entry((registry[*index].relation_id.clone(), record_id.clone()))
+                 .or_insert(*present);
+         }
+-        if segment + 1 < registries.len() {
+-            align_edges_before_activation(
+-                client,
+-                transaction,
+-                registry,
+-                &persisted.direct_impacts,
+-                &mut effect_bases,
+-            )?;
+-        }
+         // A relation that a later generation removes has no final projection.
+         persisted.direct_impacts.retain_mut(|impact| {
+             let relation_id = registry[impact.registration_index].relation_id.as_str();
+@@ -3590,23 +3581,22 @@ fn materialize_transaction(
+                 None => false,
+             }
+         });
+-        segments.push((segment_dependencies[segment].as_slice(), persisted));
++        let impacts = collect_membership_impacts(
++            client,
++            projection_target,
++            transaction,
++            evaluation_registry,
++            vec![(segment_dependencies[segment].as_slice(), persisted)],
++        )?;
++        effect_count += materialize_impacts(
++            client,
++            projection_target,
++            transaction,
++            evaluation_registry,
++            impacts,
++            &mut effect_bases,
++        )?;
+     }
+-    let impacts = collect_membership_impacts(
+-        client,
+-        projection_target,
+-        transaction,
+-        evaluation_registry,
+-        segments,
+-    )?;
+-    let effect_count = materialize_impacts(
+-        client,
+-        projection_target,
+-        transaction,
+-        evaluation_registry,
+-        impacts,
+-        &mut effect_bases,
+-    )?;
+     // A membership rule stage replaces the edges of rows that no source event
+     // changed. It waits for the final projection like every other membership
+     // evaluation of the transaction. It compares with the membership before the

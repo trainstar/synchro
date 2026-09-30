@@ -186,8 +186,8 @@ func TestRealMutationControlMutationConservation(t *testing.T) {
 	if err := harness.Source().ExecContext(ctx, `
 		INSERT INTO cf_items (id, owner_id, value) VALUES
 		($1, $2, $3), ($4, $5, $6)`,
-		recordIDs[1], "diagnostic-user", "mutation-conservation-conflict-one",
-		recordIDs[3], "diagnostic-user", "mutation-conservation-conflict-two",
+		recordIDs[1], "diagnostic-user", "mutation-conservation-existing-one",
+		recordIDs[3], "diagnostic-user", "mutation-conservation-existing-two",
 	); err != nil {
 		t.Fatalf("insert mutation conservation conflict rows: %v", err)
 	}
@@ -254,8 +254,27 @@ func TestRealMutationControlMutationConservation(t *testing.T) {
 		}
 		assertCanonicalPhase4Outcome(t, accepted[0], client, table, ownerField, mutationIDs[0], recordIDs[0], values[0], "applied", "")
 		assertCanonicalPhase4Outcome(t, accepted[1], client, table, ownerField, mutationIDs[2], recordIDs[2], values[2], "applied", "")
-		assertCanonicalPhase4Outcome(t, rejected[0], client, table, ownerField, mutationIDs[1], recordIDs[1], values[1], "conflict", "row_already_exists")
-		assertCanonicalPhase4Outcome(t, rejected[1], client, table, ownerField, mutationIDs[3], recordIDs[3], values[3], "conflict", "row_already_exists")
+		// A conflict returns the existing authoritative row, not the rejected
+		// authored value, and the source keeps that existing value.
+		assertCanonicalPhase4Outcome(t, rejected[0], client, table, ownerField, mutationIDs[1], recordIDs[1], "mutation-conservation-existing-one", "conflict", "row_already_exists")
+		assertCanonicalPhase4Outcome(t, rejected[1], client, table, ownerField, mutationIDs[3], recordIDs[3], "mutation-conservation-existing-two", "conflict", "row_already_exists")
+		observer, err := harness.OpenObserver(ctx)
+		if err != nil {
+			t.Fatalf("open mutation conservation source observer: %v", err)
+		}
+		defer observer.Close()
+		for index, want := range map[int]string{
+			0: values[0], 1: "mutation-conservation-existing-one",
+			2: values[2], 3: "mutation-conservation-existing-two",
+		} {
+			var value string
+			if err := observer.QueryRowContext(ctx, "SELECT value FROM public.cf_items WHERE id = $1::uuid", recordIDs[index]).Scan(&value); err != nil {
+				t.Fatalf("read mutation conservation source row %d: %v", index, err)
+			}
+			if value != want {
+				t.Fatalf("source row %d value = %q, want %q", index, value, want)
+			}
+		}
 	})
 }
 

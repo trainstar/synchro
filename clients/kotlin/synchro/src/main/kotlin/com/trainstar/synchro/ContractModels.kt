@@ -506,7 +506,8 @@ data class PushRequest(
                 }
             }
             when (mutation.op) {
-                Operation.INSERT -> if (mutation.baseVersion != null || columns.isEmpty()) {
+                // An insert can author no fields. An update must author at least one field.
+                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns == null) {
                     throw ContractException("insert shape is invalid")
                 }
                 Operation.UPDATE -> if (mutation.baseVersion.isNullOrEmpty() || columns.isEmpty()) {

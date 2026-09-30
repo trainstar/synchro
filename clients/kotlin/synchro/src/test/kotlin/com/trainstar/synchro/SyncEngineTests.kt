@@ -2,20 +2,31 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -41,7 +52,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
 import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -50,6 +64,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.reflect.full.callSuspend
 import kotlin.reflect.full.declaredFunctions
 import kotlin.reflect.jvm.isAccessible
+import kotlin.time.Duration.Companion.seconds
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -85,35 +100,43 @@ class SyncEngineTests {
     }
 
     @Test
-    fun testCallbackRegistrationAndCancellation() = runBlocking {
-        val (engine, _) = makeSyncEngine()
+    fun testCanceledListenersReceiveNoLaterStimulus() = runTest {
+        val (engine, db) = makeIntegrationEnv(handler = ::conflictServerResponse)
 
-        val statusUpdates = mutableListOf<String>()
-        val cancellable1 = engine.onStatusChange { status ->
-            when (status) {
-                is SyncStatus.Error -> statusUpdates.add("error")
-                is SyncStatus.Stopped -> statusUpdates.add("stopped")
-                else -> Unit
-            }
+        val canceledStatuses = mutableListOf<String>()
+        val canceledConflicts = mutableListOf<String>()
+        val liveStatuses = mutableListOf<String>()
+        val liveConflicts = mutableListOf<String>()
+        val statusListener = engine.onStatusChange { canceledStatuses.add(it.state.wireName) }
+        val conflictListener = engine.onConflict { canceledConflicts.add(it.recordID) }
+        engine.onStatusChange { liveStatuses.add(it.state.wireName) }
+        engine.onConflict { liveConflicts.add(it.recordID) }
+
+        engine.stop()
+        assertEquals(listOf("stopped"), canceledStatuses)
+
+        statusListener.cancel()
+        conflictListener.cancel()
+        canceledStatuses.clear()
+        liveStatuses.clear()
+
+        // Each live listener proves that the post-cancel stimulus occurred.
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z")
+            )
+            engine.syncNow()
+        } finally {
+            engine.stop()
         }
 
-        val conflictEvents = mutableListOf<String>()
-        val cancellable2 = engine.onConflict { event ->
-            conflictEvents.add(event.recordID)
-        }
-
-        // Stop triggers a status update
-        engine.stop()
-        assertEquals(listOf("stopped"), statusUpdates)
-
-        // Cancel callbacks
-        cancellable1.cancel()
-        cancellable2.cancel()
-
-        // After cancel, no more updates
-        statusUpdates.clear()
-        engine.stop()
-        assertTrue(statusUpdates.isEmpty())
+        assertEquals(listOf("w1"), liveConflicts)
+        assertTrue(liveStatuses.contains("ready"))
+        assertEquals("stopped", liveStatuses.last())
+        assertEquals(emptyList<String>(), canceledStatuses)
+        assertEquals(emptyList<String>(), canceledConflicts)
     }
 
     @Test
@@ -216,9 +239,10 @@ class SyncEngineTests {
         var startDuringStoppedPublication: Throwable? = null
         val callback = engine.onStatusChange { status ->
             if (status is SyncStatus.Stopped) {
-                startDuringStoppedPublication = runCatching {
-                    runBlocking { engine.start() }
-                }.exceptionOrNull()
+                // D-03 rejects an inline start, so an independent start observes the stop barrier.
+                startDuringStoppedPublication = CompletableFuture.supplyAsync {
+                    runCatching { runBlocking { engine.start() } }.exceptionOrNull()
+                }.get(5, TimeUnit.SECONDS)
             }
         }
         try {
@@ -422,6 +446,112 @@ class SyncEngineTests {
             releaseDispatch.countDown()
             scheduler.join(2_000)
             runBlocking { engine.stop() }
+        }
+    }
+
+    @Test
+    fun ownedCycleCancelledAfterBodyEntryReleasesItsOperationAfterCleanup() {
+        val holdAuthentication = AtomicBoolean(false)
+        val authenticationEntered = CountDownLatch(1)
+        val cleanupEntered = CountDownLatch(1)
+        val releaseCleanup = CompletableDeferred<Unit>()
+        val (engine, _) = makeIntegrationEnv(
+            authProvider = {
+                if (holdAuthentication.get()) {
+                    try {
+                        authenticationEntered.countDown()
+                        awaitCancellation()
+                    } finally {
+                        withContext(NonCancellable) {
+                            cleanupEntered.countDown()
+                            releaseCleanup.await()
+                        }
+                    }
+                }
+                "token"
+            },
+            handler = ::readyServerResponse,
+        )
+        val statuses = CopyOnWriteArrayList<SyncStatus>()
+        withCleanup { defer ->
+            val cycleThread = OwnedCycleThread()
+            defer(cycleThread::shutdown)
+            val callerDispatcher = StandardTestDispatcher()
+            val callerScope = CoroutineScope(callerDispatcher)
+            defer { callerScope.cancel() }
+            val stopDispatcher = StandardTestDispatcher()
+            val stopScope = CoroutineScope(stopDispatcher)
+            defer { stopScope.cancel() }
+            defer { runBlocking { withTimeout(5_000) { engine.stop() } } }
+            runBlocking { engine.start() }
+            val ownedWork = observeEngineOwnedWork(engine, cycleThread.dispatcher)
+            val managedLoop = ownedWork.lifecycleJob.children.single()
+            val registration = engine.onStatusChange { statuses += it }
+            defer(registration::cancel)
+
+            defer { releaseCleanup.complete(Unit) }
+            holdAuthentication.set(true)
+            var callerFailure: Throwable? = null
+            val caller = callerScope.launch {
+                callerFailure = runCatching { engine.syncNow() }.exceptionOrNull()
+            }
+            callerDispatcher.scheduler.runCurrent()
+            assertTrue("the cycle body must start", authenticationEntered.await(5, TimeUnit.SECONDS))
+
+            val stop = stopScope.launch { engine.stop() }
+            stopDispatcher.scheduler.runCurrent()
+            assertTrue("stop must cancel the running cycle", cleanupEntered.await(5, TimeUnit.SECONDS))
+            // The held cycle is now the only operation that stop can wait for.
+            runBlocking { withTimeout(5_000) { managedLoop.join() } }
+            stopDispatcher.scheduler.runCurrent()
+            assertFalse("stop must wait for the cancelled cycle cleanup", stop.isCompleted)
+            assertEquals(listOf<SyncStatus>(SyncStatus.Pulling), statuses.toList())
+
+            releaseCleanup.complete(Unit)
+            runTest(stopDispatcher, timeout = 5.seconds) { stop.join() }
+            cycleThread.awaitEarlierTasks()
+
+            assertEquals(listOf(SyncStatus.Pulling, SyncStatus.Stopped), statuses.toList())
+            assertEquals(SyncStatus.Stopped, engine.getSyncStatus())
+            assertFalse("stop must not require the external caller dispatcher", caller.isCompleted)
+            runTest(callerDispatcher, timeout = 5.seconds) { caller.join() }
+            assertTrue(callerFailure is CancellationException)
+            assertEquals(emptyList<Throwable>(), ownedWork.uncaughtFailures.toList())
+        }
+    }
+
+    @Test
+    fun completedOwnedCyclesReleaseTheirOperationsOnce() {
+        val (engine, _) = makeIntegrationEnv(handler = ::readyServerResponse)
+        val statuses = CopyOnWriteArrayList<SyncStatus>()
+        withCleanup { defer ->
+            val cycleThread = OwnedCycleThread()
+            defer(cycleThread::shutdown)
+            defer { runBlocking { withTimeout(5_000) { engine.stop() } } }
+            runBlocking { engine.start() }
+            val ownedWork = observeEngineOwnedWork(engine, cycleThread.dispatcher)
+            val registration = engine.onStatusChange { statuses += it }
+            defer(registration::cancel)
+
+            // A repeated release in the first cycle makes the second cycle release underflow.
+            runBlocking {
+                engine.syncNow()
+                engine.syncNow()
+                withTimeout(5_000) { engine.stop() }
+            }
+            cycleThread.awaitEarlierTasks()
+
+            assertEquals(
+                listOf(
+                    SyncStatus.Pulling,
+                    SyncStatus.Ready,
+                    SyncStatus.Pulling,
+                    SyncStatus.Ready,
+                    SyncStatus.Stopped,
+                ),
+                statuses.toList(),
+            )
+            assertEquals(emptyList<Throwable>(), ownedWork.uncaughtFailures.toList())
         }
     }
 
@@ -942,10 +1072,13 @@ class SyncEngineTests {
             )
             SynchroMeta.setInt64(connection, MetaKey.SCOPE_SET_VERSION, 1)
             SynchroMeta.setInt64(connection, MetaKey.CLIENT_GENERATION, 1)
+            // A persistent extra trigger fails the exact trigger-set check before
+            // the assignment. A temporary trigger is outside the main schema, so
+            // valid DDL completes and the fault occurs at binding installation.
             connection.execSQL(
                 """
-                CREATE TRIGGER fail_connect_binding_install
-                BEFORE INSERT ON _synchro_scopes
+                CREATE TEMP TRIGGER fail_connect_binding_install
+                BEFORE INSERT ON main._synchro_scopes
                 WHEN NEW.scope_id = 'orders:added'
                 BEGIN
                     SELECT RAISE(ABORT, 'forced connect binding failure');
@@ -963,11 +1096,11 @@ class SyncEngineTests {
                 )
             )
 
-        try {
-            engine.installConnectResponse(response)
-            fail("expected connect installation to fail")
-        } catch (_: Exception) {
-        }
+        val failure = runCatching { engine.installConnectResponse(response) }.exceptionOrNull()
+        assertTrue(
+            "connect installation must fail at the forced binding fault, got $failure",
+            failure?.message?.contains("forced connect binding failure") == true,
+        )
 
         val columnNames = db.readTransaction { connection ->
             buildSet {
@@ -2009,7 +2142,10 @@ class SyncEngineTests {
             when {
                 request.path!!.endsWith("/sync/connect") -> mockResponse(connectResumeJSON)
                 request.path!!.endsWith("/sync/pull") -> {
-                    resumedPullJSON = request.body.readUtf8()
+                    val body = request.body.readUtf8()
+                    if (resumedPullJSON == null) {
+                        resumedPullJSON = body
+                    }
                     mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
                 }
                 else -> mockResponse("""{"error":"unexpected"}""", 500)
@@ -2282,6 +2418,153 @@ class SyncEngineTests {
             assertTrue(afterManagedRetry.all { it == requestJSON })
             assertTrue(laterDeadline > timing.currentTimeMillis())
             engine.stop()
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun testReplayedRebuildContinuesWithRemainingScopesAndPull() = runTest {
+        val otherScopeID = "orders_user:other"
+        val timing = BlockingRetryTiming(5_000L)
+        val failNextRebuild = AtomicBoolean(false)
+        val bothScopesAssigned = AtomicBoolean(false)
+        val rebuiltScopes = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val pullCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val (engine, db) = makeIntegrationEnv(retryTiming = timing) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> {
+                    val scope = Json.decodeFromString<RebuildRequest>(request.body.readUtf8()).scope
+                    if (failNextRebuild.compareAndSet(true, false)) {
+                        MockResponse().setResponseCode(503).setHeader("Retry-After", "30")
+                            .setBody(RETRYABLE_503_ERROR_JSON)
+                    } else {
+                        rebuiltScopes += scope
+                        if (scope == scopeID) {
+                            mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                        } else {
+                            mockResponse(
+                                """
+                                {
+                                    "scope": "$otherScopeID",
+                                    "records": [],
+                                    "cursor": null,
+                                    "has_more": false,
+                                    "final_scope_cursor": "other_scope_cursor_1",
+                                    "checksum": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                                """.trimIndent(),
+                            )
+                        }
+                    }
+                }
+                path.endsWith("/sync/pull") -> {
+                    pullCount.incrementAndGet()
+                    if (!bothScopesAssigned.get()) {
+                        mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                    } else {
+                        mockResponse(
+                            """
+                            {
+                                "changes": [],
+                                "scope_set_version": 1,
+                                "scope_cursors": {"$scopeID": "scope_cursor_2", "$otherScopeID": "other_scope_cursor_2"},
+                                "scope_updates": {"add": [], "remove": []},
+                                "rebuild": [],
+                                "has_more": false,
+                                "checksums": {
+                                    "$scopeID": ${emptyScopeChecksumJSON()},
+                                    "$otherScopeID": ${checksumJSON(protocolEmptyScopeChecksum(otherScopeID))}
+                                }
+                            }
+                            """.trimIndent(),
+                        )
+                    }
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertScope(connection, otherScopeID, cursor = null, checksum = null)
+                connection.execSQL("UPDATE _synchro_scopes SET cursor = NULL, checksum = NULL WHERE scope_id = ?", arrayOf(scopeID))
+            }
+            bothScopesAssigned.set(true)
+            rebuiltScopes.clear()
+            val pullsBefore = pullCount.get()
+            failNextRebuild.set(true)
+
+            val syncJob = CoroutineScope(Dispatchers.Default).launch { engine.syncNow() }
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            assertEquals(RetryOperation.REBUILDING, backoff.resumeState)
+            timing.releaseAt(backoff.nextRetryAtMs)
+            syncJob.join()
+
+            // The replayed rebuild is only the first scope of the cycle. The
+            // cycle must still rebuild the other scope and pull before it ends.
+            assertEquals(setOf(scopeID, otherScopeID), synchronized(rebuiltScopes) { rebuiltScopes.toSet() })
+            assertTrue(pullCount.get() > pullsBefore)
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
+            assertEquals(0, db.query("SELECT scope_id FROM _synchro_scopes WHERE cursor IS NULL").size)
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun testReplayedPullPushesIntentCapturedDuringBackoff() = runTest {
+        val timing = BlockingRetryTiming(5_000L)
+        val failNextPull = AtomicBoolean(false)
+        val pushedIDs = java.util.Collections.synchronizedList(mutableListOf<String>())
+        // A long debounce keeps the write from starting its own cycle, so only
+        // the replayed cycle can push it.
+        val (engine, db) = makeIntegrationEnv(retryTiming = timing, pushDebounce = 600.0) { request ->
+            val path = request.path ?: ""
+            when {
+                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                path.endsWith("/sync/pull") -> if (failNextPull.compareAndSet(true, false)) {
+                    MockResponse().setResponseCode(503).setHeader("Retry-After", "30").setBody(RETRYABLE_503_ERROR_JSON)
+                } else {
+                    mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                }
+                path.endsWith("/sync/push") -> {
+                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                    val accepted = body.getValue("mutations").jsonArray.map { mutation ->
+                        pushedIDs += mutation.jsonObject.getValue("pk").toString()
+                        acceptedPushOutcomeJSON(mutation = mutation.jsonObject, serverVersion = "2026-01-01T14:00:00.000000Z")
+                    }
+                    mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T14:00:00.000Z","accepted":[${accepted.joinToString(",")}],"rejected":[]}""")
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            failNextPull.set(true)
+            val syncJob = CoroutineScope(Dispatchers.Default).launch { engine.syncNow() }
+            timing.awaitNextSleep(10, TimeUnit.SECONDS)
+            val backoff = requireNotNull(DurableBackoffStore.load(db))
+            assertEquals(RetryOperation.PULLING, backoff.resumeState)
+            db.applicationExecute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("backoff-write", "captured during backoff", "u1", "2026-01-01T10:00:00.000Z"),
+            )
+            timing.releaseAt(backoff.nextRetryAtMs)
+            syncJob.join()
+
+            // The replayed pull is one step. The same run continues the normal
+            // cycle, so the intent captured during backoff is pushed.
+            assertEquals(1, pushedIDs.size)
+            assertTrue(pushedIDs.single().contains("backoff-write"))
+            assertFalse(ChangeTracker(db).hasPendingChanges())
+            assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
         } finally {
             engine.stop()
         }
@@ -2833,6 +3116,11 @@ class SyncEngineTests {
         var pushCallCount = 0
         var connectCallCount = 0
         var shouldFailNextPush = false
+        // Controlled clocks keep the persisted backoff deadline out of wall-clock time.
+        val firstTiming = BlockingRetryTiming(1_000L)
+        val restartTiming = BlockingRetryTiming(1_000L)
+
+        lateinit var persistedBackoff: DurableBackoffRecord
 
         val handler: (RecordedRequest) -> MockResponse = { request ->
             val path = request.path ?: ""
@@ -2871,6 +3159,7 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = firstTiming,
             handler = handler
         )
         installTestSchema(
@@ -2897,6 +3186,8 @@ class SyncEngineTests {
             assertTrue(tracker.hasPendingChanges())
             val rejectedBeforeRestart = db1.readTransaction { conn -> SynchroMeta.listRejectedMutations(conn) }
             assertTrue(rejectedBeforeRestart.isEmpty())
+            persistedBackoff = requireNotNull(DurableBackoffStore.load(db1))
+            assertEquals(RetryOperation.PUSHING, persistedBackoff.resumeState)
         } finally {
             engine1.stop()
             db1.close()
@@ -2906,6 +3197,7 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = restartTiming,
             handler = handler
         )
         installTestSchema(
@@ -2915,9 +3207,13 @@ class SyncEngineTests {
             tables = listOf(ordersLocalSchemaTable(includeNotes = false))
         )
         try {
-            val initialSyncCompleted = CountDownLatch(1)
-            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
-            assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
+            val initialSyncCompleted = CompletableDeferred<Unit>()
+            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.complete(Unit) }))
+            // The restarted engine waits for the persisted deadline before it retries the push.
+            assertEquals(persistedBackoff.nextRetryAtMs, restartTiming.awaitNextSleep(2, TimeUnit.SECONDS))
+            assertEquals(1, pushCallCount)
+            restartTiming.releaseAt(persistedBackoff.nextRetryAtMs)
+            initialSyncCompleted.await()
 
             val tracker = ChangeTracker(db2)
             assertFalse(tracker.hasPendingChanges())
@@ -3028,6 +3324,83 @@ class SyncEngineTests {
         } finally {
             engine.stop()
         }
+    }
+
+    @Test
+    fun oversizedPushEnvelopeRecordsLocalInvalidRequestAndKeepsEveryAction() = runTest {
+        val pushCount = AtomicInteger()
+        // Only the client identity varies. The complete empty reserved envelope is one octet above the limit.
+        val emptyEnvelope = Json.encodeToString(
+            PushRequest(
+                clientID = "",
+                clientGeneration = 9_007_199_254_740_991L,
+                batchID = UUID.randomUUID().toString(),
+                schema = SchemaRef(9_007_199_254_740_991L, PROTOCOL_TEST_SCHEMA_HASH),
+                mutations = emptyList(),
+            ),
+        )
+        val clientID = "c".repeat(1_048_577 - emptyEnvelope.toByteArray(Charsets.UTF_8).size)
+        val (engine, db) = makeIntegrationEnv(clientID = clientID, pushDebounce = 60.0) { request ->
+            when {
+                request.path.orEmpty().endsWith("/sync/connect") -> mockResponse(connectJSON)
+                request.path.orEmpty().endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+                request.path.orEmpty().endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+                request.path.orEmpty().endsWith("/sync/push") -> {
+                    pushCount.incrementAndGet()
+                    mockResponse("""{"error":"unexpected push"}""", 500)
+                }
+                else -> mockResponse("""{"error":"unexpected"}""", 500)
+            }
+        }
+
+        try {
+            engine.start()
+            // With no pending mutation, the client sends no push request and records no failure.
+            engine.syncNow()
+            assertNull(db.readTransaction { SynchroMeta.getClientState(it) }.failure)
+            assertEquals(0, pushCount.get())
+
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "first", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("second", "w1"))
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w2", "unrelated", "u1", "2026-01-01T00:00:00.000000Z"),
+            )
+            val actionsBefore = durableActionRows(db)
+            assertEquals(3, actionsBefore.first().size)
+
+            val thrown = runCatching { engine.syncNow() }.exceptionOrNull()
+            assertTrue("syncNow result: $thrown", thrown is SynchroError.BlockingFailure)
+            val failure = (thrown as SynchroError.BlockingFailure).failure
+            assertEquals(SyncOperationKind.PUSHING, failure.operation)
+            assertEquals(SyncFailureCode.INVALID_REQUEST, failure.code)
+            assertFalse(failure.retryable)
+            assertEquals(SyncRecoveryAction.NONE, failure.recoveryAction)
+            assertTrue(failure.metadata.isEmpty())
+
+            assertEquals(SyncStatus.Error(failure), engine.getSyncStatus())
+            val durable = db.readTransaction { SynchroMeta.getClientState(it) }
+            assertEquals(SyncLifecycleState.ERROR, durable.lifecycleState)
+            assertEquals(failure, durable.failure)
+            assertEquals(0, pushCount.get())
+            assertEquals(actionsBefore, durableActionRows(db))
+        } finally {
+            engine.stop()
+        }
+    }
+
+    /** Returns every durable action, authored value, sealed batch, and batch member row in key order. */
+    private fun durableActionRows(db: SynchroDatabase): List<List<Map<String, Any?>>> = listOf(
+        "SELECT * FROM _synchro_pending_changes ORDER BY mutation_id",
+        "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id",
+        "SELECT * FROM _synchro_push_batches ORDER BY batch_id",
+        "SELECT * FROM _synchro_push_batch_members ORDER BY batch_id, ordinal",
+    ).map { sql ->
+        // A blob has no value equality, so compare its octets.
+        db.query(sql).map { row -> row.mapValues { (_, value) -> if (value is ByteArray) value.toList() else value } }
     }
 
     @Test
@@ -3176,38 +3549,7 @@ class SyncEngineTests {
     fun testConflictCallbackFiresDuringSyncCycle() = runTest {
         val receivedConflicts = mutableListOf<ConflictEvent>()
 
-        val (engine, db) = makeIntegrationEnv { request ->
-            val path = request.path ?: ""
-            when {
-                path.endsWith("/sync/connect") -> mockResponse(connectJSON)
-                path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
-                path.endsWith("/sync/push") -> {
-                    val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
-                    val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
-                    val rejected = mutations.map { change ->
-                        val c = change as JsonObject
-                        val record = protocolRecord(
-                            id = c.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content,
-                            shipAddress = "Server Wins Address",
-                            userID = "u1",
-                            updatedAt = "2026-01-01T15:00:00.000000Z",
-                            serverVersion = "2026-01-01T15:00:00.000000Z",
-                        )
-                        rejectedPushOutcomeJSON(
-                            mutation = c,
-                            status = MutationStatus.CONFLICT,
-                            code = MutationRejectionCode.VERSION_CONFLICT,
-                            message = "server version is newer",
-                            serverRow = requireNotNull(record.change.row),
-                            serverVersion = record.change.serverVersion,
-                        )
-                    }
-                    mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T15:00:00.000Z","accepted":[],"rejected":[${rejected.joinToString(",")}]}""")
-                }
-                path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
-                else -> mockResponse("""{"error":"unexpected"}""", 500)
-            }
-        }
+        val (engine, db) = makeIntegrationEnv(handler = ::conflictServerResponse)
 
         engine.onConflict { event -> receivedConflicts.add(event) }
 
@@ -3233,6 +3575,112 @@ class SyncEngineTests {
             assertFalse(tracker.hasPendingChanges())
         } finally {
             engine.stop()
+        }
+    }
+
+    /**
+     * D-03. Status, conflict, and event callbacks run synchronously inside sync work. Each inline
+     * lifecycle call must fail with the local programmer error before it changes the engine.
+     * A shutdown that a callback schedules on another thread must still finish.
+     */
+    @Test
+    fun lifecycleCallsInsideCallbacksFailBeforeSideEffects() = runTest(timeout = 90.seconds) {
+        val (engine, db) = makeIntegrationEnv(pushDebounce = 999.0, handler = ::conflictServerResponse)
+        try {
+            engine.start()
+            db.execute(
+                "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                arrayOf("w1", "Client Address", "u1", "2026-01-01T10:00:00.000Z"),
+            )
+            val requestsBeforeCycle = server!!.requestCount
+            val delivered = CopyOnWriteArrayList<String>()
+            val reentry = CopyOnWriteArrayList<String>()
+            fun reenterEveryLifecycleCall(callback: String) {
+                val calls: List<Pair<String, suspend () -> Unit>> = listOf(
+                    "start" to { engine.start() },
+                    "retry" to { engine.retry() },
+                    "resetSchema" to { engine.resetSchema() },
+                    "syncNow" to { engine.syncNow() },
+                    "stop" to { engine.stop() },
+                    "shutdown" to { engine.shutdown() },
+                )
+                for ((name, call) in calls) {
+                    // The bound turns a missing guard into a failed assertion instead of a hang.
+                    val outcome = runBlocking {
+                        withTimeoutOrNull(5.seconds) {
+                            runCatching { call() }.fold({ "returned" }, { it::class.simpleName })
+                        } ?: "timed out"
+                    }
+                    reentry += "$callback $name: $outcome"
+                }
+            }
+            val registrations = listOf(
+                engine.onStatusChange { status ->
+                    delivered += "status ${status.state.wireName}"
+                    reenterEveryLifecycleCall("status")
+                },
+                engine.onConflict { conflict ->
+                    delivered += "conflict ${conflict.recordID}"
+                    reenterEveryLifecycleCall("conflict")
+                },
+                engine.onEvent { event ->
+                    delivered += when (event) {
+                        is SyncEvent.StateChanged -> "event ${event.change.from.wireName}>${event.change.to.wireName}"
+                        is SyncEvent.MutationRejected -> "event rejected ${event.mutation.status}"
+                        else -> "event ${event::class.simpleName}"
+                    }
+                    reenterEveryLifecycleCall("event")
+                },
+            )
+
+            val firstCycle = runCatching { engine.syncNow() }
+            registrations.forEach(Cancellable::cancel)
+
+            // Push precedes pull, and each callback runs in the synchronous order of its transition.
+            val expectedDelivery = listOf(
+                "status pushing", "event ready>pushing",
+                "conflict w1", "event rejected CONFLICT",
+                "status ready", "event pushing>ready",
+                "status pulling", "event ready>pulling",
+                "status ready", "event pulling>ready",
+            )
+            assertEquals(expectedDelivery, delivered.toList())
+            val lifecycleCalls = listOf("start", "retry", "resetSchema", "syncNow", "stop", "shutdown")
+            assertEquals(
+                expectedDelivery.flatMap { entry ->
+                    lifecycleCalls.map { "${entry.substringBefore(' ')} $it: IllegalStateException" }
+                },
+                reentry.toList(),
+            )
+            assertTrue("the cycle must finish: ${firstCycle.exceptionOrNull()}", firstCycle.isSuccess)
+            // The rejected calls sent no request, kept the engine ready, and kept the cycle result.
+            val paths = List(server!!.requestCount) { server!!.takeRequest(0, TimeUnit.SECONDS)?.path }
+            assertEquals(listOf("/sync/push", "/sync/pull"), paths.drop(requestsBeforeCycle))
+            assertEquals(SyncStatus.Ready, engine.getSyncStatus())
+            assertEquals(
+                "Server Wins Address",
+                db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf("w1"))?.get("ship_address"),
+            )
+
+            val independentShutdown = CompletableFuture<Unit>()
+            val scheduled = AtomicBoolean(false)
+            val scheduling = engine.onStatusChange { status ->
+                if (status == SyncStatus.Ready && scheduled.compareAndSet(false, true)) {
+                    thread(name = "synchro-test-independent-shutdown") {
+                        runCatching { runBlocking { engine.shutdown() } }
+                            .fold(independentShutdown::complete, independentShutdown::completeExceptionally)
+                    }
+                }
+            }
+            val cycle = runCatching { engine.syncNow() }
+            scheduling.cancel()
+            independentShutdown.get(10, TimeUnit.SECONDS)
+            assertTrue(cycle.isSuccess || cycle.exceptionOrNull() is CancellationException)
+            assertEquals(SyncStatus.Stopped, engine.getSyncStatus())
+            assertTrue(runCatching { engine.syncNow() }.exceptionOrNull() is SynchroError.NotStarted)
+        } finally {
+            // Real time bounds cleanup, so a missing guard reports its assertion and not a hang.
+            withContext(Dispatchers.Default) { withTimeoutOrNull(10.seconds) { engine.stop() } }
         }
     }
 
@@ -3415,8 +3863,11 @@ class SyncEngineTests {
                 rejectedID,
                 db.readTransaction { connection -> SynchroMeta.listRejectedMutations(connection).single().mutationID },
             )
-            assertTrue(db.query("SELECT id FROM orders").isEmpty())
-            assertTrue(db.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"))
+            // The blocked intent keeps its row visible across the reset (#267).
+            assertEquals(
+                listOf(mapOf("id" to "queued", "ship_address" to "Queue Street", "notes" to null)),
+                db.query("SELECT id, ship_address, notes FROM orders"),
+            )
             assertTrue(db.readTransaction { connection -> SynchroMeta.getClientState(connection).failure == null })
             assertTrue(engine.getSyncStatus() is SyncStatus.Ready)
         } finally {
@@ -3820,6 +4271,7 @@ class SyncEngineTests {
         syncInterval: Double = 999.0,
         pushDebounce: Double = 0.5,
         retryTiming: RetryTiming? = null,
+        authProvider: suspend () -> String = { "token" },
         handler: (RecordedRequest) -> MockResponse
     ): Pair<SyncEngine, SynchroDatabase> {
         server?.shutdown()
@@ -3833,7 +4285,7 @@ class SyncEngineTests {
         val config = SynchroConfig(
             dbPath = dbName,
             serverURL = server!!.url("/").toString().trimEnd('/'),
-            authProvider = { "token" },
+            authProvider = authProvider,
             clientID = clientID,
             appVersion = "1.0.0",
             syncInterval = syncInterval,
@@ -4371,6 +4823,40 @@ class SyncEngineTests {
         }
     """.trimIndent()
 
+    /** The server rejects every pushed mutation as a version conflict with a server-wins row. */
+    private fun conflictServerResponse(request: RecordedRequest): MockResponse {
+        val path = request.path ?: ""
+        return when {
+            path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+            path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+            path.endsWith("/sync/push") -> {
+                val body = Json.decodeFromString<JsonObject>(request.body.readUtf8())
+                val mutations = body["mutations"] as kotlinx.serialization.json.JsonArray
+                val rejected = mutations.map { change ->
+                    val c = change as JsonObject
+                    val record = protocolRecord(
+                        id = c.getValue("pk").jsonObject.getValue("field-id").jsonPrimitive.content,
+                        shipAddress = "Server Wins Address",
+                        userID = "u1",
+                        updatedAt = "2026-01-01T15:00:00.000000Z",
+                        serverVersion = "2026-01-01T15:00:00.000000Z",
+                    )
+                    rejectedPushOutcomeJSON(
+                        mutation = c,
+                        status = MutationStatus.CONFLICT,
+                        code = MutationRejectionCode.VERSION_CONFLICT,
+                        message = "server version is newer",
+                        serverRow = requireNotNull(record.change.row),
+                        serverVersion = record.change.serverVersion,
+                    )
+                }
+                mockResponse("""{"batch_id":${body["batch_id"]},"server_time":"2026-01-01T15:00:00.000Z","accepted":[],"rejected":[${rejected.joinToString(",")}]}""")
+            }
+            path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+            else -> mockResponse("""{"error":"unexpected"}""", 500)
+        }
+    }
+
     private fun emptyScopePullJSON(scopeSetVersion: Int): String = """
         {
             "changes": [],
@@ -4386,7 +4872,73 @@ class SyncEngineTests {
     private fun mockResponse(body: String, statusCode: Int = 200): MockResponse =
         MockResponse().setBody(body).setResponseCode(statusCode)
 
+    private fun readyServerResponse(request: RecordedRequest): MockResponse {
+        val path = request.path.orEmpty()
+        return when {
+            path.endsWith("/sync/connect") -> mockResponse(connectJSON)
+            path.endsWith("/sync/rebuild") -> mockResponse(rebuildJSON(finalCursor = "scope_cursor_1"))
+            path.endsWith("/sync/pull") -> mockResponse(scopePullJSON(cursor = "scope_cursor_2"))
+            else -> mockResponse("""{"error":"unexpected"}""", 500)
+        }
+    }
+
     private fun ordersLocalSchemaTable(includeNotes: Boolean): LocalSchemaTable {
         return protocolOrdersSchema(includeNotes)
     }
+
+    /**
+     * Runs engine-owned cycles on one thread. A cycle completes on its dispatcher thread, so a later
+     * barrier task starts only after that completion and its exception handler return.
+     */
+    private class OwnedCycleThread {
+        private val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "synchro-test-owned-cycle") }
+        val dispatcher = executor.asCoroutineDispatcher()
+
+        fun awaitEarlierTasks() {
+            executor.submit(Runnable {}).get(5, TimeUnit.SECONDS)
+        }
+
+        fun shutdown() {
+            executor.shutdownNow()
+            check(executor.awaitTermination(5, TimeUnit.SECONDS)) { "the owned cycle thread did not terminate" }
+        }
+    }
+}
+
+internal class EngineOwnedWork(val lifecycleJob: Job, val uncaughtFailures: List<Throwable>)
+
+/**
+ * Reuses the engine lifecycle job, so stop still cancels the observed work. Later engine-owned
+ * coroutines use [dispatcher], and the added handler records each uncaught failure, such as an
+ * operation-release underflow.
+ */
+internal fun observeEngineOwnedWork(engine: SyncEngine, dispatcher: CoroutineDispatcher): EngineOwnedWork {
+    val lock = SyncEngine::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(engine)
+    val scopeField = SyncEngine::class.java.getDeclaredField("scope").apply { isAccessible = true }
+    val failures = CopyOnWriteArrayList<Throwable>()
+    return synchronized(requireNotNull(lock)) {
+        val lifecycleScope = requireNotNull(scopeField.get(engine) as CoroutineScope?) { "the engine has no lifecycle scope" }
+        val context = lifecycleScope.coroutineContext +
+            CoroutineExceptionHandler { _, error -> failures += error } +
+            dispatcher
+        scopeField.set(engine, CoroutineScope(context))
+        EngineOwnedWork(lifecycleScope.coroutineContext.job, failures)
+    }
+}
+
+/**
+ * Runs [body] with a cleanup registry. The body registers each cleanup step with `defer` when it
+ * acquires the resource. The steps run in reverse registration order after [body], and every step runs.
+ * A body failure stays the reported failure. Each cleanup failure is suppressed into the first failure.
+ */
+internal fun <T> withCleanup(body: (defer: (() -> Unit) -> Unit) -> T): T {
+    val steps = mutableListOf<() -> Unit>()
+    val outcome = runCatching { body { step -> steps += step } }
+    var failure = outcome.exceptionOrNull()
+    for (step in steps.asReversed()) {
+        val error = runCatching(step).exceptionOrNull() ?: continue
+        if (failure == null) failure = error else failure.addSuppressed(error)
+    }
+    if (failure != null) throw failure
+    return outcome.getOrThrow()
 }

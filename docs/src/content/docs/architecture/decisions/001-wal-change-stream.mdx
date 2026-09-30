@@ -113,6 +113,16 @@ WAL-materialized or represented by verified baseline coverage and complete
 projected row/version state. Baseline coverage creates no synthetic WAL event or
 incremental effect; the new generation's baseline is delivered by rebuild.
 
+The projected row/version state is the final state of each row in the imported
+snapshot. It is not a record of intermediate row images. Historical coverage is
+separate from that state. Each visible fence keeps its coverage record. If a row
+has a pending fence in the snapshot, its final source-owned version must come
+from a covered fence of that row. Such a row can be absent from the snapshot
+while its source version is live, for example after `TRUNCATE`. The baseline
+then contains no row or version for that row. The reset invents no event or
+tombstone for it. A deletion version in the snapshot stays staged, including a
+version that a soft-delete update sets.
+
 Activation requires the staged state to be complete and verified, the new slot
 to have no gap through the barrier, and the old stream to remain blocked. One
 operator transaction then installs the staged state, creates the new stream
@@ -143,7 +153,7 @@ Each registered relation has an immutable logical table identifier and a schema-
 
 A registry change must create a durable, validated registry generation with a commit-ordered activation boundary. Notification, polling, worker restart, or signal handling may prompt a reload, but none of them activates a registry generation by itself. The worker must load the durable activation state.
 
-For each source transaction, the worker must select exactly one validated registry generation: the latest generation whose activation precedes that source transaction in commit order. All events in that transaction use that generation. A worker must complete or retry an in-progress transaction under its selected generation before using a later generation for a later transaction.
+For each source row event, the worker must select exactly one validated registry generation: the latest generation whose activation precedes that event in source order. An earlier committed source transaction or an earlier activation message in the same source transaction can supply that activation. Row events before an activation message use the prior generation, and later row events use the activated generation, because a registration and later statements can share one source transaction. A worker must complete or retry an in-progress transaction under these selected generations before it processes a later transaction.
 
 Direct rename, schema move, drop and recreate, primary-key change, or replica-identity drift of a registered relation is unsupported. Detection of any such drift blocks capture and readiness until controlled reconfiguration and required rebuild complete. It must not be treated as an ordinary registry reload or as a different unqualified relation with the same name.
 

@@ -10,7 +10,7 @@ import (
 
 func TestSchemaQueuedMutationBindingsFollowAuthoredWireCompletions(t *testing.T) {
 	scenario := loadSchemaQueuedMutationScenario(t)
-	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 12)
+	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 16)
 	if err != nil {
 		t.Fatalf("validate schema-queued-mutation scenario: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestSchemaQueuedMutationBindingsRejectUnsupportedIdleCompletion(t *testing.
 		binding.Completion = "idle"
 		scenario.Steps[index].NativeBinding = &binding
 	}
-	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 12)
+	steps, err := swiftScenarioStepMap(scenario, schemaQueuedMutationScenarioID, 16)
 	if err != nil {
 		t.Fatalf("validate mutated schema-queued-mutation scenario: %v", err)
 	}

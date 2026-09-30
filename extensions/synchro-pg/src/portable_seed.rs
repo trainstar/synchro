@@ -24,7 +24,7 @@ use crate::registry::{
 use crate::seed_token::{self, SeedContinuationPayload, SeedPagePayload, SeedSnapshotBoundary};
 use crate::spi_helpers::{
     current_utc_timestamp, decode_digest, is_lower_hex, is_lower_uuid, required_positive_i64,
-    required_text,
+    required_record_id, required_text,
 };
 use crate::stream_position::{parse_lsn, StreamPosition};
 use synchro_core::contract::ProtocolErrorCode;
@@ -1067,7 +1067,7 @@ fn load_seed_rows(
             return Err("portable scope edge and captured relation differ".to_string());
         }
         let table_name = required_text(&row, "table_name", "")?;
-        let record_id = required_text(&row, "record_id", "")?;
+        let record_id = required_record_id(&row)?;
         let table = registry
             .iter()
             .find(|table| table.relation_id == relation_id && table.table_name == table_name)
@@ -1457,6 +1457,9 @@ fn validate_seed_receipts_inner(
         .select(
             "SELECT shared.scope_id, state.stream_generation,
                     state.membership_generation, state.retention_generation,
+                    state.floor_position_kind,
+                    state.floor_commit_lsn::text AS floor_commit_lsn,
+                    state.floor_event_ordinal, state.floor_effect_ordinal,
                     progress.registry_generation
              FROM sync_shared_scopes shared
              JOIN sync_scope_state state ON state.scope_id = shared.scope_id
@@ -1516,6 +1519,26 @@ fn validate_seed_receipts_inner(
             return Ok(None);
         };
         if position > materialized.position {
+            return Ok(None);
+        }
+        let floor_commit_lsn = row
+            .get_by_name::<String, &str>("floor_commit_lsn")
+            .map_err(|error| format!("reading portable seed floor commit LSN: {error}"))?;
+        let floor_event_ordinal = row
+            .get_by_name::<i64, &str>("floor_event_ordinal")
+            .map_err(|error| format!("reading portable seed floor event ordinal: {error}"))?;
+        let floor_effect_ordinal = row
+            .get_by_name::<i32, &str>("floor_effect_ordinal")
+            .map_err(|error| format!("reading portable seed floor effect ordinal: {error}"))?;
+        let floor = StreamPosition::from_sql_parts(
+            &required_text(&row, "floor_position_kind", "")?,
+            floor_commit_lsn.as_deref(),
+            floor_event_ordinal,
+            floor_effect_ordinal,
+        )?;
+        // Effects between this position and the retention floor are compacted,
+        // so the receipt cannot continue and the scope rebuilds.
+        if position < floor {
             return Ok(None);
         }
         positions.insert(scope_id, position);

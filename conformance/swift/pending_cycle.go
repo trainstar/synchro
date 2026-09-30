@@ -488,7 +488,7 @@ func validateSwiftPendingCycleTransport(scenario scenarios.Scenario, observed []
 		return nil, fmt.Errorf("Swift pending-cycle transport count = %d, want 4", len(observed))
 	}
 	connect := observed[0]
-	if connect.OperationClass != "connect" || connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable {
+	if connect.OperationClass != "connect" || connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable != nil {
 		return nil, errors.New("Swift pending-cycle staged call setup connect is invalid")
 	}
 	expected := []struct {
@@ -520,7 +520,7 @@ func validateSwiftPendingCycleCleanupCall(call SynchronizationResult) error {
 			continue
 		}
 		pushCount++
-		if observation.StatusCode != 503 || !observation.Retryable || observation.ErrorCode == nil || *observation.ErrorCode != "temporary_unavailable" {
+		if observation.StatusCode != 503 || observation.Retryable == nil || !*observation.Retryable || observation.ErrorCode == nil || *observation.ErrorCode != "temporary_unavailable" {
 			return errors.New("Swift pending-cycle cleanup push did not remain in retryable backoff")
 		}
 	}
@@ -549,7 +549,11 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 	observation, err := swiftScenarioWire(call, "push")
 	if err != nil {
 		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
-			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle %s push: %w", name, err)
+			classes := make([]string, 0, len(call.transportObservations))
+			for _, observed := range call.transportObservations {
+				classes = append(classes, fmt.Sprintf("%s:%d", observed.OperationClass, observed.StatusCode))
+			}
+			return runnerResult{}, fmt.Errorf("wait for Swift pending-cycle %s push after call completion %q with transport %v: %w", name, call.Completion, classes, err)
 		}
 		observations, err := state.session.ObservationsAfter(checkpoint)
 		if err != nil {
@@ -557,7 +561,7 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 		}
 		found := false
 		for _, candidate := range observations {
-			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && !candidate.Retryable {
+			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable == nil {
 				observation = candidate
 				found = true
 				break
@@ -567,7 +571,7 @@ func runSwiftPendingCycleGeneratedPush(ctx context.Context, controller *blackbox
 			return runnerResult{}, fmt.Errorf("Swift pending-cycle %s recovery did not produce a successful push", name)
 		}
 	}
-	if observation.StatusCode != 200 || observation.Retryable {
+	if observation.StatusCode != 200 || observation.Retryable != nil {
 		return runnerResult{}, fmt.Errorf("Swift pending-cycle %s push did not complete successfully", name)
 	}
 	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {
@@ -611,7 +615,7 @@ func awaitSwiftPendingCycleReady(ctx context.Context, platform *Platform, client
 		// Read transport first, so ready is sampled after that response arrived.
 		if *snapshot.Status == "ready" && snapshot.Failure == nil && len(observations) > 0 {
 			last := observations[len(observations)-1]
-			if last.OperationClass == "pull" && last.StatusCode == 200 && !last.Retryable && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
+			if last.OperationClass == "pull" && last.StatusCode == 200 && last.Retryable == nil && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
 				if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 {
 					return runnerResult{}, errors.New("Swift pending-cycle synchronization retained pending mutations")
 				}

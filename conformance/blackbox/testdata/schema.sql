@@ -152,6 +152,7 @@ LANGUAGE plpgsql
 SET search_path FROM CURRENT
 AS $$
 BEGIN
+    -- A push runs this trigger under the extension search_path, which omits public.
     IF pg_trigger_depth() = 1 THEN
         UPDATE cf_source_filled_items
         SET trigger_value = NEW.value || '-triggered'

@@ -32,7 +32,6 @@ type MultiScopeProvenanceCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // MultiScopeProvenanceCoordinatorResult contains the checked server result.
@@ -62,8 +61,13 @@ type multiScopeProvenanceCommitPayload struct {
 				Kind      string `json:"kind"`
 				SyncedRow *struct {
 					CanonicalWireJSON string `json:"canonical_wire_json"`
+					PrimaryKeyFieldID string `json:"primary_key_field_id"`
 				} `json:"synced_row"`
 			} `json:"identity"`
+			Fields []struct {
+				Field    string `json:"field"`
+				WireJSON string `json:"wire_json"`
+			} `json:"fields"`
 		} `json:"after"`
 	} `json:"events"`
 }
@@ -167,9 +171,6 @@ func NewMultiScopeProvenanceCoordinator(config MultiScopeProvenanceCoordinatorCo
 	}
 	if (config.Controller == nil || config.Harness == nil) && (config.ServerURL == "" || config.AuthToken == "") {
 		return nil, errors.New("React Native multi-scope provenance dependencies are unavailable")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	serverURL := config.ServerURL
 	if serverURL == "" {
@@ -592,15 +593,6 @@ func (c *MultiScopeProvenanceCoordinator) finishLocked(ctx context.Context) erro
 	if len(c.captures) != len(c.expected.Clients) {
 		return errors.New("React Native multi-scope provenance client captures are incomplete")
 	}
-	for _, expected := range c.expected.Clients {
-		capture, found := c.captures[expected.UserID+"\x00"+expected.ClientID]
-		if !found {
-			return fmt.Errorf("React Native multi-scope provenance client %s is absent", expected.ClientID)
-		}
-		if err := validateMultiScopeProvenanceClient(expected, capture); err != nil {
-			return fmt.Errorf("React Native multi-scope provenance client %s: %w", expected.ClientID, err)
-		}
-	}
 	keys := make([]string, 0, len(c.calls))
 	for _, call := range c.calls {
 		keys = append(keys, call.key)
@@ -616,6 +608,19 @@ func (c *MultiScopeProvenanceCoordinator) finishLocked(ctx context.Context) erro
 	resolutions, err := c.resolveIdentities(captures[0].StateFacts)
 	if err != nil {
 		return err
+	}
+	records, scopes, err := c.runtimeRecords(resolutions)
+	if err != nil {
+		return err
+	}
+	for _, expected := range c.expected.Clients {
+		capture, found := c.captures[expected.UserID+"\x00"+expected.ClientID]
+		if !found {
+			return fmt.Errorf("React Native multi-scope provenance client %s is absent", expected.ClientID)
+		}
+		if err := validateMultiScopeProvenanceClient(expected, capture, records, scopes); err != nil {
+			return fmt.Errorf("React Native multi-scope provenance client %s: %w", expected.ClientID, err)
+		}
 	}
 	c.result = MultiScopeProvenanceCoordinatorResult{ServerFacts: captures[0].StateFacts, IdentityResolution: resolutions}
 	return nil
@@ -725,6 +730,101 @@ func (c *MultiScopeProvenanceCoordinator) runtimeIdentity(alias scenarios.Native
 		return row.Checksum, nil
 	}
 	return nil, fmt.Errorf("React Native multi-scope provenance alias %s has no runtime evidence", alias.Alias)
+}
+
+// multiScopeProvenanceRecord is one authored source row in runtime terms.
+type multiScopeProvenanceRecord struct {
+	tableName string
+	recordID  string
+	row       map[string]json.RawMessage
+}
+
+// runtimeRecords binds each authored source row and each authored scope to its
+// runtime identity. The application row keeps the authored field values, and
+// only the primary key takes its runtime value.
+func (c *MultiScopeProvenanceCoordinator) runtimeRecords(resolutions []blackbox.NativeIdentityResolution) (map[string]multiScopeProvenanceRecord, map[string]string, error) {
+	resolved := make(map[string]blackbox.NativeIdentityResolution, len(resolutions))
+	for _, resolution := range resolutions {
+		resolved[resolution.Alias] = resolution
+	}
+	identityAliases := make([]scenarios.NativeIdentityAlias, 0)
+	for _, alias := range c.config.Scenario.NativeIdentityAliases {
+		if alias.Kind == "table" || alias.Kind == "primary-key" {
+			identityAliases = append(identityAliases, alias)
+		}
+	}
+	values, err := c.config.Controller.IdentityValues(identityAliases)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve React Native multi-scope provenance application identities: %w", err)
+	}
+	tableName := ""
+	for _, value := range values {
+		if value.Kind == "table" {
+			tableName = value.ApplicationIdentifier
+		}
+	}
+	records := make(map[string]multiScopeProvenanceRecord)
+	for _, value := range values {
+		if value.Kind != "primary-key" {
+			continue
+		}
+		alias, found := c.aliasByName(value.Alias)
+		if !found || len(alias.StepIDs) != 1 {
+			return nil, nil, fmt.Errorf("React Native multi-scope provenance primary-key alias %s has no single anchor", value.Alias)
+		}
+		step, found := c.stepByID(alias.StepIDs[0])
+		if !found {
+			return nil, nil, fmt.Errorf("React Native multi-scope provenance primary-key anchor %s is absent", alias.StepIDs[0])
+		}
+		payload, err := decodeMultiScopeProvenanceCommit(step.Operation)
+		if err != nil {
+			return nil, nil, err
+		}
+		var recordID string
+		if json.Unmarshal(value.RuntimeValue, &recordID) != nil || recordID == "" || tableName == "" {
+			return nil, nil, fmt.Errorf("React Native multi-scope provenance alias %s has no runtime record", value.Alias)
+		}
+		for _, event := range payload.Events {
+			if event.After == nil || event.After.Identity.SyncedRow == nil ||
+				!resolutionAuthoredCanonicalMatches(resolved[value.Alias], event.After.Identity.SyncedRow.CanonicalWireJSON) {
+				continue
+			}
+			row := make(map[string]json.RawMessage, len(event.After.Fields))
+			for _, field := range event.After.Fields {
+				row[field.Field] = json.RawMessage(field.WireJSON)
+			}
+			delete(row, event.After.Identity.SyncedRow.PrimaryKeyFieldID)
+			row[value.ApplicationIdentifier] = copyRaw(value.RuntimeValue)
+			records[event.After.Identity.SyncedRow.CanonicalWireJSON] = multiScopeProvenanceRecord{tableName: tableName, recordID: recordID, row: row}
+		}
+	}
+	scopes := make(map[string]string)
+	for _, alias := range c.config.Scenario.NativeIdentityAliases {
+		if alias.Kind != "scope" {
+			continue
+		}
+		var authored, runtime string
+		if json.Unmarshal(resolved[alias.Alias].AuthoredValue, &authored) != nil || json.Unmarshal(resolved[alias.Alias].RuntimeValue, &runtime) != nil {
+			return nil, nil, fmt.Errorf("React Native multi-scope provenance scope alias %s is unresolved", alias.Alias)
+		}
+		scopes[authored] = runtime
+	}
+	return records, scopes, nil
+}
+
+func resolutionAuthoredCanonicalMatches(resolution blackbox.NativeIdentityResolution, canonical string) bool {
+	var authored, resolvedAuthored string
+	return json.Unmarshal([]byte(canonical), &authored) == nil &&
+		json.Unmarshal(resolution.AuthoredValue, &resolvedAuthored) == nil && resolvedAuthored == authored
+}
+
+func (c *MultiScopeProvenanceCoordinator) aliasByName(name string) (scenarios.NativeIdentityAlias, bool) {
+	for _, alias := range c.config.Scenario.NativeIdentityAliases {
+		if alias.Alias == name {
+			return alias, true
+		}
+	}
+	return scenarios.NativeIdentityAlias{}, false
 }
 
 func (c *MultiScopeProvenanceCoordinator) callForStep(id scenarios.StepID) (multiScopeProvenanceCall, bool) {
@@ -996,7 +1096,7 @@ func validateMultiScopeProvenanceCapture(capture finalCapture) error {
 	return nil
 }
 
-func validateMultiScopeProvenanceClient(expected scenarios.ClientDurabilityFact, capture finalCapture) error {
+func validateMultiScopeProvenanceClient(expected scenarios.ClientDurabilityFact, capture finalCapture, records map[string]multiScopeProvenanceRecord, scopes map[string]string) error {
 	state, err := decodeClientState(capture.ClientState)
 	if err != nil {
 		return err
@@ -1029,7 +1129,103 @@ func validateMultiScopeProvenanceClient(expected scenarios.ClientDurabilityFact,
 	if state.RebuildAttemptCount != 0 || state.RebuildReceiptCount != *expected.RebuildAttemptCount {
 		return errors.New("durable rebuild evidence differs from the authored model")
 	}
+	return validateMultiScopeProvenanceContents(expected, capture, state, records, scopes)
+}
+
+// validateMultiScopeProvenanceContents compares the exact application rows and
+// provenance rows of one client with the authored records. Counts alone accept
+// swapped rows and wrong values. The runtime table adds owner and lifecycle
+// columns that the authored model does not declare, so the comparison reads
+// only the authored columns and requires each of them.
+func validateMultiScopeProvenanceContents(expected scenarios.ClientDurabilityFact, capture finalCapture, state inspectedClientState, records map[string]multiScopeProvenanceRecord, scopes map[string]string) error {
+	generations := make(map[string]uint64, len(state.ScopeStates))
+	for _, scope := range state.ScopeStates {
+		generations[scope.ScopeID] = scope.Generation
+	}
+	wantRows := make([]map[string]json.RawMessage, 0, len(expected.Provenance))
+	wantProvenance := make([]string, 0)
+	for _, fact := range expected.Provenance {
+		record, found := records[fact.CanonicalWireJSON]
+		if !found {
+			return fmt.Errorf("authored record %s has no runtime binding", fact.CanonicalWireJSON)
+		}
+		wantRows = append(wantRows, record.row)
+		for _, authoredScope := range fact.Scopes {
+			scopeID, found := scopes[authoredScope]
+			if !found {
+				return fmt.Errorf("authored scope %s has no runtime binding", authoredScope)
+			}
+			wantProvenance = append(wantProvenance, multiScopeProvenanceRowKey(clientScopeRow{
+				ScopeID: scopeID, TableName: record.tableName, RecordID: record.recordID, Generation: generations[scopeID],
+			}))
+		}
+	}
+	rows, err := decodeRows(capture.Rows)
+	if err != nil {
+		return err
+	}
+	columns := make(map[string]struct{})
+	for _, record := range records {
+		for column := range record.row {
+			columns[column] = struct{}{}
+		}
+	}
+	authoredColumns := make([]map[string]json.RawMessage, 0, len(rows))
+	for _, row := range rows {
+		projected := make(map[string]json.RawMessage, len(columns))
+		for column := range columns {
+			if value, found := row[column]; found {
+				projected[column] = value
+			}
+		}
+		authoredColumns = append(authoredColumns, projected)
+	}
+	gotRows, err := multiScopeProvenanceRowSet(authoredColumns)
+	if err != nil {
+		return err
+	}
+	expectedRows, err := multiScopeProvenanceRowSet(wantRows)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(gotRows, expectedRows) {
+		return fmt.Errorf("application rows differ from the authored records: observed %v authored %v", gotRows, expectedRows)
+	}
+	var provenance []clientScopeRow
+	if err := decodeStrictValue(capture.Provenance, &provenance); err != nil {
+		return fmt.Errorf("provenance details are invalid: %w", err)
+	}
+	gotProvenance := make([]string, 0, len(provenance))
+	for _, row := range provenance {
+		gotProvenance = append(gotProvenance, multiScopeProvenanceRowKey(row))
+	}
+	sort.Strings(gotProvenance)
+	sort.Strings(wantProvenance)
+	if !reflect.DeepEqual(gotProvenance, wantProvenance) {
+		return fmt.Errorf("provenance rows differ from the authored records: observed %v authored %v", gotProvenance, wantProvenance)
+	}
 	return nil
+}
+
+// multiScopeProvenanceRowKey names the authored provenance facts of one scope
+// row. The authored model declares no row checksum, so the key omits it.
+func multiScopeProvenanceRowKey(row clientScopeRow) string {
+	return fmt.Sprintf("%s/%s/%s/%d", row.ScopeID, row.TableName, row.RecordID, row.Generation)
+}
+
+// multiScopeProvenanceRowSet encodes each row with sorted field names and
+// compact values, so two rows compare by every field and value.
+func multiScopeProvenanceRowSet(rows []map[string]json.RawMessage) ([]string, error) {
+	set := make([]string, 0, len(rows))
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			return nil, errors.New("React Native multi-scope provenance application row is invalid")
+		}
+		set = append(set, string(encoded))
+	}
+	sort.Strings(set)
+	return set, nil
 }
 
 // multiScopeProvenanceCallMethod reports whether an authored call method drives

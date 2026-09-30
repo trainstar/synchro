@@ -6,9 +6,9 @@
     {
       "vector_set_id": "VSET-CANONICAL-001",
       "path": "conformance/vectors/canonical-v1.json",
-      "source_sha256": "b28eee7434bbcf2dc360a1aec40841e51716892fa6c3ed4ed45353d994e62b2a",
-      "vector_count": 126,
-      "aggregate_sha256": "c8c0b46ae5002ef3d6797161c7ec6a90b90cd2bc341ce378b3847ad2dd23ade9",
+      "source_sha256": "587f055f2996c2cf2ebaf9462d8fb6fcca7f604ebd93a4981798a3b01c199bb3",
+      "vector_count": 129,
+      "aggregate_sha256": "35081d3964f5b16c5a8039c4982d12c0800df78fe655ed02432c54135d18db05",
       "required_languages": [
         "go",
         "rust",

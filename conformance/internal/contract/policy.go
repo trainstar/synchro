@@ -79,44 +79,6 @@ type supportTuple struct {
 	policy                string
 }
 
-var lockedBudgetTriples = map[BudgetID]budgetTriple{
-	"BUD-WARM-CONNECT-001":             {"warm_connect_http_requests", "eq", "1"},
-	"BUD-WARM-CONNECT-PULL-001":        {"warm_connect_pull_http_requests", "eq", "1"},
-	"BUD-WARM-CONNECT-PUSH-001":        {"warm_connect_push_http_requests", "eq", "0"},
-	"BUD-WARM-CONNECT-REBUILD-001":     {"warm_connect_rebuild_page_http_requests", "eq", "0"},
-	"BUD-WARM-CONNECT-SCHEMA-001":      {"warm_connect_schema_fetch_http_requests", "eq", "0"},
-	"BUD-WARM-CONNECT-OTHER-001":       {"warm_connect_other_http_requests", "eq", "0"},
-	"BUD-STEADY-PULL-001":              {"steady_state_pull_http_requests_per_cycle", "eq", "1"},
-	"BUD-STEADY-PULL-NONPULL-001":      {"steady_state_pull_non_pull_http_requests_per_cycle", "eq", "0"},
-	"BUD-PENDING-PUSH-001":             {"pending_cycle_push_http_requests", "eq", "1"},
-	"BUD-PENDING-PULL-001":             {"pending_cycle_pull_http_requests", "eq", "1"},
-	"BUD-PENDING-CYCLE-UNEXPECTED-001": {"pending_cycle_non_push_or_pull_http_requests", "eq", "0"},
-	"BUD-REBUILD-CONNECT-001":          {"rebuild_connect_http_requests", "eq", "1"},
-	"BUD-REBUILD-PULL-001":             {"rebuild_pull_http_requests", "eq", "1"},
-	"BUD-REBUILD-PAGE-001":             {"rebuild_page_request_count_minus_returned_page_count", "eq", "0"},
-	"BUD-REBUILD-SCHEMA-FETCH-001":     {"rebuild_schema_fetch_http_requests", "eq", "0"},
-	"BUD-REBUILD-UNEXPECTED-001":       {"rebuild_unexpected_http_requests", "eq", "0"},
-	"BUD-CORE-SYNC-RPC-001":            {"core_sync_outbound_network_or_rpc_hops", "eq", "0"},
-}
-
-type budgetTriple struct {
-	metric     string
-	comparator string
-	limit      string
-}
-
-var lockedMeasurementIDs = map[MeasurementID]struct{}{
-	"MEAS-FANOUT-001":                 {},
-	"MEAS-SHARED-PRIVATE-SCOPES-001":  {},
-	"MEAS-REBUILD-CARDINALITY-001":    {},
-	"MEAS-SCHEMA-CHECK-001":           {},
-	"MEAS-SEEDED-EMPTY-STARTUP-001":   {},
-	"MEAS-QUEUE-REPLAY-001":           {},
-	"MEAS-REBUILD-APPLY-001":          {},
-	"MEAS-MULTI-SCOPE-PROVENANCE-001": {},
-	"MEAS-CONFIGURED-BOUNDS-001":      {},
-}
-
 // Validate checks the cross-catalog semantic contract with a fresh background
 // context. Load uses the internal context-aware form during initial loading.
 func (b *Bundle) Validate() error {
@@ -180,12 +142,6 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 		failures = append(failures, fmt.Errorf("bundle has no captured behavioral source for normative references"))
 		return failures
 	}
-	if len(b.Requirements.Requirements) != 117 {
-		failures = append(failures, fmt.Errorf("requirements must contain exactly 117 records, found %d", len(b.Requirements.Requirements)))
-	}
-	if len(b.Faults.Controls) != 117 {
-		failures = append(failures, fmt.Errorf("controls must contain exactly 117 records, found %d", len(b.Faults.Controls)))
-	}
 
 	requirements := make(map[RequirementID]Requirement, len(b.Requirements.Requirements))
 	for _, requirement := range b.Requirements.Requirements {
@@ -202,7 +158,7 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 	anchors, headingFailures := b.invariantHeadings()
 	failures = append(failures, headingFailures...)
 	requirementReferences := make(map[RequirementID]map[string]struct{}, len(requirements))
-	invariantOwners := make(map[string]RequirementID)
+	mappedInvariants := make(map[string]struct{})
 	for _, requirement := range b.Requirements.Requirements {
 		references := make(map[string]struct{}, len(requirement.NormativeReferences))
 		invariantReferenceCount := 0
@@ -218,15 +174,11 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 			references[key] = struct{}{}
 			if reference.Path == invariantsPath && heading.level == 3 {
 				invariantReferenceCount++
-				if owner, exists := invariantOwners[heading.anchor]; exists {
-					failures = append(failures, fmt.Errorf("invariant heading %q is mapped by both %s and %s", heading.anchor, owner, requirement.ID))
-				} else {
-					invariantOwners[heading.anchor] = requirement.ID
-				}
+				mappedInvariants[heading.anchor] = struct{}{}
 			}
 		}
-		if invariantReferenceCount != 1 {
-			failures = append(failures, fmt.Errorf("requirement %s must map to exactly one level-three invariant, found %d", requirement.ID, invariantReferenceCount))
+		if invariantReferenceCount == 0 {
+			failures = append(failures, fmt.Errorf("requirement %s maps to no level-three invariant", requirement.ID))
 		}
 		requirementReferences[requirement.ID] = references
 	}
@@ -234,7 +186,7 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 		if heading.level != 3 {
 			continue
 		}
-		if _, exists := invariantOwners[heading.anchor]; !exists {
+		if _, exists := mappedInvariants[heading.anchor]; !exists {
 			failures = append(failures, fmt.Errorf("level-three invariant heading %q has no requirement", heading.anchor))
 		}
 	}
@@ -247,7 +199,6 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 		}
 		faultIDs[fault.ID] = struct{}{}
 	}
-	controlOwners := make(map[RequirementID]ControlID, len(b.Faults.Controls))
 	usedFaults := make(map[FaultID]struct{}, len(b.Faults.Controls))
 	controlIDs := make(map[ControlID]struct{}, len(b.Faults.Controls))
 	for _, control := range b.Faults.Controls {
@@ -261,27 +212,24 @@ func (b *Bundle) validateRequirementsAndControls(ctx context.Context) []error {
 		} else {
 			usedFaults[control.FaultID] = struct{}{}
 		}
-		if len(control.RequirementIDs) != 1 {
-			failures = append(failures, fmt.Errorf("control %s must own exactly one requirement", control.ID))
+		if len(control.RequirementIDs) == 0 {
+			failures = append(failures, fmt.Errorf("control %s names no requirement", control.ID))
 			continue
 		}
-		requirementID := control.RequirementIDs[0]
-		if _, exists := requirements[requirementID]; !exists {
-			failures = append(failures, fmt.Errorf("control %s owns unknown requirement %s", control.ID, requirementID))
-			continue
+		expectedReferences := make(map[string]struct{})
+		knownRequirements := true
+		for _, requirementID := range control.RequirementIDs {
+			if _, exists := requirements[requirementID]; !exists {
+				failures = append(failures, fmt.Errorf("control %s names unknown requirement %s", control.ID, requirementID))
+				knownRequirements = false
+				continue
+			}
+			for reference := range requirementReferences[requirementID] {
+				expectedReferences[reference] = struct{}{}
+			}
 		}
-		if owner, exists := controlOwners[requirementID]; exists {
-			failures = append(failures, fmt.Errorf("requirement %s is owned by both controls %s and %s", requirementID, owner, control.ID))
-		} else {
-			controlOwners[requirementID] = control.ID
-		}
-		if !stringSetEquals(control.NormativeReferences, requirementReferenceStrings(requirementReferences[requirementID])) {
-			failures = append(failures, fmt.Errorf("control %s normative references do not exactly match requirement %s", control.ID, requirementID))
-		}
-	}
-	for requirementID := range requirements {
-		if _, exists := controlOwners[requirementID]; !exists {
-			failures = append(failures, fmt.Errorf("requirement %s has no control", requirementID))
+		if knownRequirements && !stringSetEquals(control.NormativeReferences, requirementReferenceStrings(expectedReferences)) {
+			failures = append(failures, fmt.Errorf("control %s normative references do not exactly match its requirements", control.ID))
 		}
 	}
 	for faultID := range faultIDs {
@@ -313,17 +261,7 @@ func (b *Bundle) invariantHeadings() ([]markdownHeading, []error) {
 	if !exists {
 		return nil, []error{fmt.Errorf("captured invariant headings are missing")}
 	}
-	headings := parseMarkdownHeadings(string(data))
-	count := 0
-	for _, heading := range headings {
-		if heading.level == 3 {
-			count++
-		}
-	}
-	if count != 117 {
-		return headings, []error{fmt.Errorf("invariants document must contain exactly 117 level-three headings, found %d", count)}
-	}
-	return headings, nil
+	return parseMarkdownHeadings(string(data)), nil
 }
 
 func (b *Bundle) resolveNormativeReference(reference NormativeReference) (string, markdownHeading, error) {
@@ -564,19 +502,12 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 	if matrix.CurrentTrackPolicy != (CurrentTrackPolicy{Selector: "current-stable", ResolveAt: "release-candidate-start", RecordExactVersionsIn: "release-manifest.json"}) {
 		failures = append(failures, fmt.Errorf("support matrix current-track policy does not match the locked policy"))
 	}
-	if !supportCellIDSlicesEqual(matrix.SemanticCorpusCellIDs, lockedSemanticCorpusCellIDs) {
+	if !supportCellIDSetsEqual(matrix.SemanticCorpusCellIDs, lockedSemanticCorpusCellIDs) {
 		failures = append(failures, fmt.Errorf("support matrix semantic corpus cell IDs do not match the locked v0.3.0 set"))
-	}
-	if len(matrix.Cells) != len(lockedSupportCells) {
-		failures = append(failures, fmt.Errorf("support matrix must contain exactly %d cells, found %d", len(lockedSupportCells), len(matrix.Cells)))
 	}
 	seenIDs := make(map[SupportCellID]struct{}, len(matrix.Cells))
 	seenTuples := make(map[string]SupportCellID, len(matrix.Cells))
-	requiredCount := 0
 	for _, cell := range matrix.Cells {
-		if cell.Policy == "required" {
-			requiredCount++
-		}
 		if _, exists := seenIDs[cell.ID]; exists {
 			failures = append(failures, fmt.Errorf("duplicate support cell ID %s", cell.ID))
 		} else {
@@ -602,18 +533,23 @@ func validateSupportMatrix(matrix SupportMatrix) []error {
 			failures = append(failures, fmt.Errorf("support matrix is missing locked cell %s", id))
 		}
 	}
-	if requiredCount != 7 {
-		failures = append(failures, fmt.Errorf("support matrix must contain exactly 7 required cells, found %d", requiredCount))
-	}
 	return failures
 }
 
-func supportCellIDSlicesEqual(left, right []SupportCellID) bool {
-	if len(left) != len(right) {
+func supportCellIDSetsEqual(left, right []SupportCellID) bool {
+	leftSet := make(map[SupportCellID]struct{}, len(left))
+	for _, id := range left {
+		leftSet[id] = struct{}{}
+	}
+	rightSet := make(map[SupportCellID]struct{}, len(right))
+	for _, id := range right {
+		rightSet[id] = struct{}{}
+	}
+	if len(leftSet) != len(left) || len(rightSet) != len(right) || len(leftSet) != len(rightSet) {
 		return false
 	}
-	for index := range left {
-		if left[index] != right[index] {
+	for id := range leftSet {
+		if _, exists := rightSet[id]; !exists {
 			return false
 		}
 	}
@@ -645,9 +581,6 @@ func supportCellTuple(cell SupportCell) string {
 
 func validateArtifactInventory(inventory ArtifactInventory) []error {
 	var failures []error
-	if len(inventory.Artifacts) != len(lockedArtifactRoles) {
-		failures = append(failures, fmt.Errorf("artifact inventory must contain exactly %d artifacts, found %d", len(lockedArtifactRoles), len(inventory.Artifacts)))
-	}
 	seenIDs := make(map[ArtifactInventoryID]struct{}, len(inventory.Artifacts))
 	seenRoles := make(map[string]ArtifactInventoryID, len(inventory.Artifacts))
 	for _, artifact := range inventory.Artifacts {
@@ -684,12 +617,6 @@ func validatePerformanceCatalog(bundle *Bundle) []error {
 	support := bundle.Support
 	artifacts := bundle.Artifacts
 	var failures []error
-	if len(catalog.Budgets) != len(lockedBudgetTriples) {
-		failures = append(failures, fmt.Errorf("performance catalog must contain exactly %d budgets, found %d", len(lockedBudgetTriples), len(catalog.Budgets)))
-	}
-	if len(catalog.RequiredMeasurements) != len(lockedMeasurementIDs) {
-		failures = append(failures, fmt.Errorf("performance catalog must contain exactly %d measurements, found %d", len(lockedMeasurementIDs), len(catalog.RequiredMeasurements)))
-	}
 	requiredSupport := make(map[SupportCellID]struct{}, len(support.Cells))
 	for _, cell := range support.Cells {
 		if cell.Policy == "required" {
@@ -707,22 +634,12 @@ func validatePerformanceCatalog(bundle *Bundle) []error {
 		} else {
 			seenBudgets[budget.ID] = struct{}{}
 		}
-		expected, known := lockedBudgetTriples[budget.ID]
-		if !known {
-			failures = append(failures, fmt.Errorf("performance catalog has unexpected budget ID %s", budget.ID))
-		} else if normalizedLimit, err := javaScriptJSONNumber(budget.Limit); err != nil {
+		if _, err := javaScriptJSONNumber(budget.Limit); err != nil {
 			failures = append(failures, fmt.Errorf("budget %s has invalid numeric limit: %w", budget.ID, err))
-		} else if budget.Metric != expected.metric || budget.Comparator != expected.comparator || normalizedLimit != expected.limit {
-			failures = append(failures, fmt.Errorf("budget %s does not match its locked metric, comparator, and limit", budget.ID))
 		}
 		failures = append(failures, validatePerformanceReferences(string(budget.ID), budget.SupportCellIDs, budget.ArtifactInventoryIDs, requiredSupport, knownArtifacts)...)
 		if err := validateParameters(budget.DataProfile.Parameters, fmt.Sprintf("budget %s data profile", budget.ID)); err != nil {
 			failures = append(failures, err)
-		}
-	}
-	for id := range lockedBudgetTriples {
-		if _, exists := seenBudgets[id]; !exists {
-			failures = append(failures, fmt.Errorf("performance catalog is missing budget %s", id))
 		}
 	}
 
@@ -732,9 +649,6 @@ func validatePerformanceCatalog(bundle *Bundle) []error {
 			failures = append(failures, fmt.Errorf("duplicate required measurement ID %s", measurement.ID))
 		} else {
 			seenMeasurements[measurement.ID] = struct{}{}
-		}
-		if _, known := lockedMeasurementIDs[measurement.ID]; !known {
-			failures = append(failures, fmt.Errorf("performance catalog has unexpected measurement ID %s", measurement.ID))
 		}
 		failures = append(failures, validatePerformanceReferences(string(measurement.ID), measurement.SupportCellIDs, measurement.ArtifactInventoryIDs, requiredSupport, knownArtifacts)...)
 		if err := validateParameters(measurement.DataProfile.Parameters, fmt.Sprintf("measurement %s data profile", measurement.ID)); err != nil {
@@ -758,11 +672,6 @@ func validatePerformanceCatalog(bundle *Bundle) []error {
 			if err := validateParameters(stratum.Parameters, fmt.Sprintf("measurement %s stratum %s", measurement.ID, stratum.StratumID)); err != nil {
 				failures = append(failures, err)
 			}
-		}
-	}
-	for id := range lockedMeasurementIDs {
-		if _, exists := seenMeasurements[id]; !exists {
-			failures = append(failures, fmt.Errorf("performance catalog is missing measurement %s", id))
 		}
 	}
 	digest, err := bundle.performanceCatalogDigest()

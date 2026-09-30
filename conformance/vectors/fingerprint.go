@@ -339,7 +339,8 @@ func normalizedMutationValue(mutation NormalizedMutation) ([]any, error) {
 	var base []any
 	switch mutation.Operation {
 	case "insert":
-		if mutation.BaseVersion != nil || mutation.Columns == nil || len(*mutation.Columns) == 0 {
+		// An insert can author no fields. An update must author at least one field.
+		if mutation.BaseVersion != nil || mutation.Columns == nil {
 			return nil, errors.New("insert has an invalid base_version or columns shape")
 		}
 		base = []any{0}

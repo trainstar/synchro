@@ -8,6 +8,7 @@ import base64
 import binascii
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^[1-9][0-9]*$")
@@ -53,6 +54,7 @@ DEPENDENCY_INPUTS = (
     "extensions/Cargo.toml",
     "extensions/synchro-pg/Cargo.toml",
 )
+APPLE_SOURCE_PATHS = ("Package.swift", "Synchro.podspec", "LICENSE", "clients/swift/Sources")
 
 
 class ReleaseError(ValueError):
@@ -108,7 +110,7 @@ def render(template: str, version: str) -> str:
 
 def validate_candidate(release_dir: Path, version: str, source_commit: str) -> str:
     if not VERSION.fullmatch(version):
-        raise ReleaseError("release version must match X.Y.Z")
+        raise ReleaseError("release version must match X.Y.Z or X.Y.Z-rc.N")
     if not COMMIT.fullmatch(source_commit):
         raise ReleaseError("source commit must be a full Git SHA-1")
     candidate_id = f"release-{version}-{source_commit}"
@@ -284,7 +286,7 @@ def validate_extension_archive(path: Path, version: str) -> None:
         "sharedir/extension/synchro_pg.control",
         f"sharedir/extension/synchro_pg--{version}.sql",
     }
-    update_destination = re.compile(r"^sharedir/extension/synchro_pg--\d+\.\d+\.\d+--\d+\.\d+\.\d+\.sql$", re.ASCII)
+    update_destination = re.compile(r"^sharedir/extension/synchro_pg--\d+\.\d+\.\d+(?:-rc\.\d+)?--\d+\.\d+\.\d+(?:-rc\.\d+)?\.sql$", re.ASCII)
     if (
         not wanted_destinations <= destinations
         or any(not update_destination.fullmatch(destination) for destination in destinations - wanted_destinations)
@@ -898,6 +900,73 @@ def materialize_adapter_layout(release_dir: Path, version: str, inventory: Path,
     write_atomic(output / "synchrod-pg.sha256", record["sha256"] + "\n")
 
 
+def sealed_bytes(release_dir: Path, record: dict[str, Any]) -> bytes:
+    data = (release_dir / record["path"]).read_bytes()
+    if hashlib.sha256(data).hexdigest() != record["sha256"]:
+        raise ReleaseError(f"sealed payload changed after verification: {record['path']}")
+    return data
+
+
+def git_output(*arguments: str) -> bytes:
+    try:
+        return subprocess.run(["git", *arguments], check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ReleaseError(f"git {arguments[2]} failed for the sealed source commit") from error
+
+
+def write_new_file(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as stream:
+        stream.write(data)
+
+
+def materialize_consumer_inputs(release_dir: Path, version: str, inventory: Path, support_matrix: Path, repo: Path, output: Path) -> None:
+    """Build package consumer inputs only from verified sealed bytes and the sealed source commit."""
+    records = payload_records_by_role(release_dir, version, inventory, support_matrix)
+    source = load_json(release_dir / MANIFEST_NAME, "release manifest")["source"]
+    commit = source["commit"]
+    if git_output("-C", str(repo), "rev-parse", "--verify", f"{commit}^{{commit}}").decode().strip() != commit:
+        raise ReleaseError("repository does not contain the sealed source commit")
+    if git_output("-C", str(repo), "rev-parse", "--verify", f"{commit}^{{tree}}").decode().strip() != source["git_tree"]:
+        raise ReleaseError("sealed source commit does not have the sealed root tree")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise ReleaseError(f"consumer input directory already exists; choose a fresh path: {output}") from error
+    try:
+        maven = zipfile.ZipFile(io.BytesIO(sealed_bytes(release_dir, records["kotlin-maven"])))
+        for info in maven.infolist():
+            relative = safe_relative(info.filename, "Maven archive path")
+            if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
+                raise ReleaseError("Maven archive contains a link or directory")
+            write_new_file(output / "maven" / relative, maven.read(info))
+        npm = records["react-native-npm"]
+        write_new_file(output / "npm" / Path(npm["path"]).name, sealed_bytes(release_dir, npm))
+        apple = output / "apple"
+        source_archive = git_output("-C", str(repo), "archive", "--format=tar", "--prefix=Synchro/", commit, *APPLE_SOURCE_PATHS)
+        with tarfile.open(fileobj=io.BytesIO(source_archive), mode="r:") as archive:
+            for member in archive.getmembers():
+                relative = safe_relative(member.name.rstrip("/"), "Apple source path")
+                if member.isdir():
+                    (apple / relative).mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    stream = archive.extractfile(member)
+                    assert stream is not None
+                    write_new_file(apple / relative, stream.read())
+                else:
+                    raise ReleaseError(f"Apple source contains an unsupported entry: {member.name}")
+        with (apple / f"synchro-spm-{version}.tar.gz").open("xb") as output_stream:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=output_stream, mtime=0) as compressed:
+                compressed.write(source_archive)
+        git_output("-C", str(repo), "clone", "--bare", "--quiet", ".", str(output / "source.git"))
+        for tag in (f"v{version}", f"api/go/v{version}"):
+            git_output("--git-dir", str(output / "source.git"), "tag", "-f", tag, commit)
+    except BaseException:
+        shutil.rmtree(output, ignore_errors=True)
+        raise
+
+
 def print_payload_hashes(release_dir: Path, version: str, inventory: Path, support_matrix: Path, roles: list[str]) -> None:
     records = payload_records_by_role(release_dir, version, inventory, support_matrix)
     if not roles or len(set(roles)) != len(roles):
@@ -938,6 +1007,13 @@ def main() -> int:
     adapter_layout.add_argument("--inventory", type=Path, required=True)
     adapter_layout.add_argument("--support-matrix", type=Path, required=True)
     adapter_layout.add_argument("--output", type=Path, required=True)
+    consumer_inputs = subparsers.add_parser("consumer-inputs")
+    consumer_inputs.add_argument("--release-dir", type=Path, required=True)
+    consumer_inputs.add_argument("--version", required=True)
+    consumer_inputs.add_argument("--inventory", type=Path, required=True)
+    consumer_inputs.add_argument("--support-matrix", type=Path, required=True)
+    consumer_inputs.add_argument("--repo-root", type=Path, required=True)
+    consumer_inputs.add_argument("--output", type=Path, required=True)
     payload_hashes = subparsers.add_parser("print-payload-hashes")
     payload_hashes.add_argument("--release-dir", type=Path, required=True)
     payload_hashes.add_argument("--version", required=True)
@@ -986,6 +1062,8 @@ def main() -> int:
             write_package_metadata(args.output, args.source_commit)
         elif args.command == "adapter-layout":
             materialize_adapter_layout(args.release_dir, args.version, args.inventory, args.support_matrix, args.output)
+        elif args.command == "consumer-inputs":
+            materialize_consumer_inputs(args.release_dir, args.version, args.inventory, args.support_matrix, args.repo_root, args.output)
         elif args.command == "print-payload-hashes":
             print_payload_hashes(args.release_dir, args.version, args.inventory, args.support_matrix, args.role)
         elif args.command == "stage":

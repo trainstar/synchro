@@ -5,25 +5,40 @@ package importguard
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
+// The descendant holds the only write end of a test-owned FIFO. End of file
+// on the read end proves that the descendant is gone without a process ID, so
+// the test never signals a process that it cannot identify. The descendant
+// also has a bounded lifetime, so a failed cancellation cannot leave it
+// running for long.
 func TestModulePolicyCancellationKillsDescendants(t *testing.T) {
 	bin := t.TempDir()
-	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	fifoPath := filepath.Join(t.TempDir(), "descendant.fifo")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := os.OpenFile(fifoPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	// Fd puts the reader in blocking mode, so reads wait for the descendant.
+	_ = reader.Fd()
+
 	goPath := filepath.Join(bin, "go")
-	script := "#!/bin/sh\nsleep 30 &\nchild=$!\nprintf '%s' \"$child\" > \"$SYNCHRO_CHILD_PID_FILE\"\nwait \"$child\"\n"
+	script := "#!/bin/sh\n(printf x >&9; exec sleep 30) 9>\"$SYNCHRO_DESCENDANT_FIFO\" </dev/null >/dev/null 2>&1 &\nwait\n"
 	if err := os.WriteFile(goPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("SYNCHRO_CHILD_PID_FILE", childPIDPath)
+	t.Setenv("SYNCHRO_DESCENDANT_FIFO", fifoPath)
 	root := tempModule(t, map[string]string{"go.mod": testModuleFile})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -32,46 +47,53 @@ func TestModulePolicyCancellationKillsDescendants(t *testing.T) {
 		result <- CheckModulePolicy(ctx, root)
 	}()
 
-	var rawPID []byte
-	startDeadline := time.NewTimer(5 * time.Second)
-	defer startDeadline.Stop()
-	startPoll := time.NewTicker(10 * time.Millisecond)
-	defer startPoll.Stop()
-	for len(rawPID) == 0 {
-		var err error
-		rawPID, err = os.ReadFile(childPIDPath)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+	started := make(chan error, 1)
+	go func() {
+		marker := make([]byte, 1)
+		for {
+			count, err := reader.Read(marker)
+			if count == 1 {
+				started <- nil
+				return
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				started <- err
+				return
+			}
+			// End of file before the marker means the descendant has not opened the FIFO yet.
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	select {
+	case err := <-started:
+		if err != nil {
 			cancel()
 			<-result
 			t.Fatal(err)
 		}
-		select {
-		case err := <-result:
-			t.Fatalf("module policy returned before its child started: %v", err)
-		case <-startDeadline.C:
-			cancel()
-			<-result
-			t.Fatal("timed out waiting for module-policy child process")
-		case <-startPoll.C:
-		}
+	case err := <-result:
+		t.Fatalf("module policy returned before its descendant started: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-result
+		t.Fatal("timed out waiting for module-policy descendant process")
 	}
+
 	cancel()
-	err := <-result
-	if !errors.Is(err, context.Canceled) {
+	if err := <-result; !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		err = syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			return
+	closed := make(chan error, 1)
+	go func() {
+		_, err := reader.Read(make([]byte, 1))
+		closed <- err
+	}()
+	select {
+	case err := <-closed:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("descendant FIFO read after cancellation = %v, want end of file", err)
 		}
-		time.Sleep(20 * time.Millisecond)
+	case <-time.After(2 * time.Second):
+		t.Fatal("descendant process survived context cancellation")
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	t.Fatalf("descendant process %d survived context cancellation", pid)
 }

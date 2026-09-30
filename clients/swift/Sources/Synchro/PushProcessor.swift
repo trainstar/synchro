@@ -253,7 +253,7 @@ final class PushProcessor: @unchecked Sendable {
         }
 
         let values = change.fieldValuesByID
-        if change.operation != "delete" && values.isEmpty {
+        if change.operation == "update" && values.isEmpty {
             throw SynchroError.invalidResponse(message: "mutation has no immutable authored values")
         }
         for value in values.values {
@@ -373,6 +373,18 @@ final class PushProcessor: @unchecked Sendable {
             while pending.isEmpty {
                 let candidates = try changeTracker.pendingChanges(db, limit: batchSize)
                 guard let first = candidates.first else { return nil }
+                // An envelope above a request limit is a configuration failure, not an
+                // oversized action. The error rolls back this transaction, so every
+                // action keeps its state.
+                guard envelope.fitsRequestLimit else {
+                    throw SynchroError.blocked(SyncFailure(
+                        operation: .pushing,
+                        code: .invalidRequest,
+                        retryable: false,
+                        message: "The push request envelope exceeds the request limit.",
+                        recoveryAction: .none
+                    ))
+                }
                 // The commit-time group rules already bound an atomic group by the worst case.
                 if first.atomicGroupID != nil {
                     pending = candidates
@@ -397,13 +409,15 @@ final class PushProcessor: @unchecked Sendable {
                         historicalSchemas: &historicalSchemas
                     )
                     let measure = try PushLimits.measure(mutation, encoder: encoder)
-                    if measure.exceedsMutationLimits {
+                    let nextOctets = requestOctets.appending(measure.element, afterElement: !pending.isEmpty)
+                    // A mutation that exceeds a request measure alone in an empty request
+                    // cannot fit with this reserved envelope.
+                    if measure.exceedsMutationLimits || (pending.isEmpty && !nextOctets.fitsRequestLimit) {
                         try changeTracker.markExceedsPushLimit(db, mutationID: candidate.mutationID)
                         try changeTracker.blockDependents(db, predecessorID: candidate.mutationID)
                         continue
                     }
-                    let nextOctets = requestOctets.appending(measure.element, afterElement: !pending.isEmpty)
-                    if !pending.isEmpty && !nextOctets.fitsRequestLimit {
+                    if !nextOctets.fitsRequestLimit {
                         break
                     }
                     requestOctets = nextOctets
@@ -1345,7 +1359,7 @@ final class PushProcessor: @unchecked Sendable {
             }
             switch intent.operation {
             case "insert", "update":
-                guard !intent.fieldValuesByID.isEmpty else { return nil }
+                guard intent.operation == "insert" || !intent.fieldValuesByID.isEmpty else { return nil }
                 var values: [(column: LocalSchemaColumn, value: AnyCodable)] = []
                 for stored in intent.fieldValuesByID.values.sorted(by: { $0.fieldID < $1.fieldID }) {
                     guard let column = columnsByID[stored.fieldID],

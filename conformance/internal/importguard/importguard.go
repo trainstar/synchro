@@ -27,6 +27,7 @@ var requiredDirectModules = map[string]string{
 	"github.com/gowebpki/jcs":                  "v1.0.1",
 	"github.com/jackc/pgx/v5":                  "v5.9.2",
 	"github.com/santhosh-tekuri/jsonschema/v6": "v6.0.2",
+	"golang.org/x/sys":                         "v0.44.0",
 }
 
 var requiredIndirectModules = map[string]string{

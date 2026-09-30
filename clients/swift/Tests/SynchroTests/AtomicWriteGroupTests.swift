@@ -5,16 +5,15 @@ import GRDB
 final class AtomicWriteGroupTests: XCTestCase {
     private let ordersTable = SchemaTable(
         tableName: "orders",
-        pushPolicy: "owner_only",
         updatedAtColumn: "updated_at",
         deletedAtColumn: "deleted_at",
         primaryKey: ["id"],
         columns: [
-            SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            SchemaColumn(name: "ship_address", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
-            SchemaColumn(name: "user_id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: false),
-            SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-            SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+            SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            SchemaColumn(name: "ship_address", logicalType: "string", nullable: true, isPrimaryKey: false),
+            SchemaColumn(name: "user_id", logicalType: "string", nullable: false, isPrimaryKey: false),
+            SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+            SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
         ]
     )
     private let clientID = "test-device"

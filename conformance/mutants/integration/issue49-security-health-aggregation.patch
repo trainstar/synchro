@@ -1,28 +1,28 @@
 diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 --- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
 +++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-@@ -2130,7 +2130,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
+@@ -2135,7 +2135,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1141
-+-- synchro-pg/src/health.rs:1142
+--- synchro-pg/src/health.rs:1151
++-- synchro-pg/src/health.rs:1152
  -- synchro_pg::health::synchro_health_detail
  CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
-@@ -2342,7 +2342,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
+@@ -2347,7 +2347,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/health.rs:1134
-+-- synchro-pg/src/health.rs:1135
+--- synchro-pg/src/health.rs:1144
++-- synchro-pg/src/health.rs:1145
  -- synchro_pg::health::synchro_readiness
  CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
  STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -682,7 +682,8 @@ impl ReadinessStatus {
+@@ -725,7 +725,8 @@
      pub(crate) fn ready(&self) -> bool {
          self.checks
              .values()

@@ -165,7 +165,7 @@ final class SynchroClientTests: XCTestCase {
                 ON _synchro_rejected_mutations (table_name, record_id)
                 """)
             try db.execute(
-                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sql: "DELETE FROM grdb_migrations WHERE identifier IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 arguments: [
                     "synchro_v9_mutation_ledger",
                     "synchro_v10_rebuild_page_receipts",
@@ -177,6 +177,7 @@ final class SynchroClientTests: XCTestCase {
                     "synchro_v16_capture_storage_validation",
                     "synchro_v17_push_limit_capture_dependency",
                     "synchro_v18_atomic_groups",
+                    "synchro_v18_key_only_insert_capture",
                 ]
             )
         }
@@ -543,14 +544,16 @@ final class SynchroClientTests: XCTestCase {
             params: ["c1", nullNote]
         )
 
-        let observed = OSAllocatedUnfairLock(initialState: false)
+        // A dropped or shifted null bind selects no row, so each delivery must
+        // contain exactly the row that matches both bound values.
+        let observed = OSAllocatedUnfairLock(initialState: [[String]]())
         let cancellable = client.watch(
             "SELECT id FROM nullable_counters WHERE id = ? AND note IS ?",
             params: ["c1", nullNote],
             tables: ["nullable_counters"]
         ) { rows in
-            _ = rows
-            observed.withLock { $0 = true }
+            let ids = rows.map { $0["id"] as? String ?? "<missing>" }
+            observed.withLock { $0.append(ids) }
         }
 
         _ = try client.execute(
@@ -559,11 +562,13 @@ final class SynchroClientTests: XCTestCase {
         )
 
         let deadline = Date().addingTimeInterval(2.0)
-        while !observed.withLock({ $0 }) && Date() < deadline {
+        while observed.withLock({ $0.isEmpty }) && Date() < deadline {
             // GRDB delivers observation callbacks asynchronously on the main run loop.
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
-        XCTAssertTrue(observed.withLock { $0 })
+        let deliveries = observed.withLock { $0 }
+        XCTAssertFalse(deliveries.isEmpty)
+        XCTAssertEqual(Set(deliveries), [["c1"]])
         cancellable.cancel()
     }
 

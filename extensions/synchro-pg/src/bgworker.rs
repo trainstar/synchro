@@ -35,6 +35,8 @@ const MAX_POISON_DETAIL_BYTES: usize = 512;
 const MAX_PEEK_BATCH_BYTES: usize = MAX_TRANSACTION_BYTES;
 const STARTUP_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const STARTUP_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const UNOWNED_SLOT_COLLISION: &str =
+    "configured replication slot exists without synchro ownership evidence";
 
 #[derive(Clone)]
 struct PoisonFailure {
@@ -176,6 +178,9 @@ struct DependencyEvent {
 struct PersistedEvents {
     direct_impacts: Vec<ImpactedRow>,
     dependency_events: Vec<DependencyEvent>,
+    /// Each changed synced row, in first-touch order, with whether its
+    /// captured row existed before the events of this call.
+    initial_presence: Vec<((usize, String), bool)>,
 }
 
 struct MaterializedTransaction {
@@ -194,7 +199,7 @@ struct WorkerSlotPreparation {
     worker_role_oid: pg_sys::Oid,
     startup: WorkerStartupIdentity,
     connected_database: String,
-    existing_slot: ExistingWorkerSlot,
+    slot_exists: bool,
 }
 
 struct PublicationIdentity {
@@ -214,17 +219,10 @@ pub(crate) struct WorkerStartupIdentity {
     pub(crate) active_slot_is_unbound: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExistingWorkerSlot {
-    Missing,
-    Inactive,
-    Active,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SlotBindingDecision {
     Reuse,
-    Replace,
+    Create,
     Fail,
 }
 
@@ -324,7 +322,14 @@ enum FenceTarget<'a> {
     },
 }
 
-fn transaction_content_hash(transaction: &WalTransaction) -> [u8; 32] {
+/// Format 2 binds the row boundary of each logical message, because the
+/// boundary selects the registry generation of each row event. A transaction
+/// record from an earlier release keeps format 1, which omits the boundary. The
+/// worker of that release applied one generation to every row event.
+const TRANSACTION_HASH_FORMAT: i16 = 2;
+const LEGACY_TRANSACTION_HASH_FORMAT: i16 = 1;
+
+fn transaction_content_hash(transaction: &WalTransaction, format: i16) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hash_u64(&mut hasher, u64::from(transaction.xid));
     hash_u64(&mut hasher, transaction.final_lsn);
@@ -349,6 +354,9 @@ fn transaction_content_hash(transaction: &WalTransaction) -> [u8; 32] {
         hash_u64(&mut hasher, message.message_lsn);
         hash_bytes(&mut hasher, message.prefix.as_bytes());
         hash_bytes(&mut hasher, &message.content);
+        if format != LEGACY_TRANSACTION_HASH_FORMAT {
+            hash_u64(&mut hasher, message.event_boundary);
+        }
     }
     hasher.finalize().into()
 }
@@ -1017,41 +1025,36 @@ fn prepare_worker(database: &str, worker_login: &str) -> Result<WorkerIdentity, 
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             let (_, connected_database) = connected_database(client, database)?;
             let startup = capture_worker_startup_identity(client, &configured_slot)?;
-            let existing_slot = existing_worker_slot(client, &startup.runtime.slot_name)?;
-            if slot_binding_decision(&startup, existing_slot) == SlotBindingDecision::Fail {
-                return Err("configured replication slot is owned by another backend".to_string());
+            let slot_exists = worker_slot_exists(client, &startup.runtime.slot_name)?;
+            if slot_binding_decision(&startup, slot_exists) == SlotBindingDecision::Fail {
+                return Err(UNOWNED_SLOT_COLLISION.to_string());
             }
             Ok(WorkerSlotPreparation {
                 session_login_oid,
                 worker_role_oid,
                 startup,
                 connected_database,
-                existing_slot,
+                slot_exists,
             })
         })
     })?;
-    let startup_runtime =
-        match slot_binding_decision(&preparation.startup, preparation.existing_slot) {
-            SlotBindingDecision::Fail => {
-                return Err("configured replication slot is owned by another backend".to_string());
-            }
-            SlotBindingDecision::Reuse => {
-                prepare_bound_worker_slot(&preparation, &configured_slot)?
-            }
-            SlotBindingDecision::Replace => {
-                let boundary = run_replication_transaction(preparation.worker_role_oid, || {
-                    Spi::connect_mut(|client| {
-                        replace_unbound_slot(
-                            client,
-                            &preparation.startup.runtime.slot_name,
-                            preparation.existing_slot,
-                            &preparation.connected_database,
-                        )
-                    })
-                })?;
-                bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
-            }
-        };
+    let startup_runtime = match slot_binding_decision(&preparation.startup, preparation.slot_exists)
+    {
+        SlotBindingDecision::Fail => return Err(UNOWNED_SLOT_COLLISION.to_string()),
+        SlotBindingDecision::Reuse => prepare_bound_worker_slot(&preparation, &configured_slot)?,
+        SlotBindingDecision::Create => {
+            let boundary = run_replication_transaction(preparation.worker_role_oid, || {
+                Spi::connect_mut(|client| {
+                    create_unbound_slot(
+                        client,
+                        &preparation.startup.runtime.slot_name,
+                        &preparation.connected_database,
+                    )
+                })
+            })?;
+            bind_unbound_worker_slot(&preparation, &configured_slot, &boundary)?
+        }
+    };
     Ok(WorkerIdentity {
         session_login_oid: preparation.session_login_oid,
         worker_role_oid: preparation.worker_role_oid,
@@ -1092,6 +1095,7 @@ fn initialize_worker(
     let configured_slot = configured_replication_slot();
     let publication = publication_name();
     Spi::connect_mut(|client| {
+        lock_worker_gate_for_startup(client)?;
         activate_worker_role_in_transaction(client, worker_role_oid)?;
         let (database_oid, connected_database) = connected_database(client, database)?;
         let publication = ensure_publication(client, &publication)?;
@@ -1429,46 +1433,27 @@ fn prepare_bound_worker_slot(
     })
 }
 
-fn existing_worker_slot(
-    client: &mut SpiClient<'_>,
-    slot: &str,
-) -> Result<ExistingWorkerSlot, String> {
-    let rows = client
+fn worker_slot_exists(client: &mut SpiClient<'_>, slot: &str) -> Result<bool, String> {
+    client
         .select(
-            "SELECT active
-              FROM pg_catalog.pg_replication_slots
-              WHERE slot_name = $1",
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1
+             ) AS present",
             None,
             &[slot.into()],
         )
-        .map_err(|_| "checking replication slot failed".to_string())?;
-    match rows.into_iter().next() {
-        Some(row) => match row
-            .get_by_name::<bool, &str>("active")
-            .map_err(|_| "checking replication slot failed".to_string())?
-        {
-            Some(true) | None => Ok(ExistingWorkerSlot::Active),
-            Some(false) => Ok(ExistingWorkerSlot::Inactive),
-        },
-        None => Ok(ExistingWorkerSlot::Missing),
-    }
+        .map_err(|_| "checking replication slot failed".to_string())?
+        .first()
+        .get_by_name::<bool, &str>("present")
+        .map_err(|_| "checking replication slot failed".to_string())?
+        .ok_or_else(|| "checking replication slot failed".to_string())
 }
 
-fn replace_unbound_slot(
+fn create_unbound_slot(
     client: &mut SpiClient<'_>,
     slot: &str,
-    existing_slot: ExistingWorkerSlot,
     connected_database: &str,
 ) -> Result<String, String> {
-    if existing_slot == ExistingWorkerSlot::Inactive {
-        client
-            .select(
-                "SELECT pg_catalog.pg_drop_replication_slot($1)",
-                None,
-                &[slot.into()],
-            )
-            .map_err(|_| "dropping configured replication slot failed".to_string())?;
-    }
     client
         .select(
             "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -1571,16 +1556,18 @@ fn bind_replacement_slot(
     Ok(())
 }
 
+/// Only a bound runtime row is ownership evidence for an existing slot.
+/// An unbound runtime creates the configured slot only when it is missing.
+/// An existing slot with the configured name can belong to another consumer,
+/// so startup fails and leaves it unchanged for an explicit operator decision.
 pub(crate) fn slot_binding_decision(
     runtime_state: &WorkerStartupIdentity,
-    existing_slot: ExistingWorkerSlot,
+    slot_exists: bool,
 ) -> SlotBindingDecision {
-    if !runtime_state.active_slot_is_unbound {
-        return SlotBindingDecision::Reuse;
-    }
-    match existing_slot {
-        ExistingWorkerSlot::Active => SlotBindingDecision::Fail,
-        ExistingWorkerSlot::Missing | ExistingWorkerSlot::Inactive => SlotBindingDecision::Replace,
+    match (runtime_state.active_slot_is_unbound, slot_exists) {
+        (false, _) => SlotBindingDecision::Reuse,
+        (true, false) => SlotBindingDecision::Create,
+        (true, true) => SlotBindingDecision::Fail,
     }
 }
 
@@ -1788,6 +1775,21 @@ fn ensure_publication(
     Err("configured publication is unavailable".to_string())
 }
 
+/// Startup reads the registry outside the poll gate. An extension update takes
+/// the gate exclusively before it alters those tables, so a startup
+/// transaction waits for the update, or the update waits for it, before either
+/// one holds a table lock that the other needs.
+fn lock_worker_gate_for_startup(client: &SpiClient<'_>) -> Result<(), String> {
+    client
+        .select(
+            "SELECT pg_catalog.pg_advisory_xact_lock_shared($1::bigint)",
+            None,
+            &[crate::WAL_WORKER_GATE_LOCK_KEY.into()],
+        )
+        .map_err(|_| "locking WAL worker startup failed".to_string())?;
+    Ok(())
+}
+
 fn fresh_decoder(worker_role_oid: pg_sys::Oid) -> Result<DecoderState, String> {
     let identity = validated_runtime_capture_identity(worker_role_oid)?;
     fresh_decoder_for(identity, worker_role_oid)
@@ -1799,6 +1801,7 @@ fn fresh_decoder_for(
 ) -> Result<DecoderState, String> {
     run_worker_transaction(|| {
         Spi::connect_mut(|client| {
+            lock_worker_gate_for_startup(client)?;
             activate_worker_role_in_transaction(client, worker_role_oid)?;
             validate_runtime_capture_identity(client, &identity)?;
             let registry =
@@ -2177,9 +2180,13 @@ fn materialize_candidate(
                     source_registry_generation: bootstrap.source_registry_generation,
                     target_registry_generation: bootstrap.identity.registry_generation,
                 },
+                0..u64::MAX,
             )
             .map_err(candidate_failure)?;
-            let content_hash = transaction_content_hash(transaction);
+            // A candidate rejects every registry activation, so the message
+            // boundary cannot select a generation there.
+            let content_hash =
+                transaction_content_hash(transaction, LEGACY_TRANSACTION_HASH_FORMAT);
             if existing_candidate_transaction(
                 client,
                 bootstrap,
@@ -2226,12 +2233,18 @@ fn materialize_candidate(
                 target,
                 transaction,
                 &registry,
-                &dependencies,
-                persisted,
+                vec![(dependencies.as_slice(), persisted)],
             )
             .map_err(candidate_failure)?;
-            materialize_impacts(client, target, transaction, &registry, impacts)
-                .map_err(candidate_failure)?;
+            materialize_impacts(
+                client,
+                target,
+                transaction,
+                &registry,
+                impacts,
+                &mut HashMap::new(),
+            )
+            .map_err(candidate_failure)?;
             let updated = client
                 .update(
                     "UPDATE synchro.sync_stream_resets
@@ -3121,15 +3134,13 @@ fn update_candidate_staged_counts(
 fn preload_relations(
     client: &SpiClient<'_>,
     registry: &[TableRegistration],
-) -> Result<Vec<(RelationKey, u8, Vec<ColumnInfo>)>, String> {
+) -> Result<Vec<(RelationKey, Vec<ColumnInfo>)>, String> {
     let mut relations = Vec::with_capacity(registry.len());
     for registration in registry {
         let rows = client
             .select(
                 "SELECT a.attname::text AS name,
-                        (a.attnum = ANY(i.indkey)) AS is_key,
-                        a.atttypid::bigint AS type_oid,
-                        a.atttypmod AS type_modifier
+                        (a.attnum = ANY((i.indkey::int2[])[0:i.indnkeyatts - 1])) AS is_key
                  FROM pg_catalog.pg_attribute a
                  JOIN pg_catalog.pg_index i
                    ON i.indrelid = a.attrelid AND i.indisprimary
@@ -3158,21 +3169,7 @@ fn preload_relations(
                 .get_by_name::<bool, &str>("is_key")
                 .map_err(|_| "loading relation metadata failed".to_string())?
                 .unwrap_or(false);
-            let type_oid = row
-                .get_by_name::<i64, &str>("type_oid")
-                .map_err(|_| "loading relation metadata failed".to_string())?
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| "relation metadata is incomplete".to_string())?;
-            let type_modifier = row
-                .get_by_name::<i32, &str>("type_modifier")
-                .map_err(|_| "loading relation metadata failed".to_string())?
-                .ok_or_else(|| "relation metadata is incomplete".to_string())?;
-            columns.push(ColumnInfo {
-                name,
-                is_key,
-                type_oid,
-                type_modifier,
-            });
+            columns.push(ColumnInfo { name, is_key });
         }
         if columns.is_empty() {
             return Err("relation metadata is incomplete".to_string());
@@ -3183,7 +3180,6 @@ fn preload_relations(
                 &registration.physical_relation,
                 registration.physical_relation_oid,
             ),
-            b'd',
             columns,
         ));
     }
@@ -3535,8 +3531,7 @@ fn materialize_transaction(
     let generation = active_registry_generation(client)
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
 
-    let content_hash = transaction_content_hash(transaction);
-    if existing_transaction(client, &stream_generation, transaction, &content_hash)? {
+    if existing_transaction(client, &stream_generation, transaction)? {
         reconcile_replay_counts(client, &stream_generation, transaction)?;
         repair_same_position_poison(client, &stream_generation, transaction.commit_lsn)?;
         return Ok(MaterializedTransaction {
@@ -3545,49 +3540,121 @@ fn materialize_transaction(
     }
 
     validate_progress_order(client, &stream_generation, transaction)?;
-    let activations = parse_registry_activations(transaction)?;
-    validate_activation_chain(
+    let content_hash = transaction_content_hash(transaction, TRANSACTION_HASH_FORMAT);
+    let markers = parse_registry_activations(transaction)?;
+    let activations: Vec<i64> = markers.iter().map(|marker| marker.0).collect();
+    let groups = if activation_requires_bootstrap(
         client,
         &stream_generation,
         generation,
         &activations,
         transaction,
-    )?;
-    let registry = match activations.last().copied() {
-        Some(final_generation) => {
-            load_registry_generation_for_activation(client, generation, final_generation)
-        }
-        None => load_registry_generation_from_client(client, generation),
-    }
-    .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
-    let membership_dependencies =
-        load_membership_dependencies_from_client(client, generation, &registry)
-            .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+    )? {
+        log!("synchro WAL deferred a registry activation that requires projection bootstrap");
+        Vec::new()
+    } else {
+        let new_activations = validate_activation_chain(
+            client,
+            &stream_generation,
+            generation,
+            &activations,
+            transaction,
+        )?;
+        // A queued ancestor activates at the position of the child that follows it.
+        let mut boundary = 0;
+        let mut new_markers: Vec<(i64, u64)> = new_activations
+            .iter()
+            .rev()
+            .map(|generation| {
+                if let Some(marker) = markers.iter().find(|marker| marker.0 == *generation) {
+                    boundary = marker.1;
+                }
+                (*generation, boundary)
+            })
+            .collect();
+        new_markers.reverse();
+        activation_groups(&new_markers)
+    };
+    // Segment 0 precedes the first activation group. Segment k follows group k
+    // and uses the registry of that group's last generation.
+    let final_generation = groups
+        .last()
+        .and_then(|group| group.generations.last().copied());
+    let segment_generations: Vec<i64> = std::iter::once(generation)
+        .chain(
+            groups
+                .iter()
+                .filter_map(|group| group.generations.last().copied()),
+        )
+        .collect();
+    let registries = segment_generations
+        .iter()
+        .map(|segment_generation| match final_generation {
+            Some(final_generation) => load_registry_generation_for_activation(
+                client,
+                *segment_generation,
+                final_generation,
+            ),
+            None => load_registry_generation_from_client(client, *segment_generation),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+    let membership_dependencies = segment_generations
+        .iter()
+        .zip(&registries)
+        .map(|(segment_generation, registry)| {
+            load_membership_dependencies_from_client(client, *segment_generation, registry)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
     let projection_target = ProjectionTarget::Active {
         stream_generation: &stream_generation,
     };
 
-    if transaction
-        .truncates
-        .iter()
-        .any(|truncate| find_registration(&registry, &truncate.relation).is_some())
-    {
+    if transaction.truncates.iter().any(|truncate| {
+        registries
+            .iter()
+            .any(|registry| find_registration(registry, &truncate.relation).is_some())
+    }) {
         return Err(failure("truncate_unsupported", transaction.commit_lsn));
     }
 
-    let fences = parse_fence_messages(transaction)?;
-    let applicable =
-        correlate_events(client, transaction, &registry, &fences, FenceTarget::Active)?;
+    let mut segment_fences: Vec<Vec<FenceMessage>> =
+        registries.iter().map(|_| Vec::new()).collect();
+    for (fence, segment) in parse_fence_messages(transaction)?
+        .into_iter()
+        .zip(fence_segments(transaction, &groups))
+    {
+        segment_fences[segment].push(fence);
+    }
+    let mut applicable_segments = Vec::with_capacity(registries.len());
+    for (segment, registry) in registries.iter().enumerate() {
+        let start = segment
+            .checked_sub(1)
+            .map_or(0, |group| groups[group].event_boundary);
+        let end = groups
+            .get(segment)
+            .map_or(u64::MAX, |group| group.event_boundary);
+        applicable_segments.push(correlate_events(
+            client,
+            transaction,
+            registry,
+            &segment_fences[segment],
+            FenceTarget::Active,
+            start..end,
+        )?);
+    }
+    let event_count = applicable_segments.iter().map(Vec::len).sum::<usize>();
 
     client
         .update(
             "INSERT INTO synchro.sync_wal_transactions (
                  stream_generation, commit_lsn, end_lsn, source_xid,
                  registry_generation, event_count, effect_count, content_hash,
-                 commit_timestamp
+                 content_hash_format, commit_timestamp
              ) VALUES (
                  $1, $2::pg_lsn, $3::pg_lsn, $4::xid,
-                 $5, $6, 0, $7,
+                 $5, $6, 0, $7, $9,
                  '2000-01-01 00:00:00+00'::timestamptz + ($8::bigint * interval '1 microsecond')
              )",
             None,
@@ -3597,32 +3664,123 @@ fn materialize_transaction(
                 format_lsn(transaction.end_lsn).as_str().into(),
                 transaction.xid.to_string().as_str().into(),
                 generation.into(),
-                i64::try_from(applicable.len())
+                i64::try_from(event_count)
                     .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
                     .into(),
                 content_hash.to_vec().into(),
                 transaction.commit_timestamp.into(),
+                TRANSACTION_HASH_FORMAT.into(),
             ],
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
 
-    let persisted = persist_events_and_projections(
-        client,
-        projection_target,
-        transaction,
-        &registry,
-        &applicable,
-    )?;
+    // Each segment applies its row images under its own generation. Membership
+    // and effects wait for the final projection of the whole source transaction
+    // and use the final registry.
+    let evaluation_registry = &registries[registries.len() - 1];
+    let evaluation_indexes = registration_indexes(evaluation_registry);
+    let segment_dependencies: Vec<Vec<MembershipDependency>> = membership_dependencies
+        .iter()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter(|dependency| {
+                    evaluation_indexes.contains_key(dependency.target_relation_id.as_str())
+                })
+                .cloned()
+                .collect()
+        })
+        .collect();
+    let mut active_generation = generation;
+    let mut effect_bases = HashMap::new();
+    let mut existed_before = HashMap::new();
+    let mut segments = Vec::with_capacity(applicable_segments.len());
+    let mut membership_transitions = Vec::with_capacity(activations.len());
+    for (segment, applicable) in applicable_segments.iter().enumerate() {
+        let registry = &registries[segment];
+        if let Some(group) = segment.checked_sub(1).map(|group| &groups[group]) {
+            let mut source_generation = active_generation;
+            for target_generation in &group.generations {
+                membership_transitions.push((source_generation, *target_generation));
+                source_generation = *target_generation;
+            }
+            active_generation = activate_generations(
+                client,
+                active_generation,
+                &group.generations,
+                transaction.commit_lsn,
+                transaction.end_lsn,
+            )?;
+        }
+        let mut persisted = persist_events_and_projections(
+            client,
+            projection_target,
+            transaction,
+            registry,
+            applicable,
+        )?;
+        // The first touch of a row in the transaction tells whether it existed
+        // before the transaction.
+        for ((index, record_id), present) in &persisted.initial_presence {
+            existed_before
+                .entry((registry[*index].relation_id.clone(), record_id.clone()))
+                .or_insert(*present);
+        }
+        if segment + 1 < registries.len() {
+            align_edges_before_activation(
+                client,
+                transaction,
+                registry,
+                &persisted.direct_impacts,
+                &mut effect_bases,
+            )?;
+        }
+        // A relation that a later generation removes has no final projection.
+        persisted.direct_impacts.retain_mut(|impact| {
+            let relation_id = registry[impact.registration_index].relation_id.as_str();
+            match evaluation_indexes.get(relation_id) {
+                Some(index) => {
+                    impact.registration_index = *index;
+                    true
+                }
+                None => false,
+            }
+        });
+        segments.push((segment_dependencies[segment].as_slice(), persisted));
+    }
     let impacts = collect_membership_impacts(
         client,
         projection_target,
         transaction,
-        &registry,
-        &membership_dependencies,
-        persisted,
+        evaluation_registry,
+        segments,
     )?;
-    let effect_count =
-        materialize_impacts(client, projection_target, transaction, &registry, impacts)?;
+    let effect_count = materialize_impacts(
+        client,
+        projection_target,
+        transaction,
+        evaluation_registry,
+        impacts,
+        &mut effect_bases,
+    )?;
+    // A membership rule stage replaces the edges of rows that no source event
+    // changed. It waits for the final projection like every other membership
+    // evaluation of the transaction. It compares with the membership before the
+    // transaction, and effect_bases holds that membership for every changed row.
+    // A row that the transaction inserted had no earlier membership that a
+    // client can hold, and its insert effect carries the final membership. It
+    // keeps no baseline, so the stage compares it with its final edges.
+    effect_bases.retain(|key, _| existed_before.get(key).copied().unwrap_or(true));
+    crate::materialize::activate_membership_stages(
+        client,
+        &membership_transitions,
+        active_generation,
+        &effect_bases,
+        &stream_generation,
+        &format_lsn(transaction.commit_lsn),
+        &format_lsn(transaction.end_lsn),
+    )
+    .map_err(|_| failure("scope_evaluation_failed", transaction.commit_lsn))?;
 
     client
         .update(
@@ -3638,13 +3796,6 @@ fn materialize_transaction(
         )
         .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
 
-    let final_generation = activate_generations(
-        client,
-        generation,
-        &activations,
-        transaction.commit_lsn,
-        transaction.end_lsn,
-    )?;
     client
         .update(
             "UPDATE synchro.sync_wal_progress
@@ -3660,7 +3811,7 @@ fn materialize_transaction(
                 stream_generation.as_str().into(),
                 format_lsn(transaction.commit_lsn).as_str().into(),
                 format_lsn(transaction.end_lsn).as_str().into(),
-                final_generation.into(),
+                active_generation.into(),
             ],
         )
         .map_err(|_| failure("transaction_commit_failed", transaction.commit_lsn))?;
@@ -3681,16 +3832,20 @@ pub(super) fn materialize_transaction_for_test(
         .map_err(|failure| failure.class.to_string())
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub(super) fn legacy_transaction_content_hash_for_test(transaction: &WalTransaction) -> Vec<u8> {
+    transaction_content_hash(transaction, LEGACY_TRANSACTION_HASH_FORMAT).to_vec()
+}
+
 fn existing_transaction(
     client: &SpiClient<'_>,
     stream_generation: &str,
     transaction: &WalTransaction,
-    content_hash: &[u8; 32],
 ) -> Result<bool, PoisonFailure> {
     let rows = client
         .select(
             "SELECT end_lsn::text AS end_lsn, source_xid::text AS source_xid,
-                    event_count, content_hash
+                    event_count, content_hash, content_hash_format
              FROM synchro.sync_wal_transactions
              WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn",
             None,
@@ -3719,6 +3874,15 @@ fn existing_transaction(
         .get_by_name::<Vec<u8>, &str>("content_hash")
         .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
         .unwrap_or_default();
+    let content_hash = match row
+        .get_by_name::<i16, &str>("content_hash_format")
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+    {
+        Some(format @ (LEGACY_TRANSACTION_HASH_FORMAT | TRANSACTION_HASH_FORMAT)) => {
+            transaction_content_hash(transaction, format)
+        }
+        _ => return Err(failure("validation_failed", transaction.commit_lsn)),
+    };
     if end_lsn != Some(transaction.end_lsn)
         || source_xid != Some(transaction.xid)
         || event_count < 0
@@ -3840,7 +4004,10 @@ fn validate_progress_order(
     Ok(())
 }
 
-fn parse_registry_activations(transaction: &WalTransaction) -> Result<Vec<i64>, PoisonFailure> {
+/// Return each registry activation with its source cutover point.
+fn parse_registry_activations(
+    transaction: &WalTransaction,
+) -> Result<Vec<(i64, u64)>, PoisonFailure> {
     let mut activations = Vec::new();
     for message in transaction
         .messages
@@ -3855,20 +4022,140 @@ fn parse_registry_activations(transaction: &WalTransaction) -> Result<Vec<i64>, 
         if activation.action != "activate" || activation.generation <= 0 {
             return Err(failure("validation_failed", transaction.commit_lsn));
         }
-        activations.push(activation.generation);
+        activations.push((activation.generation, message.event_boundary));
     }
     Ok(activations)
 }
 
+/// Registry activations that take effect at one source position.
+struct ActivationGroup {
+    event_boundary: u64,
+    generations: Vec<i64>,
+}
+
+/// Group adjacent activation markers that no row event separates. Each group
+/// activates before the row events that follow it in the source transaction.
+fn activation_groups(markers: &[(i64, u64)]) -> Vec<ActivationGroup> {
+    let mut groups: Vec<ActivationGroup> = Vec::new();
+    for (generation, event_boundary) in markers {
+        match groups.last_mut() {
+            Some(group) if group.event_boundary == *event_boundary => {
+                group.generations.push(*generation)
+            }
+            _ => groups.push(ActivationGroup {
+                event_boundary: *event_boundary,
+                generations: vec![*generation],
+            }),
+        }
+    }
+    groups
+}
+
+/// Return the segment of each fence message. Segment k follows the k-th
+/// activation group in message order.
+fn fence_segments(transaction: &WalTransaction, groups: &[ActivationGroup]) -> Vec<usize> {
+    let mut segment = 0;
+    let mut segments = Vec::new();
+    for message in &transaction.messages {
+        if message.prefix == REGISTRY_PREFIX {
+            if groups
+                .get(segment)
+                .is_some_and(|group| group.event_boundary == message.event_boundary)
+            {
+                segment += 1;
+            }
+        } else if message.prefix == FENCE_PREFIX {
+            segments.push(segment);
+        }
+    }
+    segments
+}
+
+/// A valid pending activation path with a recorded or unknown bootstrap
+/// requirement stays pending for the operator bootstrap. Its transaction still
+/// materializes under the active registry.
+fn activation_requires_bootstrap(
+    client: &SpiClient<'_>,
+    stream_generation: &str,
+    active_generation: i64,
+    activations: &[i64],
+    transaction: &WalTransaction,
+) -> Result<bool, PoisonFailure> {
+    let Some((first, last)) = activations.first().zip(activations.last()) else {
+        return Ok(false);
+    };
+    let mut path_start = client
+        .select(
+            "SELECT parent_generation FROM synchro.sync_registry_generations WHERE generation = $1",
+            None,
+            &[(*first).into()],
+        )
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?
+        .first()
+        .get_by_name::<i64, &str>("parent_generation")
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+    let first_parent = path_start;
+    for _ in 0..10_000 {
+        let Some(current) = path_start else {
+            return Ok(false);
+        };
+        if current == active_generation {
+            break;
+        }
+        let row = client
+            .select(
+                "SELECT parent_generation
+                 FROM synchro.sync_registry_generations
+                 WHERE generation = $1 AND state = 'pending' AND validated
+                   AND stream_generation = $2",
+                None,
+                &[current.into(), stream_generation.into()],
+            )
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+        let Some(row) = row.into_iter().next() else {
+            return Ok(false);
+        };
+        path_start = row
+            .get_by_name::<i64, &str>("parent_generation")
+            .map_err(|_| failure("validation_failed", transaction.commit_lsn))?;
+    }
+    if path_start != Some(active_generation) {
+        return Ok(false);
+    }
+    let Some(first_parent) = first_parent else {
+        return Ok(false);
+    };
+    validate_activation_chain(
+        client,
+        stream_generation,
+        first_parent,
+        activations,
+        transaction,
+    )?;
+    crate::schema::generation_requires_projection_bootstrap(client, *last)
+        .map_err(|_| failure("validation_failed", transaction.commit_lsn))
+}
+
+/// Return the activations that are new. A registration that commits while no
+/// slot is bound emits its own activation and is also replayed when the slot
+/// binds, so a slot can contain the activation of one generation twice. An
+/// activation of a generation that the active chain of this stream already
+/// contains is that duplicate and is ignored.
+///
+/// A registration that commits before the new slot starts is not decoded, so
+/// its generation waits for the replay. A later decoded child of it then
+/// activates its queued pending ancestors first, in chain order. Every other
+/// invalid activation fails validation.
 fn validate_activation_chain(
     client: &SpiClient<'_>,
     stream_generation: &str,
     active_generation: i64,
     activations: &[i64],
     transaction: &WalTransaction,
-) -> Result<(), PoisonFailure> {
+) -> Result<Vec<i64>, PoisonFailure> {
     let mut parent = active_generation;
     let mut seen = HashSet::new();
+    let mut new_activations = Vec::new();
     for generation in activations {
         if !seen.insert(*generation) {
             return Err(failure_with_detail(
@@ -3939,6 +4226,113 @@ fn validate_activation_chain(
                 )
             })?
             .unwrap_or_default();
+        if state != "pending" && stream == stream_generation {
+            let activated = client
+                .select(
+                    "WITH RECURSIVE chain(generation, parent_generation) AS (
+                         SELECT generation, parent_generation
+                         FROM synchro.sync_registry_generations
+                         WHERE state = 'active' AND stream_generation = $2
+                         UNION ALL
+                         SELECT prior.generation, prior.parent_generation
+                         FROM synchro.sync_registry_generations prior
+                         JOIN chain ON prior.generation = chain.parent_generation
+                         WHERE prior.state = 'superseded' AND prior.stream_generation = $2
+                     )
+                     SELECT EXISTS (SELECT 1 FROM chain WHERE generation = $1) AS activated",
+                    None,
+                    &[(*generation).into(), stream_generation.into()],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading the active registry chain failed",
+                    )
+                })?
+                .first()
+                .get_by_name::<bool, &str>("activated")
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "reading the active registry chain failed",
+                    )
+                })?
+                .unwrap_or(false);
+            if activated {
+                continue;
+            }
+        }
+        if state == "pending" && actual_parent.is_some_and(|actual| actual != parent) {
+            let ancestors = client
+                .select(
+                    "WITH RECURSIVE ancestors(generation, parent_generation, depth) AS (
+                         SELECT pending.generation, pending.parent_generation, 1
+                         FROM synchro.sync_registry_generations pending
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE pending.generation = $1
+                         UNION ALL
+                         SELECT pending.generation, pending.parent_generation, ancestors.depth + 1
+                         FROM ancestors
+                         JOIN synchro.sync_registry_generations pending
+                           ON pending.generation = ancestors.parent_generation
+                         JOIN synchro.sync_registry_activation_requests request
+                           ON request.registry_generation = pending.generation
+                         WHERE ancestors.parent_generation <> $3
+                     )
+                     SELECT ancestors.generation, ancestors.parent_generation,
+                            generation.state = 'pending' AND generation.validated
+                                AND generation.stream_generation = $2 AS queued_pending
+                     FROM ancestors
+                     JOIN synchro.sync_registry_generations generation
+                       ON generation.generation = ancestors.generation
+                     ORDER BY ancestors.depth DESC",
+                    None,
+                    &[
+                        actual_parent.into(),
+                        stream_generation.into(),
+                        parent.into(),
+                    ],
+                )
+                .map_err(|_| {
+                    failure_with_detail(
+                        "validation_failed",
+                        transaction.commit_lsn,
+                        "loading queued registry ancestors failed",
+                    )
+                })?;
+            let mut chain = Vec::new();
+            let mut chain_parent = parent;
+            for row in ancestors {
+                let ancestor = row.get_by_name::<i64, &str>("generation").ok().flatten();
+                let ancestor_parent = row
+                    .get_by_name::<i64, &str>("parent_generation")
+                    .ok()
+                    .flatten();
+                let queued_pending = row
+                    .get_by_name::<bool, &str>("queued_pending")
+                    .ok()
+                    .flatten();
+                match (ancestor, queued_pending) {
+                    (Some(ancestor), Some(true)) if ancestor_parent == Some(chain_parent) => {
+                        chain.push(ancestor);
+                        chain_parent = ancestor;
+                    }
+                    _ => {
+                        chain.clear();
+                        break;
+                    }
+                }
+            }
+            if chain.last().copied() == actual_parent
+                && chain.iter().all(|ancestor| seen.insert(*ancestor))
+            {
+                new_activations.extend(chain);
+                parent = chain_parent;
+            }
+        }
         if actual_parent != Some(parent)
             || !validated
             || state != "pending"
@@ -3951,8 +4345,9 @@ fn validate_activation_chain(
             ));
         }
         parent = *generation;
+        new_activations.push(*generation);
     }
-    Ok(())
+    Ok(new_activations)
 }
 
 fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage>, PoisonFailure> {
@@ -4005,17 +4400,84 @@ fn parse_fence_messages(transaction: &WalTransaction) -> Result<Vec<FenceMessage
     Ok(fences)
 }
 
+fn fence_names_relation(fence: &FenceMessage, relation: &RelationKey) -> bool {
+    fence.physical_schema == relation.namespace
+        && fence.physical_relation == relation.name
+        && fence.physical_relation_oid == relation.oid
+}
+
+/// With publish_via_partition_root, pgoutput publishes a partition row change
+/// under the partitioned table, but the capture fence runs on the partition.
+/// This returns each (partition, partitioned table) pair in which the fence
+/// names a current partition of the published relation.
+fn partition_fence_relations<'a>(
+    client: &SpiClient<'_>,
+    pairs: impl Iterator<Item = (&'a FenceMessage, &'a RelationKey)>,
+) -> Result<HashSet<(u32, u32)>, String> {
+    let input = pairs
+        .filter(|(fence, relation)| !fence_names_relation(fence, relation))
+        .map(|(fence, relation)| {
+            serde_json::json!({
+                "fence_oid": i64::from(fence.physical_relation_oid),
+                "fence_schema": fence.physical_schema,
+                "fence_relation": fence.physical_relation,
+                "event_oid": i64::from(relation.oid),
+            })
+        })
+        .collect::<Vec<_>>();
+    if input.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rows = client
+        .select(
+            "SELECT input.fence_oid, input.event_oid
+             FROM jsonb_to_recordset($1::jsonb) AS input(
+                 fence_oid bigint, fence_schema text, fence_relation text, event_oid bigint
+             )
+             JOIN pg_catalog.pg_class partition ON partition.oid = input.fence_oid::oid
+             JOIN pg_catalog.pg_namespace namespace ON namespace.oid = partition.relnamespace
+             WHERE partition.relispartition
+               AND namespace.nspname::text = input.fence_schema
+               AND partition.relname::text = input.fence_relation
+               AND input.event_oid::oid IN (
+                   SELECT ancestor.relid
+                   FROM pg_catalog.pg_partition_ancestors(partition.oid) AS ancestor
+                   WHERE ancestor.relid <> partition.oid
+               )",
+            None,
+            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        )
+        .map_err(|_| "loading partition fence relations failed".to_string())?;
+    let mut partitions = HashSet::new();
+    for row in rows {
+        let oid = |name: &str| {
+            row.get_by_name::<i64, &str>(name)
+                .ok()
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| "partition fence relation is invalid".to_string())
+        };
+        partitions.insert((oid("fence_oid")?, oid("event_oid")?));
+    }
+    Ok(partitions)
+}
+
 fn correlate_events<'a>(
     client: &SpiClient<'_>,
     transaction: &'a WalTransaction,
     registry: &'a [TableRegistration],
     fences: &'a [FenceMessage],
     fence_target: FenceTarget<'_>,
+    event_ordinals: std::ops::Range<u64>,
 ) -> Result<Vec<ApplicableEvent<'a>>, PoisonFailure> {
     let mut applicable = Vec::new();
     let mut applicable_events = Vec::new();
     let mut fence_validation_rows = Vec::new();
-    for event in &transaction.events {
+    for event in transaction
+        .events
+        .iter()
+        .filter(|event| event_ordinals.contains(&event.event_ordinal))
+    {
         if let Some(registration) = find_registration(registry, &event.relation) {
             applicable_events.push((event, registration));
         }
@@ -4172,6 +4634,14 @@ fn correlate_events<'a>(
         log!("synchro WAL fence row identity correlation failed");
         return Err(failure("fence_correlation_failed", transaction.commit_lsn));
     };
+    let partition_fences = partition_fence_relations(
+        client,
+        applicable_events
+            .iter()
+            .zip(&fence_indexes)
+            .map(|((event, _), fence_index)| (applicable_fences[*fence_index], &event.relation)),
+    )
+    .map_err(|_| failure("fence_correlation_failed", transaction.commit_lsn))?;
 
     for (((event, registration), keys), fence_index) in applicable_events
         .into_iter()
@@ -4187,9 +4657,8 @@ fn correlate_events<'a>(
                 != registration
                     .is_synced()
                     .then_some(registration.table_id.as_str())
-            || fence.physical_schema != event.relation.namespace
-            || fence.physical_relation != event.relation.name
-            || fence.physical_relation_oid != event.relation.oid
+            || !(fence_names_relation(fence, &event.relation)
+                || partition_fences.contains(&(fence.physical_relation_oid, event.relation.oid)))
             || fence.operation != operation_name
             || fence.old_record_id != old_record_id
             || fence.new_record_id != new_record_id
@@ -5641,6 +6110,7 @@ fn persist_events_and_projections(
     let mut persisted = PersistedEvents {
         direct_impacts: Vec::with_capacity(events.len()),
         dependency_events: Vec::with_capacity(events.len()),
+        initial_presence: Vec::with_capacity(events.len()),
     };
     // Pages share the source transaction. Membership reads only the final projection.
     for batch in events.chunks(JSONB_BATCH_SIZE) {
@@ -5654,6 +6124,7 @@ fn persist_events_and_projections(
         )?;
         persisted.direct_impacts.extend(batch.direct_impacts);
         persisted.dependency_events.extend(batch.dependency_events);
+        persisted.initial_presence.extend(batch.initial_presence);
     }
     Ok(persisted)
 }
@@ -6163,9 +6634,17 @@ fn fold_and_persist_projection_rows(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
 
+    let initial_presence = synced_inputs
+        .into_iter()
+        .map(|key| {
+            let present = initially_present_synced.contains(&key);
+            (key, present)
+        })
+        .collect();
     Ok(PersistedEvents {
         direct_impacts: impacts,
         dependency_events,
+        initial_presence,
     })
 }
 
@@ -6184,27 +6663,38 @@ fn captured_row_deleted(
     Ok(!value.is_null())
 }
 
+/// Each segment pairs its persisted events with the membership dependencies of
+/// its generation. A later direct change of a row replaces an earlier one.
 fn collect_membership_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
     transaction: &WalTransaction,
     registry: &[TableRegistration],
-    dependencies: &[MembershipDependency],
-    persisted: PersistedEvents,
+    segments: Vec<(&[MembershipDependency], PersistedEvents)>,
 ) -> Result<Vec<ImpactedRow>, PoisonFailure> {
-    let mut impacts: HashMap<(usize, String), ImpactedRow> = persisted
-        .direct_impacts
-        .into_iter()
-        .map(|impact| {
-            (
+    let activation_migrated_digests = segments.len() > 1;
+    let mut impacts: HashMap<(usize, String), ImpactedRow> = HashMap::new();
+    let mut dependency_events = Vec::new();
+    for (dependencies, persisted) in segments {
+        for impact in persisted.direct_impacts {
+            impacts.insert(
                 (impact.registration_index, impact.record_id.clone()),
                 impact,
-            )
-        })
-        .collect();
+            );
+        }
+        dependency_events.extend(
+            persisted
+                .dependency_events
+                .into_iter()
+                .map(|event| (dependencies, event)),
+        );
+    }
+    if activation_migrated_digests {
+        refresh_direct_impact_digests(client, target, transaction, registry, &mut impacts)?;
+    }
     let mut reevaluation_projections = Vec::new();
 
-    for event in persisted.dependency_events {
+    for (dependencies, event) in dependency_events {
         for dependency in dependencies
             .iter()
             .filter(|dependency| dependency.dependency_relation_id == event.dependency_relation_id)
@@ -6344,6 +6834,137 @@ fn collect_membership_impacts(
         .into_iter()
         .map(|(impact, _)| impact)
         .collect())
+}
+
+/// A later activation in the transaction migrates the captured digest of a row
+/// that an earlier segment changed. Edges and effects use the final digest.
+fn refresh_direct_impact_digests(
+    client: &SpiClient<'_>,
+    target: ProjectionTarget<'_>,
+    transaction: &WalTransaction,
+    registry: &[TableRegistration],
+    impacts: &mut HashMap<(usize, String), ImpactedRow>,
+) -> Result<(), PoisonFailure> {
+    let inputs = impacts
+        .iter()
+        .filter(|(_, impact)| impact.direct_change && impact.digest.is_some())
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let captured = load_captured_rows_batch(client, target, &inputs, registry)
+        .map_err(|_| failure("projection_write_failed", transaction.commit_lsn))?;
+    for key in inputs {
+        let row = captured
+            .get(&key)
+            .ok_or_else(|| failure("projection_write_failed", transaction.commit_lsn))?;
+        let impact = impacts
+            .get_mut(&key)
+            .ok_or_else(|| failure("validation_failed", transaction.commit_lsn))?;
+        if row.row_version != impact.row_version {
+            return Err(failure("projection_write_failed", transaction.commit_lsn));
+        }
+        impact.digest = Some(row.digest);
+    }
+    Ok(())
+}
+
+/// A registry activation verifies each retained edge against its captured row.
+/// Membership of a changed row waits for the final projection, so its edges
+/// still hold the buckets from before this segment. Record those buckets once
+/// as the base of the net effects. Then bind the retained edges to the current
+/// captured row, or remove them when that row is absent or deleted.
+fn align_edges_before_activation(
+    client: &mut SpiClient<'_>,
+    transaction: &WalTransaction,
+    registry: &[TableRegistration],
+    impacts: &[ImpactedRow],
+    effect_bases: &mut HashMap<(String, String), Vec<String>>,
+) -> Result<(), PoisonFailure> {
+    let touched = impacts
+        .iter()
+        .map(|impact| {
+            (
+                registry[impact.registration_index].relation_id.clone(),
+                impact.record_id.clone(),
+            )
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for batch in touched.chunks(JSONB_BATCH_SIZE) {
+        let input = batch
+            .iter()
+            .map(|(relation_id, record_id)| {
+                serde_json::json!({"relation_id": relation_id, "record_id": record_id})
+            })
+            .collect::<Vec<_>>();
+        let prior = client
+            .update(
+                "WITH touched AS (
+                     SELECT relation_id::uuid AS relation_id, record_id
+                     FROM jsonb_to_recordset($1::jsonb) AS input(
+                         relation_id text, record_id text
+                     )
+                 ), prior AS (
+                     SELECT edge.relation_id, edge.record_id, edge.bucket_id
+                     FROM synchro.sync_bucket_edges edge
+                     JOIN touched
+                       ON touched.relation_id = edge.relation_id
+                      AND touched.record_id = edge.record_id
+                 ), removed AS (
+                     DELETE FROM synchro.sync_bucket_edges edge
+                     USING touched
+                     LEFT JOIN synchro.sync_captured_rows captured
+                       ON captured.relation_id = touched.relation_id
+                      AND captured.record_id = touched.record_id
+                     WHERE edge.relation_id = touched.relation_id
+                       AND edge.record_id = touched.record_id
+                       AND (captured.record_id IS NULL OR captured.deleted)
+                     RETURNING edge.record_id
+                 ), aligned AS (
+                     UPDATE synchro.sync_bucket_edges edge
+                     SET checksum = captured.checksum,
+                         row_version = captured.row_version,
+                         updated_at = now()
+                     FROM touched
+                     JOIN synchro.sync_captured_rows captured
+                       ON captured.relation_id = touched.relation_id
+                      AND captured.record_id = touched.record_id
+                     WHERE edge.relation_id = touched.relation_id
+                       AND edge.record_id = touched.record_id
+                       AND NOT captured.deleted
+                     RETURNING edge.record_id
+                 )
+                 SELECT prior.relation_id::text AS relation_id, prior.record_id,
+                        prior.bucket_id
+                 FROM prior",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+            )
+            .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?;
+        let mut buckets = HashMap::<(String, String), Vec<String>>::new();
+        for row in prior {
+            let relation_id = optional_text(&row, "relation_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            let record_id = optional_text(&row, "record_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            let bucket_id = optional_text(&row, "bucket_id")
+                .map_err(|_| failure("materialization_failed", transaction.commit_lsn))?
+                .ok_or_else(|| failure("materialization_failed", transaction.commit_lsn))?;
+            buckets
+                .entry((relation_id, record_id))
+                .or_default()
+                .push(bucket_id);
+        }
+        for key in batch {
+            if !effect_bases.contains_key(key) {
+                let base = buckets.remove(key).unwrap_or_default();
+                effect_bases.insert(key.clone(), base);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn persist_reevaluation_projection_batch(
@@ -6578,12 +7199,17 @@ fn persist_impact_batch(
     Ok(())
 }
 
+/// `effect_bases` holds the buckets of a row before its transaction when a
+/// registry activation in that transaction rewrote the retained edges. Effects
+/// compare the final membership with that base. Edge writes replace the current
+/// edges. On return, it holds the base of every impacted row.
 fn materialize_impacts(
     client: &mut SpiClient<'_>,
     target: ProjectionTarget<'_>,
     transaction: &WalTransaction,
     registry: &[TableRegistration],
     impacts: Vec<ImpactedRow>,
+    effect_bases: &mut HashMap<(String, String), Vec<String>>,
 ) -> Result<i64, PoisonFailure> {
     if let ProjectionTarget::Candidate {
         bootstrap_id,
@@ -6700,12 +7326,15 @@ fn materialize_impacts(
             desired.dedup();
             existing.sort();
             existing.dedup();
+            let effect_base = effect_bases
+                .entry((registration.relation_id.clone(), impact.record_id.clone()))
+                .or_insert_with(|| existing.clone());
 
             let mut entries = build_edge_diff_entries(
                 &registration.table_name,
                 &impact.record_id,
                 impact.operation,
-                &existing,
+                effect_base,
                 &desired,
             );
             if !impact.direct_change {
@@ -6832,21 +7461,6 @@ fn activate_generations(
     let Some(final_generation) = activations.last().copied() else {
         return Ok(active_generation);
     };
-    let stream_generation =
-        active_stream_generation(client).map_err(|_| failure("validation_failed", commit_lsn))?;
-    let mut source_generation = active_generation;
-    for generation in activations {
-        crate::materialize::activate_staged_membership_generation(
-            client,
-            source_generation,
-            *generation,
-            &stream_generation,
-            &format_lsn(commit_lsn),
-            &format_lsn(end_lsn),
-        )
-        .map_err(|_| failure("scope_evaluation_failed", commit_lsn))?;
-        source_generation = *generation;
-    }
     crate::registry::remove_retired_capture_configuration(
         client,
         active_generation,
@@ -7364,7 +7978,6 @@ fn registered_id(image: &TupleImage, column: &str) -> Result<String, String> {
     match image.get(column) {
         Some(TupleValue::Text(bytes)) => std::str::from_utf8(bytes)
             .ok()
-            .filter(|value| !value.is_empty())
             .map(String::from)
             .ok_or_else(|| "registered identity is invalid".to_string()),
         Some(TupleValue::Binary(_)) => Err("binary registered identity is unsupported".to_string()),

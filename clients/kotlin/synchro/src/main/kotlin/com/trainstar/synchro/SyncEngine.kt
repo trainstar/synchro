@@ -14,6 +14,7 @@ import kotlin.math.min
 import kotlin.math.pow
 
 data class SyncOptions(
+    /** Runs under the synchronous callback rule of [SynchroClient.onStatusChange]. */
     val initialSyncCompleted: (() -> Unit)? = null
 )
 
@@ -87,6 +88,9 @@ internal class SyncEngine(
     private var operationsDrained = CompletableDeferred<Unit>().apply { complete(Unit) }
     private var stoppedPublished = CompletableDeferred<Unit>().apply { complete(Unit) }
     private var lifecycleGeneration = 0L
+    // Callbacks run synchronously inside engine work. A lifecycle call from a callback
+    // would wait for that same work, so the engine rejects it before any side effect.
+    private val callbackDepth = ThreadLocal.withInitial { 0 }
 
     init {
         val durable = database.writeTransaction { db ->
@@ -114,12 +118,14 @@ internal class SyncEngine(
     // MARK: - Lifecycle
 
     suspend fun start(options: SyncOptions? = null) {
+        requireOutsideCallback("start")
         database.requireOutsideApplicationTransaction("start")
         startInternal(options, schemaReset = false, recoveringError = false)
     }
 
     /** Explicitly acknowledges a remediated non-schema blocking error. */
     suspend fun retry(options: SyncOptions? = null) {
+        requireOutsideCallback("retry")
         database.requireOutsideApplicationTransaction("retry")
         database.writeTransaction { db ->
             val state = SynchroMeta.getClientState(db)
@@ -133,6 +139,7 @@ internal class SyncEngine(
 
     /** Requests the contract-defined incompatible-schema recovery. */
     suspend fun resetSchema(options: SyncOptions? = null) {
+        requireOutsideCallback("resetSchema")
         database.requireOutsideApplicationTransaction("resetSchema")
         database.writeTransaction { db ->
             val state = SynchroMeta.getClientState(db)
@@ -230,12 +237,14 @@ internal class SyncEngine(
 
     /** Cancels lifecycle-owned work and does not return before it drains. */
     suspend fun stop() {
+        requireOutsideCallback("stop")
         database.requireOutsideApplicationTransaction("stop")
         stopInternal(permanent = false)
     }
 
     /** Cancels managed work and waits until every managed job has completed. */
     suspend fun shutdown() {
+        requireOutsideCallback("shutdown")
         database.requireOutsideApplicationTransaction("shutdown")
         stopInternal(permanent = true)
     }
@@ -335,6 +344,7 @@ internal class SyncEngine(
      * its waiter. It does not cancel the durable sync operation.
      */
     suspend fun syncNow() {
+        requireOutsideCallback("syncNow")
         database.requireOutsideApplicationTransaction("syncNow")
         val job = scheduleEngineOwnedCycle()
         try {
@@ -359,15 +369,15 @@ internal class SyncEngine(
             val generation = lifecycleGeneration
             if (!beginOperationLocked()) throw SynchroError.NotStarted()
             val job = owner.async {
-                try {
-                    runSyncCycleWithRetry(retryWakeupGeneration = generation)
-                } finally {
-                    endOperation()
-                }
+                runSyncCycleWithRetry(retryWakeupGeneration = generation)
             }
             ownedCycleJobs += job
+            // Cancellation before dispatch skips the body, so only completion can release the operation.
             job.invokeOnCompletion {
-                synchronized(lifecycleLock) { ownedCycleJobs.remove(job) }
+                synchronized(lifecycleLock) {
+                    ownedCycleJobs.remove(job)
+                    endOperation()
+                }
             }
             return job
         }
@@ -553,7 +563,7 @@ internal class SyncEngine(
                 if (!gateResolved) {
                     startupGate.complete(Unit)
                 }
-                options?.initialSyncCompleted?.invoke()
+                options?.initialSyncCompleted?.let { callback -> insideCallback(callback) }
                 return true
             } catch (e: CancellationException) {
                 if (!gateResolved) {
@@ -739,7 +749,9 @@ internal class SyncEngine(
                 val rebuilds = runPullLoop(replayRequestJSON = backoff.workIdentity)
                 completeRequestedRebuilds(rebuilds)
                 transitionTo(SyncStatus.Ready)
-                if (changeTracker.hasPendingChanges()) {
+                // The replayed pull completed the incremental step. The cycle
+                // continues only for work that must precede another pull.
+                if (changeTracker.hasPendingChanges() || scopeIDsNeedingRebuild().isNotEmpty()) {
                     runSyncCycle()
                 }
             }
@@ -1436,13 +1448,15 @@ internal class SyncEngine(
     }
 
     private fun recordBlockingFailure(error: Exception) {
-        if (error is CancellationException || error is SynchroError.BlockingFailure) return
+        if (error is CancellationException) return
         val current = synchronized(lifecycleLock) { currentStatus.state }
         if (current in setOf(SyncLifecycleState.STOPPED, SyncLifecycleState.ERROR)) return
         transitionTo(SyncStatus.Error(failureFor(error, operationForState(current))))
     }
 
     private fun failureFor(error: Exception, operation: SyncOperationKind): SyncFailure = when (error) {
+        // A local check can raise a typed failure that is not yet recorded.
+        is SynchroError.BlockingFailure -> error.failure
         is SynchroError.UpgradeRequired -> SyncFailure(
             operation = SyncOperationKind.CONNECTING,
             code = SyncFailureCode.UPGRADE_REQUIRED,
@@ -1614,7 +1628,7 @@ internal class SyncEngine(
         }
         for ((_, cb) in statusCallbacks) {
             try {
-                cb(status)
+                insideCallback { cb(status) }
             } catch (_: Exception) {
                 // User callback must not crash the sync engine
             }
@@ -1639,7 +1653,7 @@ internal class SyncEngine(
     private fun publishStatusSnapshot(status: SyncStatus) {
         for ((_, callback) in statusCallbacks) {
             try {
-                callback(status)
+                insideCallback { callback(status) }
             } catch (_: Exception) {
                 // User callback must not crash the sync engine.
             }
@@ -1649,7 +1663,7 @@ internal class SyncEngine(
     private fun fireConflict(event: ConflictEvent) {
         for ((_, cb) in conflictCallbacks) {
             try {
-                cb(event)
+                insideCallback { cb(event) }
             } catch (_: Exception) {
                 // User callback must not crash the sync engine
             }
@@ -1659,10 +1673,23 @@ internal class SyncEngine(
     private fun fireEvent(event: SyncEvent) {
         for ((_, callback) in eventCallbacks) {
             try {
-                callback(event)
+                insideCallback { callback(event) }
             } catch (_: Exception) {
                 // User callback must not crash the sync engine.
             }
+        }
+    }
+
+    private fun requireOutsideCallback(operation: String) {
+        check(callbackDepth.get() == 0) { "$operation cannot run synchronously inside a sync callback" }
+    }
+
+    private inline fun insideCallback(callback: () -> Unit) {
+        callbackDepth.set(callbackDepth.get() + 1)
+        try {
+            callback()
+        } finally {
+            callbackDepth.set(callbackDepth.get() - 1)
         }
     }
 

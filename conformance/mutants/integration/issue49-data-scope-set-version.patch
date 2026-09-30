@@ -1,12 +1,12 @@
 diff --git a/extensions/synchro-pg/src/client.rs b/extensions/synchro-pg/src/client.rs
 --- a/extensions/synchro-pg/src/client.rs
 +++ b/extensions/synchro-pg/src/client.rs
-@@ -795,7 +795,7 @@ fn ensure_client_connect_state(
+@@ -882,7 +882,7 @@
      let scope_set_version = if client_was_new {
          1
      } else {
 -        next_scope_set_version(&prior_scopes, prior_scope_set_version, server_scopes)
 +        next_scope_set_version(&prior_scopes, prior_scope_set_version, &prior_scopes)
      };
- 
-     client
+     let (assigned_history, removed_history) = scope_history_changes(
+         &prior_scopes,

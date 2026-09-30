@@ -24,7 +24,12 @@ apply plugin: "com.facebook.react.rootproject"
 
 allprojects {
     repositories {
-        mavenLocal()
+        // The React Native Gradle plugin adds Maven Central first. Without this filter, a published
+        // Synchro release with the same version replaces the SDK that release-kotlin-local publishes.
+        exclusiveContent {
+            forRepository { mavenLocal() }
+            filter { includeGroup("fit.trainstar") }
+        }
         maven { url("$rootDir/../node_modules/detox/Detox-android") }
         google()
         mavenCentral()

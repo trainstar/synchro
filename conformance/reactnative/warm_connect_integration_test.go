@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/trainstar/synchro/conformance/blackbox"
 )
 
 var (
@@ -48,30 +46,7 @@ func runRealReactNativeWarmConnect(t *testing.T, platform string) {
 	if err != nil {
 		t.Fatalf("load React Native warm-connect scenario: %v", err)
 	}
-	environment, err := blackbox.LoadLocalEnvironment()
-	if err != nil {
-		t.Fatalf("load React Native conformance environment: %v", err)
-	}
-	provisionContext, cancelProvision := context.WithTimeout(runContext, 2*time.Minute)
-	harness, err := blackbox.Provision(provisionContext, blackbox.HarnessConfig{Environment: environment})
-	cancelProvision()
-	if err != nil {
-		t.Fatalf("provision React Native conformance harness: %v", err)
-	}
-	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
-	if err != nil {
-		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		_ = harness.Close(closeContext)
-		t.Fatalf("create React Native native controller: %v", err)
-	}
-	t.Cleanup(func() {
-		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if err := controller.Close(closeContext); err != nil {
-			t.Errorf("close React Native native controller: %v", err)
-		}
-	})
+	harness, controller := newReactNativeScenarioHarness(t, runContext)
 
 	coordinator, err := NewCoordinator(CoordinatorConfig{
 		Scenario:   scenario,

@@ -178,11 +178,15 @@ The operation presence matrix is fixed:
 
 | Operation | `base_version` | `columns` | `client_version` |
 | --- | --- | --- | --- |
-| `insert` | absent | nonempty authored writable fields | required |
+| `insert` | absent | authored writable fields, possibly empty | required |
 | `update` | required opaque token | nonempty authored writable patch | required |
 | `delete` | required opaque token | absent | required |
 
-The client rejects an empty patch, an unknown operation, a missing required
+An insert that authors no writable field is a key-only create with empty
+`columns`. The client captures it only when the insert has its own capture
+context, because an insert without that context has unknown authored fields.
+
+The client rejects an empty update patch, an unknown operation, a missing required
 value, a present forbidden value, or a duplicate mutation ID within one batch
 before sending it. The server remains authoritative for schema, policy, value,
 and row state validation.
@@ -295,15 +299,33 @@ The client measures the batch envelope with the protocol maximum for
 generation renewal or schema reconciliation also stays within the limits.
 
 The client selects pending mutations in durable local order. It stops before
-the first mutation that causes the batch to exceed a request limit. That
+the first mutation that causes a nonempty batch to exceed a request limit. That
 mutation starts the next batch.
 
-The client does not seal or send a mutation that exceeds a mutation limit. The
+The client does not seal or send a mutation that exceeds a mutation limit. It
+also does not seal or send a mutation that exceeds a request limit alone in an
+empty batch with the reserved envelope. The
 mutation gets the durable local state `exceeds_push_limit`. It keeps its
 authored content and stays inspectable. Its same-row dependents become
 `blocked_by_predecessor`. The client then continues with the next pending
 mutations. `exceeds_push_limit` is not a push operation and is not a server
 outcome.
+
+The client applies these checks only when it seals a new batch. A loaded
+sealed batch keeps its exact stored bytes and is sent before any new batch.
+A client release without these checks could seal a batch above a request or
+mutation limit. The server rejects each send of that batch with
+`400 invalid_request`, because the client does not change sealed bytes. This
+release defines no recovery for such a batch.
+
+If the reserved envelope of a new batch alone exceeds a request limit, the
+client seals no new batch. It records a nonretryable `invalid_request` blocking
+failure with the recovery action `none`. The failed seal transaction preserves
+each pending mutation's state, authored content, and dependencies. It does not
+undo queue normalization that committed before sealing. This local configuration failure has no
+HTTP status and is not a server outcome. It does not change, discard, or block
+the replay of an existing sealed batch. A client with no pending mutation seals
+no new batch and records no failure.
 
 ### Exact replay
 
@@ -1034,11 +1056,28 @@ semantics:
 - `getSyncStatus()` for the current typed state and bounded diagnostics
 - `observeSyncStatus(...)` for typed state changes
 - `observeSyncEvents(...)` for typed sync events
-- `inspectPendingMutations()` for durable unresolved queue records
-- `inspectRetainedMutations()` for all durable queue records, which include
+- `inspectRetainedMutationRecords()` for all durable queue records, which include
   local terminal states such as `exceeds_push_limit`
-- `inspectRejectedMutations()` for durable terminal outcomes and authored data
+- `inspectRejectedMutationRecords()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
+
+The deprecated `inspectPendingMutations()`, `inspectRetainedMutations()`, and
+`inspectRejectedMutations()` keep their published signatures and behavior. They
+return current records only, and they fail when a legacy record is present.
+
+Each retained record is either a current record or a legacy record.
+A current record has its table ID, primary-key binding, authored schema, and
+authored field values. A legacy record comes from a queue that existed before the
+mutation ledger. It has only the fields that the old queue stored. Its binding
+fields and authored values are absent, and the SDK does not fill them with
+placeholder values. A record with only some bindings fails inspection.
+
+Each rejected record is also either a current record or a legacy record. A
+current rejected record has its exact mutation JSON and rejection JSON. A legacy
+rejected record comes from a rejection table that existed before the mutation
+ledger. It has only the fields that the old table stored. Its mutation JSON and
+rejection JSON are absent. A record with only one of the two JSON values fails
+inspection.
 
 An application transaction callback must return before the application calls a
 sync lifecycle method. A client rejects this call before it acquires a lifecycle

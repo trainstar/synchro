@@ -102,7 +102,11 @@ CREATE TABLE IF NOT EXISTS sync_registry_generations (
         (state = 'pending' AND activation_commit_lsn IS NULL AND activation_end_lsn IS NULL AND activated_at IS NULL)
         OR (state IN ('active', 'superseded') AND validated AND activated_at IS NOT NULL)
     ),
-    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn)
+    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn),
+    -- Validation records whether the edge from the parent needs source values:
+    -- 0 direct, 1 projection bootstrap, 2 bootstrap with client data. NULL is
+    -- unknown and needs a verified bootstrap before activation.
+    source_requirement SMALLINT CHECK (source_requirement IN (0, 1, 2))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_registry_one_active
     ON sync_registry_generations ((state)) WHERE state = 'active';
@@ -110,9 +114,10 @@ INSERT INTO sync_registry_generations (
     stream_generation,
     state,
     validated,
-    activated_at
+    activated_at,
+    source_requirement
 )
-SELECT stream_generation, 'active', true, now()
+SELECT stream_generation, 'active', true, now(), 0
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
@@ -325,7 +330,6 @@ CREATE TABLE sync_membership_dependencies (
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     FOREIGN KEY (registry_generation, target_relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
-    CHECK (dependency_relation_id <> target_relation_id),
     CHECK (
         (dependency_registration_kind = 'synced'
          AND cardinality(dependency_field_ids) > 0)
@@ -1146,6 +1150,7 @@ CREATE TABLE IF NOT EXISTS sync_wal_transactions (
     commit_timestamp TIMESTAMPTZ NOT NULL,
     materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     replay_count BIGINT NOT NULL DEFAULT 0 CHECK (replay_count >= 0),
+    content_hash_format SMALLINT NOT NULL CHECK (content_hash_format IN (1, 2)),
     PRIMARY KEY (stream_generation, commit_lsn),
     UNIQUE (stream_generation, end_lsn),
     CHECK (end_lsn >= commit_lsn)
@@ -2653,18 +2658,23 @@ mod tests {
                 generation,
             )?;
             let mut source_generation = active_generation;
+            let mut transitions = Vec::with_capacity(generations.len());
             for target_generation in generations {
-                crate::materialize::activate_staged_membership_generation(
-                    client,
-                    source_generation,
-                    target_generation,
-                    &stream_generation,
-                    "0/1",
-                    "0/2",
-                )
-                .expect("activate staged test membership generation");
+                transitions.push((source_generation, target_generation));
                 source_generation = target_generation;
             }
+            // The helper activates without WAL row events, so every row keeps
+            // its current edges as its prior membership.
+            crate::materialize::activate_membership_stages(
+                client,
+                &transitions,
+                generation,
+                &std::collections::HashMap::new(),
+                &stream_generation,
+                "0/1",
+                "0/2",
+            )
+            .expect("activate staged test membership generation");
             crate::registry::load_registry_generation_from_client(client, generation)?;
             client.update(
                 "UPDATE sync_registry_generations
@@ -3438,10 +3448,10 @@ mod tests {
                 "INSERT INTO sync_wal_transactions (
                      stream_generation, commit_lsn, end_lsn, source_xid,
                      registry_generation, event_count, effect_count, content_hash,
-                     commit_timestamp
+                     content_hash_format, commit_timestamp
                  ) VALUES (
                      $1, $2::pg_lsn, $2::pg_lsn, $3::xid,
-                     $4, 1, 1, decode(repeat('00', 32), 'hex'), now()
+                     $4, 1, 1, decode(repeat('00', 32), 'hex'), 2, now()
                  )",
                 None,
                 &[

@@ -73,7 +73,11 @@ CREATE TABLE IF NOT EXISTS sync_registry_generations (
         (state = 'pending' AND activation_commit_lsn IS NULL AND activation_end_lsn IS NULL AND activated_at IS NULL)
         OR (state IN ('active', 'superseded') AND validated AND activated_at IS NOT NULL)
     ),
-    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn)
+    CHECK (activation_commit_lsn IS NULL OR activation_end_lsn >= activation_commit_lsn),
+    -- Validation records whether the edge from the parent needs source values:
+    -- 0 direct, 1 projection bootstrap, 2 bootstrap with client data. NULL is
+    -- unknown and needs a verified bootstrap before activation.
+    source_requirement SMALLINT CHECK (source_requirement IN (0, 1, 2))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_registry_one_active
     ON sync_registry_generations ((state)) WHERE state = 'active';
@@ -81,9 +85,10 @@ INSERT INTO sync_registry_generations (
     stream_generation,
     state,
     validated,
-    activated_at
+    activated_at,
+    source_requirement
 )
-SELECT stream_generation, 'active', true, now()
+SELECT stream_generation, 'active', true, now(), 0
 FROM sync_runtime_state
 WHERE singleton = true
   AND NOT EXISTS (SELECT 1 FROM sync_registry_generations);
@@ -296,7 +301,6 @@ CREATE TABLE sync_membership_dependencies (
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
     FOREIGN KEY (registry_generation, target_relation_id)
         REFERENCES sync_registry(registry_generation, relation_id) ON DELETE CASCADE,
-    CHECK (dependency_relation_id <> target_relation_id),
     CHECK (
         (dependency_registration_kind = 'synced'
          AND cardinality(dependency_field_ids) > 0)
@@ -1117,6 +1121,7 @@ CREATE TABLE IF NOT EXISTS sync_wal_transactions (
     commit_timestamp TIMESTAMPTZ NOT NULL,
     materialized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     replay_count BIGINT NOT NULL DEFAULT 0 CHECK (replay_count >= 0),
+    content_hash_format SMALLINT NOT NULL CHECK (content_hash_format IN (1, 2)),
     PRIMARY KEY (stream_generation, commit_lsn),
     UNIQUE (stream_generation, end_lsn),
     CHECK (end_lsn >= commit_lsn)
@@ -2074,7 +2079,7 @@ AS 'MODULE_PATHNAME', 'synchro_complete_stream_reset_cleanup_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:129
+-- synchro-pg/src/client.rs:138
 -- synchro_pg::client::synchro_connect
 CREATE  FUNCTION "synchro_connect"(
 	"p_user_id" TEXT, /* &str */
@@ -2086,7 +2091,7 @@ AS 'MODULE_PATHNAME', 'synchro_connect_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/client.rs:59
+-- synchro-pg/src/client.rs:61
 -- synchro_pg::client::synchro_contract_info
 CREATE  FUNCTION "synchro_contract_info"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2095,7 +2100,7 @@ AS 'MODULE_PATHNAME', 'synchro_contract_info_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:147
+-- synchro-pg/src/schema.rs:148
 -- synchro_pg::schema::synchro_debug
 CREATE  FUNCTION "synchro_debug"(
 	"p_user_id" TEXT, /* &str */
@@ -2130,7 +2135,7 @@ AS 'MODULE_PATHNAME', 'synchro_grant_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1141
+-- synchro-pg/src/health.rs:1151
 -- synchro_pg::health::synchro_health_detail
 CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2211,7 +2216,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:278
+-- synchro-pg/src/registry.rs:279
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2342,7 +2347,7 @@ AS 'MODULE_PATHNAME', 'synchro_push_contract_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/health.rs:1134
+-- synchro-pg/src/health.rs:1144
 -- synchro_pg::health::synchro_readiness
 CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2375,7 +2380,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:793
+-- synchro-pg/src/registry.rs:799
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2388,7 +2393,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1070
+-- synchro-pg/src/registry.rs:1080
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2415,7 +2420,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:475
+-- synchro-pg/src/registry.rs:476
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2447,7 +2452,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:850
+-- synchro-pg/src/bgworker.rs:858
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2468,7 +2473,7 @@ AS 'MODULE_PATHNAME', 'synchro_revoke_user_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:42
+-- synchro-pg/src/schema.rs:43
 -- synchro_pg::schema::synchro_schema_manifest
 CREATE  FUNCTION "synchro_schema_manifest"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2513,7 +2518,7 @@ AS 'MODULE_PATHNAME', 'synchro_stage_stream_reset_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/schema.rs:58
+-- synchro-pg/src/schema.rs:59
 -- synchro_pg::schema::synchro_tables
 CREATE  FUNCTION "synchro_tables"() RETURNS jsonb /* pgrx::datum::json::JsonB */
 STRICT
@@ -2542,7 +2547,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1027
+-- synchro-pg/src/registry.rs:1034
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
@@ -2562,7 +2567,7 @@ CREATE FUNCTION "synchro_capture_fence"()
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/lib.rs:2011
+-- synchro-pg/src/lib.rs:2016
 -- finalize
 
 DO $roles$

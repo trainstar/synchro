@@ -186,7 +186,7 @@ SELECT
                FROM pg_catalog.pg_index primary_index
                JOIN pg_catalog.pg_attribute primary_attribute
                  ON primary_attribute.attrelid = primary_index.indrelid
-                AND primary_attribute.attnum = ANY(primary_index.indkey)
+                AND primary_attribute.attnum = primary_index.indkey[0]
                WHERE primary_index.indrelid = registry.physical_relation_oid
                  AND primary_index.indisprimary
                  AND primary_index.indimmediate
@@ -257,6 +257,16 @@ SELECT
             FROM configured_publication publication
             JOIN pg_catalog.pg_publication_rel member
               ON member.prpubid = publication.oid
+        )
+        AND NOT EXISTS (
+            SELECT registry.physical_relation_oid
+            FROM active_registry
+            JOIN synchro.sync_registry registry
+              ON registry.registry_generation = active_registry.generation
+            EXCEPT
+            SELECT published.relid
+            FROM configured_publication publication
+            CROSS JOIN LATERAL pg_catalog.pg_get_publication_tables(publication.pubname::text) published
         )
         AND NOT EXISTS (
             SELECT member.prrelid

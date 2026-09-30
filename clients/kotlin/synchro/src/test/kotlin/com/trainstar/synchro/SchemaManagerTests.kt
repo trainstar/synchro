@@ -1170,4 +1170,60 @@ class SchemaManagerTests {
             Json.decodeFromString<ChecksumObject>(storedScope!!.localChecksum),
         )
     }
+
+    @Test
+    fun testSchemaResetKeepsOnlyProtectedRowsThatTheTightenedTargetCanHold() {
+        val db = makeTestDB()
+        val sourceDraft = protocolOrdersSchemaManifest(includeNotes = true)
+        val source = sourceDraft.copy(schemaHash = Integrity.schemaManifestHash(sourceDraft))
+        installTestSchema(db, 1, source.schemaHash, source.localTables())
+        val draft = protocolOrdersSchemaManifest(
+            includeNotes = true,
+            schemaVersion = 2,
+            parentSchema = SchemaRef(1, source.schemaHash),
+            transitionClass = "class_4",
+            compatibilityFloor = 2,
+        ).let { manifest ->
+            manifest.copy(
+                tables = manifest.tables.map { table ->
+                    table.copy(fields = table.fields.map { if (it.fieldID == "field-notes") it.copy(nullable = false) else it })
+                },
+            )
+        }
+        val target = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+        db.execute(
+            """
+            INSERT INTO orders (id, ship_address, user_id, updated_at, notes) VALUES
+                ('fits', 'kept address', 'u1', '2026-01-01T00:00:00.000000Z', 'kept note'),
+                ('null-note', 'local address', 'u1', '2026-01-01T00:00:00.000000Z', NULL)
+            """.trimIndent(),
+        )
+        val pendingBefore = ChangeTracker(db).inspectPendingMutations()
+        assertEquals(setOf("fits", "null-note"), pendingBefore.map { it.recordID }.toSet())
+
+        val manager = SchemaManager(db)
+        manager.prepareConnectMigration(
+            response = ConnectResponse(
+                serverTime = "2026-01-02T00:00:00.000000Z",
+                protocolVersion = 3,
+                clientGeneration = 1,
+                scopeSetVersion = 0,
+                schema = SchemaDescriptor(target.schemaVersion, target.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()),
+                scopeCursorUpdates = emptyMap(),
+                schemaDefinition = target,
+            ),
+            targetTables = target.localTables(),
+            resetMaterialization = true,
+        )
+        db.writeSyncLockedTransaction { manager.applyPreparedMigrationInTransaction(it) }
+
+        val rows = db.query("SELECT id, ship_address, notes FROM orders ORDER BY id")
+        assertEquals(listOf("fits"), rows.map { it["id"] })
+        assertEquals("kept address", rows.single()["ship_address"])
+        assertEquals("kept note", rows.single()["notes"])
+        // The NULL note cannot exist in the target shape. Its row waits for the
+        // rebuild to install the server row, and its intent stays inspectable.
+        assertEquals(pendingBefore, ChangeTracker(db).inspectPendingMutations())
+    }
 }

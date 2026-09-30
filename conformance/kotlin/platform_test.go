@@ -3,6 +3,7 @@ package kotlin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -451,23 +452,30 @@ func TestPlatformSealedRetryPushInjects429Then503AndRejectsChangedBytes(t *testi
 		}
 	})
 
-	t.Run("changed canonical bytes", func(t *testing.T) {
-		platform := &Platform{}
-		release, armed, err := platform.armSealedRetryPush(operation)
-		if err != nil || !armed {
-			t.Fatalf("arm sealed retry: %t, %v", armed, err)
-		}
-		defer release()
-		platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
-		changed := strings.Replace(requestBody, `"runtime-mutation"`, `"changed-mutation"`, 1)
-		response := httptest.NewRecorder()
-		if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
-			t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
-		}
-		if err := platform.validateSealedRetryPush(1); err == nil {
-			t.Fatal("changed sealed request bytes passed validation")
-		}
-	})
+	// A new batch of the same size is not a replay, whether it renews the
+	// mutation identities or reseals the same mutations under a new batch.
+	for name, replacement := range map[string][2]string{
+		"changed mutation identity": {`"runtime-mutation"`, `"changed-mutation"`},
+		"changed batch identity":    {`"runtime-batch"`, `"renewed-batch"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			platform := &Platform{}
+			release, armed, err := platform.armSealedRetryPush(operation)
+			if err != nil || !armed {
+				t.Fatalf("arm sealed retry: %t, %v", armed, err)
+			}
+			defer release()
+			platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
+			changed := strings.Replace(requestBody, replacement[0], replacement[1], 1)
+			response := httptest.NewRecorder()
+			if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
+				t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
+			}
+			if err := platform.validateSealedRetryPush(1); err == nil {
+				t.Fatal("changed sealed request bytes passed validation")
+			}
+		})
+	}
 }
 
 func TestPlatformRecordsProxiedRebuildContinuationFingerprint(t *testing.T) {
@@ -657,14 +665,12 @@ func TestTypedValuesRequireMatchingJSONPrimitiveTypes(t *testing.T) {
 }
 
 func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
-	retryable := false
 	generation := int64(1)
 	mutationCount := 1
 	valid := TransportObservation{
 		Sequence:            1,
 		OperationClass:      "push",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ClientGeneration: &generation,
@@ -677,10 +683,11 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 		t.Fatalf("valid push observation failed: %v", err)
 	}
 
+	terminal := false
 	invalid := valid
-	invalid.Retryable = nil
+	invalid.Retryable = &terminal
 	if err := validateTransportObservation(invalid); err == nil {
-		t.Fatal("push observation without retryability passed")
+		t.Fatal("push success with retryability the server did not send passed")
 	}
 	invalid = valid
 	invalid.RequestFacts = nil
@@ -689,7 +696,7 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 	}
 	invalid = valid
 	invalid.StatusCode = 503
-	retryable = true
+	retryable := true
 	invalid.Retryable = &retryable
 	if err := validateTransportObservation(invalid); err == nil {
 		t.Fatal("HTTP failure without canonical error code passed")
@@ -703,7 +710,7 @@ func TestTransportObservationsRequireCompleteOperationFacts(t *testing.T) {
 
 func TestTransportObservationAcceptsEmptyScopePull(t *testing.T) {
 	encoded := func(scopeCount string) []byte {
-		return []byte(`{"sequence":1,"operation_class":"pull","status_code":200,"error_code":null,"retryable":false,"duration_nanoseconds":1,"cursor_fingerprints":[],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":` + scopeCount + `,"limit":1},"pull_response_facts":{"change_count":0,"has_more":false,"rebuild_scope_count":1,"checksum_count":1,"scope_cursor_fingerprints":[],"scope_cursor_fingerprints_complete":true}}`)
+		return []byte(`{"sequence":1,"operation_class":"pull","status_code":200,"error_code":null,"retryable":null,"duration_nanoseconds":1,"cursor_fingerprints":[],"cursor_fingerprints_complete":true,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scope_set_version":1,"scope_count":` + scopeCount + `,"limit":1},"pull_response_facts":{"change_count":0,"has_more":false,"rebuild_scope_count":1,"checksum_count":1,"scope_cursor_fingerprints":[],"scope_cursor_fingerprints_complete":true}}`)
 	}
 	var valid TransportObservation
 	if err := json.Unmarshal(encoded("0"), &valid); err != nil {
@@ -754,7 +761,6 @@ func TestMappedTransportObservationPreservesServerReportedErrorCode(t *testing.T
 }
 
 func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	clientGeneration := int64(1)
@@ -771,7 +777,6 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "connect",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				SchemaVersion:   1,
@@ -785,7 +790,6 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 			Sequence:                   2,
 			OperationClass:             "pull",
 			StatusCode:                 http.StatusOK,
-			Retryable:                  &retryable,
 			DurationNanoseconds:        1,
 			CursorFingerprints:         []string{},
 			CursorFingerprintsComplete: &complete,
@@ -815,10 +819,14 @@ func TestMapTransportOperationsExcludesLeadingImplicitConnect(t *testing.T) {
 	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
 		t.Fatal("failed implicit connect passed transport mapping")
 	}
+	observations[0].StatusCode = http.StatusOK
+	limit = 50
+	if _, err := mapTransportOperations(operations, observations, Result{}); err == nil {
+		t.Fatal("pull with a limit other than the authored limit passed transport mapping")
+	}
 }
 
 func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	scopeCount := 0
@@ -838,7 +846,6 @@ func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "connect",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				SchemaVersion:   1,
@@ -852,7 +859,6 @@ func TestResponseLossInitialMappingValidatesImplicitConnect(t *testing.T) {
 			Sequence:            2,
 			OperationClass:      "push",
 			StatusCode:          http.StatusOK,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				ClientGeneration: &clientGeneration,
@@ -883,7 +889,6 @@ func TestRetainedMutationDecodesSealedBatchID(t *testing.T) {
 }
 
 func TestAuthoredRequestFactsMustMatchObservedRequest(t *testing.T) {
-	retryable := false
 	protocolVersion := 3
 	scopeSetVersion := int64(0)
 	scopeCount := 0
@@ -896,7 +901,6 @@ func TestAuthoredRequestFactsMustMatchObservedRequest(t *testing.T) {
 		Sequence:            1,
 		OperationClass:      "connect",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ProtocolVersion: &protocolVersion,
@@ -1013,7 +1017,6 @@ func TestKotlinSteadyPullTransportPullSelectsOnlySuccessfulCoveredPull(t *testin
 
 func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 	scopeCursor := "rebuilt-checkpoint"
-	retryable := false
 	complete := true
 	generation := int64(1)
 	scopeSetVersion := int64(1)
@@ -1042,7 +1045,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 			Sequence:            1,
 			OperationClass:      "rebuild",
 			StatusCode:          200,
-			Retryable:           &retryable,
 			DurationNanoseconds: 1,
 			RequestFacts: &TransportRequestFacts{
 				ClientGeneration:     &generation,
@@ -1064,7 +1066,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 			Sequence:                   2,
 			OperationClass:             "pull",
 			StatusCode:                 200,
-			Retryable:                  &retryable,
 			DurationNanoseconds:        1,
 			CursorFingerprints:         []string{terminalFingerprint},
 			CursorFingerprintsComplete: &complete,
@@ -1094,7 +1095,6 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 }
 
 func TestTerminalRebuildResponseRequiresValidCursorFingerprint(t *testing.T) {
-	retryable := false
 	fingerprint := cursorFingerprint("terminal-cursor")
 	generation := int64(1)
 	limit := 1
@@ -1105,7 +1105,6 @@ func TestTerminalRebuildResponseRequiresValidCursorFingerprint(t *testing.T) {
 		Sequence:            1,
 		OperationClass:      "rebuild",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ClientGeneration:     &generation,
@@ -1178,4 +1177,48 @@ func temporaryUnavailablePushDispatchPayload() json.RawMessage {
 		"request":{"client_id":"client-a","client_generation":1,"batch_id":"batch-a","schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"mutations":[]},
 		"delivery":"transport_failure","commit_lsn":"1","end_lsn":"2"
 	}`)
+}
+
+func TestCaptureBoundsRebuildReceiptsByGroupNotPage(t *testing.T) {
+	pages := maximumRecords + 1
+	proofs := json.RawMessage(fmt.Sprintf(`[{"rebuild_id_fingerprint":%q,"page_count":%d,"returned_record_count":3,"request_chain_valid":true,"records_in_canonical_order":true,"row_checksums_valid":true,"scope_checksum_valid":true,"final_checksum_matches_local":true}]`, testDigest, pages))
+	oneLargeGroup := restartInvariantCaptureFixture("process-a", testDigest)
+	oneLargeGroup.RebuildReceiptCount = &pages
+	oneLargeGroup.RebuildReceiptProofs = proofs
+	if err := validateCapturedClientState(oneLargeGroup); err != nil {
+		t.Fatalf("one complete receipt group with many pages was rejected: %v", err)
+	}
+	if restartCaptureExceedsDetailBounds(oneLargeGroup) {
+		t.Fatal("one complete receipt group was treated as bounded detail")
+	}
+
+	truncated := oneLargeGroup
+	truncated.RebuildReceipts = nil
+	truncated.RebuildReceiptProofs = nil
+	if err := validateCapturedClientState(truncated); err != nil {
+		t.Fatalf("truncated receipt groups beyond the page bound were rejected: %v", err)
+	}
+	if !restartCaptureExceedsDetailBounds(truncated) {
+		t.Fatal("truncated receipt groups were treated as complete detail")
+	}
+
+	smallTruncated := restartInvariantCaptureFixture("process-a", testDigest)
+	smallTruncated.RebuildReceipts = nil
+	smallTruncated.RebuildReceiptProofs = nil
+	if err := validateCapturedClientState(smallTruncated); err == nil {
+		t.Fatal("receipt group truncation within the page bound was accepted")
+	}
+
+	mixedPresence := oneLargeGroup
+	mixedPresence.RebuildReceipts = nil
+	if err := validateCapturedClientState(mixedPresence); err == nil {
+		t.Fatal("receipt facts without matching proofs were accepted")
+	}
+
+	bound := maximumRecords
+	mismatchedPages := oneLargeGroup
+	mismatchedPages.RebuildReceiptCount = &bound
+	if err := validateCapturedClientState(mismatchedPages); err == nil {
+		t.Fatal("receipt page-count mismatch was accepted")
+	}
 }

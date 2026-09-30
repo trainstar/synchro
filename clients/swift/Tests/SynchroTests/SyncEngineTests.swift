@@ -1499,6 +1499,8 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(firstConnectAtMS.withLock { $0 })
         await fulfillment(of: [reconnectStarted], timeout: 10)
 
+        // The reconnect must wait for the persisted absolute deadline. The
+        // expectation timeout above is only a liveness bound.
         let connectedAtMS = try XCTUnwrap(firstConnectAtMS.withLock { $0 })
         XCTAssertGreaterThanOrEqual(connectedAtMS, deadline)
         try await waitForBackoffClear(in: recoveredDatabase)
@@ -1819,6 +1821,139 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
         }, file: file, line: line)
+    }
+
+    func testStartupReplaysRebuildBackoffThenPushesBeforeOtherScopeRebuilds() async throws {
+        let dbPath = tempDBPath()
+        let clientID = "recovered-rebuild-device"
+        // A second scope also needs a rebuild. The replayed rebuild is one step,
+        // so the pending write must be pushed before this scope is rebuilt.
+        let otherScopeID = "orders:other"
+        let database = try SynchroDatabase(path: dbPath)
+        let schemaManager = SchemaManager(database: database)
+        try schemaManager.reconcileLocalSchema(
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            tables: [ordersLocalSchemaTable(includeNotes: false)]
+        )
+        try database.writeTransaction { db in
+            try SynchroMeta.upsertScope(
+                db,
+                scopeID: scopeID,
+                cursor: nil,
+                checksum: nil
+            )
+            try SynchroMeta.upsertScope(db, scopeID: otherScopeID, cursor: nil, checksum: nil)
+            try SynchroMeta.setInt64(db, key: .scopeSetVersion, value: 1)
+            try SynchroMeta.setInt64(db, key: .clientGeneration, value: 1)
+        }
+        let pullProcessor = PullProcessor(database: database)
+        let attempt = try pullProcessor.beginScopeRebuild(
+            scopeID: scopeID,
+            clientGeneration: 1,
+            schemaVersion: 1,
+            schemaHash: protocolTestSchemaHash,
+            pageLimit: 100,
+            syncedTables: [ordersLocalSchemaTable(includeNotes: false)]
+        )
+        _ = try database.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "offline", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        let request = RebuildRequest(
+            clientID: clientID,
+            clientGeneration: attempt.clientGeneration,
+            schema: SchemaRef(version: attempt.schemaVersion, hash: attempt.schemaHash),
+            scope: attempt.scopeID,
+            rebuildID: attempt.rebuildID,
+            cursor: attempt.cursor,
+            limit: attempt.pageLimit
+        )
+        let requestJSON = String(data: try JSONEncoder.synchroEncoder().encode(request), encoding: .utf8)!
+        try database.writeTransaction { db in
+            try SynchroMeta.upsertBackoffRecord(
+                db,
+                record: LocalBackoffRecord(
+                    resumeState: .rebuilding,
+                    workIdentity: requestJSON,
+                    retryClassification: .network,
+                    attemptCount: 1,
+                    nextRetryAtMS: Int64(Date().timeIntervalSince1970 * 1_000) - 1
+                )
+            )
+        }
+        try database.close()
+
+        var callLog: [String] = []
+        var replayedRequestJSON: String?
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            if path.hasSuffix("/sync/connect") {
+                callLog.append("connect")
+                return try self.mockResponse(json: self.connectResumeJSON)
+            } else if path.hasSuffix("/sync/push") {
+                callLog.append("push")
+                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                let accepted = try (body["mutations"] as! [[String: Any]]).map {
+                    try self.acceptedPushOutcome(
+                        mutation: $0,
+                        updatedAt: "2026-01-01T14:00:00.000000Z",
+                        serverVersion: "2026-01-01T14:00:00.000000Z"
+                    )
+                }
+                return try self.mockResponse(json: [
+                    "batch_id": body["batch_id"]!,
+                    "server_time": "2026-01-01T14:00:00.000Z",
+                    "accepted": accepted,
+                    "rejected": [] as [Any],
+                ])
+            } else if path.hasSuffix("/sync/rebuild") {
+                let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+                if body["scope"] as? String == otherScopeID {
+                    callLog.append("rebuild other")
+                    return try self.mockResponse(json: [
+                        "scope": otherScopeID,
+                        "records": [] as [Any],
+                        "cursor": NSNull(),
+                        "has_more": false,
+                        "final_scope_cursor": "other_scope_cursor_1",
+                        "checksum": try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+                    ])
+                }
+                callLog.append("rebuild")
+                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_2"))
+            } else if path.hasSuffix("/sync/pull") {
+                callLog.append("pull")
+                return try self.mockResponse(json: [
+                    "changes": [] as [Any],
+                    "scope_set_version": 1,
+                    "scope_cursors": [self.scopeID: "scope_cursor_3", otherScopeID: "other_scope_cursor_2"],
+                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+                    "rebuild": [] as [Any],
+                    "has_more": false,
+                    "checksums": [
+                        self.scopeID: try self.checksumJSONObject(self.emptyScopeChecksum),
+                        otherScopeID: try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+                    ],
+                ])
+            }
+            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+        }
+
+        let (engine, recoveredDatabase) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID)
+        addTeardownBlock {
+            await engine.stop()
+            try? recoveredDatabase.close()
+        }
+        try await engine.start()
+
+        XCTAssertEqual(callLog, ["connect", "rebuild", "push", "rebuild other", "pull"])
+        XCTAssertEqual(replayedRequestJSON, requestJSON)
+        XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
+        XCTAssertNil(try recoveredDatabase.readTransaction { db in
+            try SynchroMeta.getBackoffRecord(db)
+        })
     }
 
     func testStopRetainsDurableBackoffRecord() async throws {
@@ -2950,6 +3085,84 @@ final class SyncEngineTests: XCTestCase {
         }
     }
 
+    func testOversizedPushEnvelopeRecordsLocalInvalidRequestAndKeepsEveryAction() async throws {
+        let pushCount = OSAllocatedUnfairLock(initialState: 0)
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            switch path {
+            case _ where path.hasSuffix("/sync/connect"):
+                return try self.mockResponse(json: self.connectJSON)
+            case _ where path.hasSuffix("/sync/rebuild"):
+                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+            case _ where path.hasSuffix("/sync/pull"):
+                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+            case _ where path.hasSuffix("/sync/push"):
+                pushCount.withLock { $0 += 1 }
+                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected push"])
+            default:
+                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+        // Only the client identity varies. The complete empty reserved envelope is one octet above the limit.
+        let emptyEnvelope = try JSONEncoder.synchroEncoder().encode(PushRequest(
+            clientID: "",
+            clientGeneration: 9_007_199_254_740_991,
+            batchID: UUID().uuidString.lowercased(),
+            schema: SchemaRef(version: 9_007_199_254_740_991, hash: protocolTestSchemaHash),
+            mutations: []
+        ))
+        let clientID = String(repeating: "c", count: 1_048_577 - emptyEnvelope.count)
+        let (engine, db) = try makeIntegrationEnv(clientID: clientID, pushDebounce: 60)
+        let databasePath = db.path
+        addTeardownBlock {
+            await engine.stop()
+            try db.close()
+            for suffix in ["", "-journal", "-wal", "-shm"] where FileManager.default.fileExists(atPath: databasePath + suffix) {
+                try FileManager.default.removeItem(atPath: databasePath + suffix)
+            }
+        }
+
+        try await engine.start()
+        // With no pending mutation, the client sends no push request and records no failure.
+        try await engine.syncNow()
+        XCTAssertNil(try engine.getBlockingFailure())
+        XCTAssertEqual(pushCount.withLock { $0 }, 0)
+
+        // Each cycle normalizes the queue in its own committed step before it seals.
+        // Independent inserts keep that step a no-op. PushProcessorTests proves that the
+        // failed seal transaction keeps a dependency chain.
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w1", "first", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+            params: ["w2", "unrelated", "u1", "2026-01-01T10:00:00.000Z"]
+        )
+        let actionsBefore = try durableActionRows(db)
+        XCTAssertEqual(actionsBefore[0].count, 2)
+
+        do {
+            try await engine.syncNow()
+            XCTFail("expected the local envelope failure")
+        } catch let SynchroError.blocked(failure) {
+            XCTAssertEqual(failure.operation, .pushing)
+            XCTAssertEqual(failure.code, .invalidRequest)
+            XCTAssertFalse(failure.retryable)
+            XCTAssertEqual(failure.recoveryAction, .none)
+        }
+
+        XCTAssertEqual(engine.getSyncStatus(), .error)
+        let persisted = try XCTUnwrap(engine.getBlockingFailure())
+        XCTAssertEqual(persisted.operation, .pushing)
+        XCTAssertEqual(persisted.code, .invalidRequest)
+        XCTAssertFalse(persisted.retryable)
+        XCTAssertEqual(persisted.recoveryAction, .none)
+        XCTAssertTrue(persisted.metadata.isEmpty)
+        XCTAssertEqual(pushCount.withLock { $0 }, 0)
+        XCTAssertEqual(try durableActionRows(db), actionsBefore)
+    }
+
     func testMalformedDurableFailureBecomesPublicErrorState() async throws {
         let requestCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { request in
@@ -3443,6 +3656,11 @@ final class SyncEngineTests: XCTestCase {
         )
         XCTAssertTrue(try database.query("PRAGMA table_info(orders)", params: nil)
             .contains { ($0["name"] as String?) == "notes" })
+        // The retained rejection keeps its row visible across the reset (#267).
+        XCTAssertEqual(
+            try database.queryOne("SELECT ship_address FROM orders WHERE id = 'rejected-order'", params: nil)?["ship_address"] as String?,
+            "retained"
+        )
         XCTAssertEqual(connectCount.withLock { $0 }, 3)
         XCTAssertEqual(pushCount.withLock { $0 }, 2)
     }

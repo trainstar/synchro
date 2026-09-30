@@ -1772,30 +1772,41 @@
         setup_test_tables();
         let user_id = "policy-user";
         let client_id = "c1";
+        let valid_id = "e0000000-0000-4000-8000-000000000002";
         let repaired_id = "e0000000-0000-4000-8000-000000000004";
         let record_id = "e0000000-0000-4000-8000-000000000003";
         register_client(user_id, client_id);
+        // Synchro functions run with search_path pg_catalog, synchro, so the
+        // supported hook location is the synchro schema. The hook records each
+        // call. It repairs the valid value "authored", and it would repair
+        // numeric values if its output could replace an invalid authored value.
         Spi::run(
-            "CREATE FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
+            "CREATE TABLE public.test_policy_calls (table_id TEXT, operation TEXT, data JSONB);
+             GRANT INSERT ON public.test_policy_calls TO synchro_owner;
+             CREATE FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
              RETURNS JSONB
-             LANGUAGE sql
-             IMMUTABLE
+             LANGUAGE plpgsql
              STRICT
              SECURITY INVOKER
              SET search_path = pg_catalog, synchro
              AS $policy$
-                 SELECT COALESCE(
-                     jsonb_object_agg(
-                         key,
-                         CASE WHEN jsonb_typeof(value) = 'number'
-                                   OR value = to_jsonb('authored'::text)
-                              THEN to_jsonb('repaired'::text)
-                              ELSE value
-                         END
-                     ),
-                     '{}'::jsonb
-                 )
-                 FROM jsonb_each($4)
+             BEGIN
+                 INSERT INTO public.test_policy_calls VALUES ($2, $3, $4);
+                 RETURN (
+                     SELECT COALESCE(
+                         jsonb_object_agg(
+                             key,
+                             CASE WHEN jsonb_typeof(value) = 'number'
+                                       OR value = to_jsonb('authored'::text)
+                                  THEN to_jsonb('repaired'::text)
+                                  ELSE value
+                             END
+                         ),
+                         '{}'::jsonb
+                     )
+                     FROM jsonb_each($4)
+                 );
+             END
              $policy$;
              REVOKE EXECUTE ON FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)
                  FROM PUBLIC;
@@ -1804,6 +1815,43 @@
         )
         .unwrap();
 
+        let valid = push_client(
+            user_id,
+            client_id,
+            "policy-valid-authored",
+            vec![push_mutation(
+                (user_id, client_id),
+                "policy-valid-authored",
+                "test_orders",
+                "insert",
+                valid_id,
+                None,
+                Some(&[("user_id", json!(user_id)), ("title", json!("authored"))]),
+            )],
+        );
+        assert_eq!(
+            valid.json["accepted"][0]["server_row"][field_id("test_orders", "title")].as_str(),
+            Some("repaired"),
+            "{}",
+            valid.json
+        );
+        let calls: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT jsonb_agg(jsonb_build_object('table_id', table_id, 'operation', operation))
+             FROM public.test_policy_calls",
+        )
+        .unwrap();
+        let title_field = field_id("test_orders", "title");
+        let calls = calls.expect("policy hook calls").0;
+        assert_eq!(calls.as_array().map(Vec::len), Some(1), "{calls}");
+        assert_eq!(calls[0]["table_id"], table_id("test_orders"));
+        assert_eq!(calls[0]["operation"], "insert");
+        let authored_title: Option<String> = Spi::get_one_with_args(
+            "SELECT data ->> $1 FROM public.test_policy_calls",
+            &[title_field.as_str().into()],
+        )
+        .unwrap();
+        assert_eq!(authored_title.as_deref(), Some("authored"));
+
         let response = push_client(
             user_id,
             client_id,
@@ -1811,7 +1859,7 @@
             vec![
                 push_mutation(
                     (user_id, client_id),
-                    "policy-valid-authored",
+                    "policy-repaired-authored",
                     "test_orders",
                     "insert",
                     repaired_id,
@@ -1844,7 +1892,11 @@
         )
         .unwrap();
         assert_eq!(source_count, Some(0));
-        Spi::run("DROP FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB)").unwrap();
+        Spi::run(
+            "DROP FUNCTION synchro.synchro_write_protect(TEXT, TEXT, TEXT, JSONB);
+             DROP TABLE public.test_policy_calls",
+        )
+        .unwrap();
     }
 
     #[pg_test]

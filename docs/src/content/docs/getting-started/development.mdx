@@ -67,10 +67,13 @@ make conformance-pg18-extension-test-artifact
 make conformance-update-baseline-extension-artifact
 ```
 
-The extension update test needs the baseline bundle from `make conformance-update-baseline-extension-artifact` in `SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT`.
+The extension update tests need the bundles from `make conformance-update-baseline-extension-artifact`.
+Set `SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT` to the baseline bundle.
+Set `SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS` to the directory of later released origins.
+`extensions/synchro-pg/update-origins.json` pins each later released origin by version and archive digest.
 The artifact targets refuse to replace existing output directories.
 After implementation changes, use a fresh worktree and rebuild the artifacts rather than accidentally testing stale output.
-The update baseline bundle is a pinned published release asset.
+The update baseline and origin bundles are pinned published release assets.
 The other artifacts are local test inputs, not a published release.
 
 ## Start a disposable database
@@ -122,8 +125,44 @@ make synchrod-pg-test-serve
 ```
 
 It prepares the disposable integration schema before listening on port 8091.
+Add `CLIENT_DATASET=1` to also prepare the synthetic training dataset in `conformance/dataset` and its authored seed.
+That dataset registers the shared `catalog` scope, so every user in that database receives it.
 Do not run another adapter owner on that port.
 The helper rejects an occupied port rather than terminating its owner.
+
+## Run a CI job locally
+
+Each test job in `.github/workflows/ci.yml` calls one `make ci-<job>` target.
+Run the same target to run the same test commands as CI:
+
+```sh
+make ci-source-quality
+make ci-candidate-server
+make ci-candidate-swift
+make ci-candidate-kotlin
+make ci-candidate-rn-ios
+make test-rn-e2e-android-build
+make ci-candidate-rn-android
+```
+
+The workflow file keeps only tool setup, device setup, database start and stop, and artifact upload.
+Install the tools and boot the device that the job sets up before you run its target.
+The candidate targets need a disposable database.
+They read its URL from `ADAPTER_TEST_URL` and its `attach.env` file from `WARM_CONNECT_ENV_FILE`.
+
+For a database on this machine, start it as CI does:
+
+```sh
+make local-postgres-start
+export ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+export WARM_CONNECT_ENV_FILE="$PWD/.ignore/r2/tmp/local-postgres/attach.env"
+```
+
+For a database on another machine, set `ADAPTER_TEST_URL` to its URL.
+Set `WARM_CONNECT_ENV_FILE` to a local copy of its `attach.env` file.
+After the run, stop the fixture with `make synchrod-pg-test-stop` and `make local-postgres-stop`.
+
+`make ci-candidate-server` fetches the pinned update baseline bundles again on each run.
 
 ## Stop and clean up
 

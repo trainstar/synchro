@@ -1295,7 +1295,7 @@ func (p *Platform) BeginCall(ctx context.Context, client Client, callID, method 
 		if err != nil {
 			return CallResult{}, err
 		}
-		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable {
+		if len(connect) != 1 || connect[0].OperationClass != "connect" || connect[0].StatusCode != http.StatusOK || connect[0].ErrorCode != nil || connect[0].Retryable != nil {
 			return CallResult{}, errors.New("Swift staged call setup connect did not succeed")
 		}
 		if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: operationClass}); err != nil {
@@ -1627,7 +1627,8 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 	if operation.ContractOperation != observation.OperationClass {
 		return errors.New("Swift transport observation does not match the requested operation")
 	}
-	if observation.OperationClass == "push" {
+	switch observation.OperationClass {
+	case "push":
 		var payload struct {
 			Request struct {
 				Mutations []json.RawMessage `json:"mutations"`
@@ -1635,6 +1636,13 @@ func validateOperationTransportFacts(operation scenarios.Operation, observation 
 		}
 		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.MutationCount == nil || *observation.RequestFacts.MutationCount != len(payload.Request.Mutations) {
 			return errors.New("Swift push request mutation facts do not match the authored operation")
+		}
+	case "pull", "rebuild":
+		var payload struct {
+			Limit int `json:"limit"`
+		}
+		if err := json.Unmarshal(operation.Payload, &payload); err != nil || observation.RequestFacts == nil || observation.RequestFacts.Limit == nil || *observation.RequestFacts.Limit != payload.Limit {
+			return errors.New("Swift request limit does not match the authored operation")
 		}
 	}
 	return nil
@@ -1774,7 +1782,7 @@ func transportStepObservation(observation transportObservation) (StepObservation
 	wire := &WireFacts{
 		HTTPStatus: observation.StatusCode,
 		ErrorCode:  cloneOptionalString(observation.ErrorCode),
-		Retryable:  observation.Retryable,
+		Retryable:  wireRetryable(observation),
 	}
 	return StepObservation{Disposition: "success", Wire: wire}, nil
 }
@@ -2030,6 +2038,8 @@ func captureRunner(ctx context.Context, state *platformClient) (runnerResult, er
 		return runnerResult{}, errors.New("Swift runner selector batches did not cover application rows")
 	}
 	baseline.ApplicationRows = rows
+	// The merge does not align storage classes with the added rows.
+	baseline.ApplicationRowStorageClasses = nil
 	return baseline, nil
 }
 
@@ -2047,8 +2057,8 @@ func captureRunnerBatch(ctx context.Context, state *platformClient, selectors []
 }
 
 func equalRunnerCaptureState(left, right runnerResult) bool {
-	left.ApplicationRows = nil
-	right.ApplicationRows = nil
+	left.ApplicationRows, left.ApplicationRowStorageClasses = nil, nil
+	right.ApplicationRows, right.ApplicationRowStorageClasses = nil, nil
 	return reflect.DeepEqual(left, right)
 }
 
@@ -2119,13 +2129,27 @@ func validateCaptureResult(result runnerResult) error {
 		(*result.RowMetadataCount <= maximumRunnerRecords) != (result.RowMetadataRecords != nil) ||
 		(*result.RebuildAttemptCount > maximumRunnerRecords) != *result.RebuildAttemptsTruncated ||
 		(*result.RebuildAttemptCount <= maximumRunnerRecords) != (result.RebuildAttempts != nil) ||
-		(*result.RebuildReceiptCount > maximumRunnerRecords) != *result.RebuildReceiptsTruncated ||
-		(*result.RebuildReceiptCount <= maximumRunnerRecords) != (result.RebuildReceipts != nil) ||
+		// Receipt details are bounded by (scope, rebuild) group. The count is in pages.
+		*result.RebuildReceiptsTruncated != (result.RebuildReceipts == nil) ||
+		(*result.RebuildReceiptsTruncated && *result.RebuildReceiptCount <= maximumRunnerRecords) ||
 		*result.CaptureOverflowed != truncated {
 		return errors.New("Swift runner capture detail bounds are inconsistent")
 	}
 	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) || len(result.RowMetadataRecords) != boundedDetailCount(*result.RowMetadataCount, maximumRunnerRecords) {
 		return errors.New("Swift runner capture counts do not match detail")
+	}
+	if result.RetainedMutations != nil {
+		// The runner reads the pending count and retained detail from one normalized snapshot.
+		pending := 0
+		for _, mutation := range result.RetainedMutations {
+			switch mutation.Status {
+			case "pending", "sealed", "blocked_by_predecessor":
+				pending++
+			}
+		}
+		if len(result.RetainedMutations) > *result.MutationLedgerCount || pending != *result.PendingChangeCount {
+			return errors.New("Swift runner pending count does not match retained detail")
+		}
 	}
 	if result.RebuildReceipts != nil {
 		pageCount := 0

@@ -53,6 +53,13 @@ The adapter either validates the bearer credential or trusts an upstream compone
 
 The adapter is a thin boundary. It authenticates, applies transport and protocol gates, invokes the canonical extension function for the endpoint, and forwards the canonical status and JSON result. It MUST NOT implement mutation conflict rules, scope evaluation, cursor interpretation, checksum calculation, rebuild pagination, or schema lineage decisions. Endpoint work uses one canonical extension call rather than adapter-side database orchestration.
 
+PostgreSQL prints JSONB numbers as numeric text. For example, it prints `1e-7` as `0.0000001` and `1e21` as `1000000000000000000000`.
+The adapter checks each successful connect, pull, rebuild, schema, and tables result.
+It replaces each number token that differs from the RFC 8785 text of its binary64 value.
+All other bytes stay unchanged. `Content-Length` counts the bytes that the adapter sends.
+The push result is the stored canonical response text, so the adapter returns those bytes unchanged.
+A result that is not exactly one complete UTF-8 JSON value, or that contains a number outside finite binary64, produces a nonretryable `500 sync_integrity_failure` response.
+
 Credentials, cursor values, rebuild continuation values, request bodies, row values, and authenticated identity values MUST NOT be written to operational logs.
 
 ## Common JSON rules
@@ -509,11 +516,15 @@ Every mutation requires `mutation_id`, `table`, one-field typed `pk`, `authored_
 
 | Operation | `base_version` | `columns` |
 | --- | --- | --- |
-| `insert` | MUST be absent | REQUIRED nonempty object keyed by fields writable under `authored_schema` |
+| `insert` | MUST be absent | REQUIRED object keyed by fields writable under `authored_schema`. It MAY be empty. |
 | `update` | REQUIRED nonempty opaque token | REQUIRED nonempty patch keyed by fields writable under `authored_schema` |
 | `delete` | REQUIRED nonempty opaque token | MUST be absent |
 
-Empty `columns`, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
+Empty `update` columns, unknown operations, duplicate mutation IDs, duplicate field members, and presence-matrix violations make the whole request `400 invalid_request`.
+
+An `insert` with empty `columns` authors no field. The supplied primary key identifies the row, and source defaults, identity generation, and `BEFORE INSERT` triggers supply the other values. A required value that the source does not supply produces terminal `validation_failed`.
+
+A server that predates the empty-insert rule, such as `synchro_pg` 0.3.2 or earlier, rejects the whole request that contains such an insert with `400 invalid_request`. It does no durable work for that request. The client keeps the sealed batch unchanged and reports the non-retryable protocol error. After the server upgrade, the same sealed batch is accepted.
 
 The server inspects every submitted field after structural validation. A known current primary-key, generated, version, creation-time, update-time, deletion-time, or other non-writable field produces terminal `validation_failed`. An invalid value or failed current domain constraint also produces terminal `validation_failed`. The server checks every deferrable constraint at the end of each push unit. A push unit is one mutation of a non-atomic request or the complete group of an atomic request. A failed check at the unit end rolls back that unit and also produces terminal `validation_failed`. A retained authored table or field that cannot be represented by the current manifest produces terminal `schema_incompatible`. The server MUST NOT remove any submitted field and report the mutation as applied.
 

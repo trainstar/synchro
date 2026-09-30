@@ -393,6 +393,21 @@ pub struct ColumnSchema {
     pub scale: Option<i32>,
 }
 
+impl ColumnSchema {
+    /// Reports whether every value of this decimal field is also a value of
+    /// `wider` without rounding or truncation. Both the fractional digits and
+    /// the integer digits must fit. Schema classification and push
+    /// compatibility use this one rule.
+    pub fn decimal_domain_within(&self, wider: &ColumnSchema) -> bool {
+        match (self.precision, self.scale, wider.precision, wider.scale) {
+            (Some(precision), Some(scale), Some(wider_precision), Some(wider_scale)) => {
+                wider_scale >= scale && wider_precision - wider_scale >= precision - scale
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexSchema {
@@ -529,6 +544,16 @@ impl SchemaManifest {
             || self.compatibility_floor > self.schema_version
             || (!matches!(self.transition_class, SchemaTransitionClass::Class2)
                 && self.compatibility_floor != self.schema_version)
+        {
+            return Err(ContractViolation::InvalidSchemaManifest);
+        }
+        // A Class 2 floor keeps the parent's compatibility boundary. It cannot
+        // name a version newer than the parent.
+        if matches!(self.transition_class, SchemaTransitionClass::Class2)
+            && self
+                .parent_schema
+                .as_ref()
+                .is_some_and(|parent| self.compatibility_floor > parent.version)
         {
             return Err(ContractViolation::InvalidSchemaManifest);
         }
@@ -800,14 +825,14 @@ impl Mutation {
                 if self.base_version.is_some() {
                     return Err(ContractViolation::UnexpectedMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), true)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Update => {
                 if self.base_version.as_deref().is_none_or(str::is_empty) {
                     return Err(ContractViolation::MissingMutationBaseVersion);
                 }
-                validate_columns(self.columns.as_ref())
+                validate_columns(self.columns.as_ref(), false)
                     .map_err(|_| ContractViolation::MissingMutationColumns)?;
             }
             Operation::Delete => {
@@ -1873,11 +1898,13 @@ fn validate_one_field_pk(value: &Value) -> Result<(), ContractViolation> {
     Ok(())
 }
 
-fn validate_columns(value: Option<&Value>) -> Result<(), ContractViolation> {
+/// An insert can author no fields, so the server key and source defaults create the row.
+/// An update must change at least one field.
+fn validate_columns(value: Option<&Value>, allow_empty: bool) -> Result<(), ContractViolation> {
     let object = value
         .and_then(Value::as_object)
         .ok_or(ContractViolation::InvalidColumns)?;
-    if object.is_empty()
+    if (object.is_empty() && !allow_empty)
         || object.len() > MAX_PUSH_COLUMNS
         || object.keys().any(|field_id| field_id.is_empty())
     {
@@ -2802,6 +2829,92 @@ mod tests {
         assert_eq!(error.validate(), Ok(()));
     }
 
+    /// The raw-wire fingerprint vector negatives have their production owner
+    /// here. Each defect starts from a valid encoded request or mutation.
+    #[test]
+    fn push_wire_decoder_rejects_raw_member_defects() {
+        let decode_mutation = |raw: &str| {
+            serde_json::from_str::<Mutation>(raw)
+                .map_err(|error| error.to_string())
+                .and_then(|value| value.validate().map_err(|error| error.to_string()))
+        };
+        let decode_request = |raw: &str| {
+            serde_json::from_str::<PushRequest>(raw)
+                .map_err(|error| error.to_string())
+                .and_then(|value| value.validate().map_err(|error| error.to_string()))
+        };
+        let insert = serde_json::to_string(&mutation(Operation::Insert)).unwrap();
+        let update = serde_json::to_string(&mutation(Operation::Update)).unwrap();
+        let delete = serde_json::to_string(&mutation(Operation::Delete)).unwrap();
+        let request = serde_json::to_string(&push_request()).unwrap();
+        for valid in [&insert, &update, &delete] {
+            assert_eq!(decode_mutation(valid), Ok(()), "{valid}");
+        }
+        assert_eq!(decode_request(&request), Ok(()));
+
+        let replace = |raw: &str, from: &str, to: &str| {
+            assert_eq!(raw.matches(from).count(), 1, "{from} must occur once");
+            raw.replace(from, to)
+        };
+        let mutation_defects = [
+            ("malformed JSON", r#"{"mutation_id":}"#.to_owned()),
+            (
+                "missing member",
+                replace(
+                    &insert,
+                    r#","client_version":"2026-07-18T13:59:01.000000Z""#,
+                    "",
+                ),
+            ),
+            (
+                "duplicate object member",
+                replace(
+                    &insert,
+                    &format!(r#"{{"mutation_id":"{MUTATION_ID}""#),
+                    &format!(
+                        r#"{{"mutation_id":"{MUTATION_ID}","mutation_id":"018f2b5e-7c42-7a1d-9d31-8a95bd674012""#
+                    ),
+                ),
+            ),
+            (
+                "duplicate column member",
+                replace(
+                    &insert,
+                    r#""columns":{"fld_documents_title":"Title"}"#,
+                    r#""columns":{"fld_documents_title":"Title","fld_documents_title":"Other"}"#,
+                ),
+            ),
+            (
+                "null base version",
+                replace(
+                    &insert,
+                    r#","client_version":"#,
+                    r#","base_version":null,"client_version":"#,
+                ),
+            ),
+            (
+                "null columns",
+                replace(
+                    &delete,
+                    r#","client_version":"#,
+                    r#","columns":null,"client_version":"#,
+                ),
+            ),
+        ];
+        for (name, raw) in mutation_defects {
+            assert!(decode_mutation(&raw).is_err(), "{name}: {raw}");
+        }
+        for (name, raw) in [
+            ("malformed JSON", r#"{"client_id":}"#.to_owned()),
+            (
+                "missing member",
+                replace(&request, r#""client_generation":4,"#, ""),
+            ),
+        ] {
+            assert!(decode_request(&raw).is_err(), "{name}: {raw}");
+        }
+    }
+
     #[test]
     fn strict_dynamic_values_reject_duplicate_members() {
         let duplicate_pk = format!(
@@ -2971,6 +3084,80 @@ mod tests {
         }
     }
 
+    #[derive(Deserialize)]
+    struct LineageCase {
+        case: String,
+        schema_version: i64,
+        parent_version: Option<i64>,
+        transition_class: SchemaTransitionClass,
+        compatibility_floor: i64,
+        valid: bool,
+    }
+
+    #[test]
+    fn manifest_compatibility_floor_follows_authored_lineage_cases() {
+        #[derive(Deserialize)]
+        struct LineageCases {
+            cases: Vec<LineageCase>,
+        }
+        let path = std::env::var_os("SYNCHRO_REPO_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .join("conformance/schema/manifest-lineage-v1.json");
+        let cases: LineageCases =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert!(!cases.cases.is_empty());
+        for case in cases.cases {
+            let mut manifest = minimal_manifest();
+            manifest.schema_version = case.schema_version;
+            manifest.parent_schema = case.parent_version.map(|version| SchemaRef {
+                version,
+                hash: HASH_B.into(),
+            });
+            manifest.transition_class = case.transition_class;
+            manifest.compatibility_floor = case.compatibility_floor;
+            assert_eq!(manifest.validate().is_ok(), case.valid, "{}", case.case);
+        }
+    }
+
+    #[test]
+    fn decimal_domain_inclusion_requires_fractional_and_integer_digits() {
+        let decimal = |precision: Option<i32>, scale: Option<i32>| ColumnSchema {
+            field_id: "fld_amount".into(),
+            name: "amount".into(),
+            type_name: "decimal".into(),
+            nullable: true,
+            writable: true,
+            precision,
+            scale,
+        };
+        for (narrow, wide, included) in [
+            ((10, 2), (10, 2), true),
+            ((10, 2), (11, 3), true),
+            ((10, 2), (12, 2), true),
+            ((10, 2), (11, 2), true),
+            ((10, 2), (10, 3), false),
+            ((10, 2), (10, 1), false),
+            ((10, 2), (9, 2), false),
+            ((10, 2), (12, 5), false),
+            ((1, 0), (1, 1), false),
+            ((1, 1), (2, 1), true),
+        ] {
+            assert_eq!(
+                decimal(Some(narrow.0), Some(narrow.1))
+                    .decimal_domain_within(&decimal(Some(wide.0), Some(wide.1))),
+                included,
+                "decimal({}, {}) within decimal({}, {})",
+                narrow.0,
+                narrow.1,
+                wide.0,
+                wide.1
+            );
+        }
+        assert!(!decimal(None, Some(2)).decimal_domain_within(&decimal(Some(10), Some(2))));
+        assert!(!decimal(Some(10), Some(2)).decimal_domain_within(&decimal(Some(10), None)));
+    }
+
     #[test]
     fn manifest_validation_covers_lineage_fields_lifecycle_and_indexes() {
         let base = minimal_manifest();
@@ -2980,11 +3167,6 @@ mod tests {
         initial.parent_schema = None;
         initial.transition_class = SchemaTransitionClass::Initial;
         assert_eq!(initial.validate(), Ok(()));
-
-        let mut class_two = base.clone();
-        class_two.transition_class = SchemaTransitionClass::Class2;
-        class_two.compatibility_floor = 7;
-        assert_eq!(class_two.validate(), Ok(()));
 
         let mut invalid_manifests = Vec::new();
         let mut value = base.clone();
@@ -2996,12 +3178,6 @@ mod tests {
         let mut value = base.clone();
         value.parent_schema.as_mut().unwrap().version = value.schema_version;
         invalid_manifests.push(value);
-        for floor in [0, 7, 9] {
-            let mut value = base.clone();
-            value.compatibility_floor = floor;
-            invalid_manifests.push(value);
-        }
-
         for field in ["table_id", "relation_id", "name", "primary_key_field_id"] {
             let mut value = base.clone();
             match field {
@@ -3359,11 +3535,6 @@ mod tests {
         let mut missing_affected = connect_response(SchemaAction::RebuildLocal);
         missing_affected.affected_scopes = None;
         assert!(missing_affected.validate().is_err());
-
-        let mut class_two_floor_above_version = minimal_manifest();
-        class_two_floor_above_version.transition_class = SchemaTransitionClass::Class2;
-        class_two_floor_above_version.compatibility_floor = 9;
-        assert!(class_two_floor_above_version.validate().is_err());
     }
 
     #[test]

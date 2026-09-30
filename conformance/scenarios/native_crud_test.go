@@ -111,6 +111,7 @@ func TestValidateNativeCRUDEvidenceRejectsResponseAndPersistenceMutants(t *testi
 			name: "push response becomes retryable",
 			mutate: func(evidence *NativeCRUDEvidence) {
 				evidence.Responses[1].Transport[0].Retryable = true
+				evidence.Responses[1].Transport[0].RetryablePresent = true
 			},
 		},
 		{
@@ -161,6 +162,24 @@ func TestQueueSuccessorControlRejectsIdentityAndContentMutants(t *testing.T) {
 			name: "successor loses dependency",
 			mutate: func(evidence *NativeQueueSuccessorEvidence) {
 				evidence.Rows[0].Successor.DependsOnMutationID = nil
+			},
+		},
+		{
+			name: "linked successor keeps the original value",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.AuthoredFields = append([]NativeQueuedField(nil), evidence.Rows[0].BeforeRestart.AuthoredFields...)
+			},
+		},
+		{
+			name: "successor writes the changed value to another field",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Successor.AuthoredFields = []NativeQueuedField{{FieldID: "other", LogicalType: "string", Value: json.RawMessage(`"updated"`)}}
+			},
+		},
+		{
+			name: "original lacks the authored initial value",
+			mutate: func(evidence *NativeQueueSuccessorEvidence) {
+				evidence.Rows[0].Target.InitialValue = json.RawMessage(`"not-authored"`)
 			},
 		},
 	}
@@ -225,8 +244,12 @@ func validNativeQueueSuccessorEvidence() NativeQueueSuccessorEvidence {
 		Status: "superseded_before_send", SourceKind: "application", DependsOnMutationID: &dependency, NormalizedMutationID: &normalized,
 		AuthoredFields: []NativeQueuedField{{FieldID: "value", LogicalType: "string", Value: json.RawMessage(`"updated"`)}},
 	}
+	target := NativeCRUDTarget{
+		TableID: "items", TableName: "runtime_items", PrimaryKeyField: "id", RecordID: "row-a", ValueField: "value",
+		InitialValue: json.RawMessage(`"initial"`), UpdatedValue: json.RawMessage(`"updated"`),
+	}
 	return NativeQueueSuccessorEvidence{Rows: []NativeQueueSuccessorRow{{
-		BeforeRestart: original, AfterRestart: afterRestart, OriginalAfterChange: afterChange, Successor: successor,
+		Target: target, BeforeRestart: original, AfterRestart: afterRestart, OriginalAfterChange: afterChange, Successor: successor,
 	}}}
 }
 
@@ -288,7 +311,7 @@ func validNativeCRUDEvidence() NativeCRUDEvidence {
 	deleteRestart := cloneNativeCRUDState(deleteResponse, "process-4")
 	responses := make([]NativeCRUDResponse, 0, 3)
 	for _, operation := range []string{"insert", "update", "delete"} {
-		responses = append(responses, NativeCRUDResponse{Operation: operation, Completion: "idle", Transport: []NativeCRUDTransport{{OperationClass: "push", StatusCode: 200, RetryablePresent: true, MutationCount: 2, MutationCountPresent: true}}})
+		responses = append(responses, NativeCRUDResponse{Operation: operation, Completion: "idle", Transport: []NativeCRUDTransport{{OperationClass: "push", StatusCode: 200, MutationCount: 2, MutationCountPresent: true}}})
 	}
 	return NativeCRUDEvidence{
 		Targets: targets, Before: before, AfterInsertWrite: insertWrite, AfterInsertResponse: insertResponse, AfterInsertRestart: insertRestart,
@@ -301,4 +324,39 @@ func cloneNativeCRUDState(state NativeCRUDState, processID string) NativeCRUDSta
 	state.ProcessID = processID
 	state.Rows = append([]NativeCRUDRowState(nil), state.Rows...)
 	return state
+}
+
+func TestLocalWriteKeptBySchemaRequiresSomeButNotAllColumns(t *testing.T) {
+	publish := Operation{ContractOperation: "model", Name: "publish-schema", Payload: json.RawMessage(
+		`{"tables":[{"table_id":"other","fields":[{"field_id":"note"}]},{"table_id":"items","fields":[{"field_id":"id"},{"field_id":"kept"}]}]}`,
+	)}
+	write := func(columns string) Operation {
+		return Operation{ContractOperation: "local", Name: "write", Payload: json.RawMessage(
+			`{"table_id":"items","pk":{"field_id":"id","value":"row"},"columns":` + columns + `}`,
+		)}
+	}
+
+	kept, err := LocalWriteKeptBySchema(write(`[{"field_id":"kept","value":"local"},{"field_id":"note","value":"removed"}]`), publish)
+	if err != nil {
+		t.Fatalf("keep declared column: %v", err)
+	}
+	var payload struct {
+		Columns []struct {
+			FieldID string `json:"field_id"`
+			Value   string `json:"value"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal(kept.Payload, &payload); err != nil || len(payload.Columns) != 1 ||
+		payload.Columns[0].FieldID != "kept" || payload.Columns[0].Value != "local" {
+		t.Fatalf("kept write = %s, want only the declared column", kept.Payload)
+	}
+	// Another table that declares the removed field must not keep it.
+	for name, columns := range map[string]string{
+		"none": `[{"field_id":"note","value":"removed"}]`,
+		"all":  `[{"field_id":"kept","value":"local"}]`,
+	} {
+		if _, err := LocalWriteKeptBySchema(write(columns), publish); err == nil {
+			t.Fatalf("write that keeps %s of its columns was accepted", name)
+		}
+	}
 }

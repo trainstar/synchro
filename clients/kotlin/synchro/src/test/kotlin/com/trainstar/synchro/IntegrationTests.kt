@@ -2,12 +2,18 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.trainstar.synchro.inspection.SynchroProofApi
+import com.trainstar.synchro.inspection.TransportObservationCollector
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -17,6 +23,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.Closeable
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.security.MessageDigest
 import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -153,6 +163,43 @@ class IntegrationTests {
             arrayOf(recordID),
         )?.get("lifecycle_state")
 
+    /** Each shared source binary64 text and its RFC 8785 text. */
+    private fun floatWireCases(): List<Pair<String, String>> {
+        val path = generateSequence(Paths.get("").toAbsolutePath().normalize()) { it.parent }
+            .take(8)
+            .map { it.resolve("conformance/protocol/float-wire-boundaries-v1.json") }
+            .first { Files.exists(it) }
+        val document = Json.parseToJsonElement(String(Files.readAllBytes(path), Charsets.UTF_8)).jsonObject
+        assertEquals(1, document.getValue("version").jsonPrimitive.int)
+        return document.getValue("cases").jsonArray.map { element ->
+            val case = element.jsonObject
+            case.getValue("source").jsonPrimitive.content to case.getValue("canonical").jsonPrimitive.content
+        }.also { assertTrue(it.isNotEmpty()) }
+    }
+
+    /** Syncs until every row has the wanted text, then compares each stored value with its canonical binary64. */
+    private suspend fun waitForFloatWireRows(
+        client: SynchroClient,
+        userID: String,
+        ids: List<String>,
+        cases: List<Pair<String, String>>,
+        text: String,
+    ) {
+        waitForCondition(timeoutMs = 30_000) {
+            syncNowRetryingCapturePending(client)
+            val rows = client.query("SELECT col_text FROM type_zoo WHERE user_id = ?", arrayOf(userID))
+            rows.size == ids.size && rows.all { it["col_text"] == text }
+        }
+        ids.zip(cases).forEach { (id, case) ->
+            val value = client.queryOne("SELECT col_double FROM type_zoo WHERE id = ?", arrayOf(id))?.get("col_double") as Double
+            assertEquals(
+                "${case.first} must arrive as ${case.second}",
+                case.second.toDouble().toRawBits(),
+                value.toRawBits(),
+            )
+        }
+    }
+
     private suspend fun waitForCondition(timeoutMs: Long = 5000, intervalMs: Long = 250, condition: suspend () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (true) {
@@ -165,6 +212,149 @@ class IntegrationTests {
             delay(intervalMs)
         }
     }
+
+    @OptIn(SynchroProofApi::class)
+    @Test
+    fun testRealFloatWireValuesSurviveRebuildPullAndLaterWork() = runBlocking {
+        val cases = floatWireCases()
+        val userID = UUID.randomUUID().toString()
+        val ids = cases.map { UUID.randomUUID().toString() }
+        val collector = TransportObservationCollector(capacity = 4096)
+        // close() shuts each engine down. use attempts every close and keeps the first failure.
+        val writer = SynchroClient(makeConfig(userID = userID), context)
+        Closeable(writer::close).use {
+            // A page limit below the row count requires rebuild continuation.
+            val reader = SynchroClient(
+                makeConfig(userID = userID).copy(pullPageSize = 4).withTransportObservationCollector(collector),
+                context,
+            )
+            Closeable(reader::close).use {
+                writer.start()
+                writer.executeBatch(
+                    ids.zip(cases).map { (id, case) ->
+                        SQLStatement(
+                            "INSERT INTO type_zoo (id, user_id, col_text, col_double, created_at, updated_at) VALUES (?, ?, 'float-wire', ?, ?, ?)",
+                            arrayOf(id, userID, case.first.toDouble(), "2026-01-09T00:00:00.000Z", "2026-01-09T00:00:00.000Z"),
+                        )
+                    },
+                )
+                waitForCondition(timeoutMs = 30_000) {
+                    syncNowRetryingCapturePending(writer)
+                    writer.pendingChangeCount() == 0
+                }
+                reader.start()
+                waitForFloatWireRows(reader, userID, ids, cases, "float-wire")
+                val scopeFingerprint = MessageDigest.getInstance("SHA-256")
+                    .digest("user:$userID".toByteArray(Charsets.UTF_8))
+                    .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                val snapshot = collector.snapshot()
+                assertFalse(snapshot.overflowed)
+                val pages = snapshot.observations.mapNotNull { it.rebuildResponseFacts }.filter { it.scopeFingerprint == scopeFingerprint }
+                assertTrue(pages.size > 1)
+                assertEquals(ids.size, pages.sumOf { it.recordCount })
+                assertTrue(pages.dropLast(1).all { it.hasMore && it.hasCursor })
+                assertFalse(pages.last().hasMore)
+
+                writer.executeBatch(
+                    ids.map { id ->
+                        SQLStatement(
+                            "UPDATE type_zoo SET col_text = 'float-wire-later', updated_at = ? WHERE id = ?",
+                            arrayOf("2026-01-10T00:00:00.000Z", id),
+                        )
+                    },
+                )
+                waitForCondition(timeoutMs = 30_000) {
+                    syncNowRetryingCapturePending(writer)
+                    writer.pendingChangeCount() == 0
+                }
+                waitForFloatWireRows(reader, userID, ids, cases, "float-wire-later")
+            }
+        }
+    }
+
+    /**
+     * A connect that the extension rejects must leave local durable state and
+     * queued intent unchanged. The client contract requires a 400 response to
+     * preserve unresolved local state. Only the lifecycle and failure record changes.
+     */
+    @OptIn(SynchroProofApi::class)
+    @Test
+    fun testRejectedConnectPreservesLocalStateAndQueuedIntent() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val customerID = UUID.randomUUID().toString()
+        val config = makeConfig(userID = userID)
+        val unassignedScope = "user:${UUID.randomUUID()}"
+
+        val writer = SynchroClient(config, context)
+        val beforeRejection: List<String>
+        val connectedGeneration: Any?
+        Closeable(writer::close).use {
+            writer.start()
+            writer.stop()
+            writer.executeBatch(listOf(insertCustomer(userID, customerID, "queued before rejection")))
+            assertEquals(listOf(customerID), writer.inspectPendingMutations().map { it.recordID })
+            val database = database(writer)
+            connectedGeneration = localMeta(database, "client_generation")
+            // A scope that the server never assigned makes the extension reject connect
+            // after it has loaded the prior client state.
+            database.writeTransaction { db ->
+                db.execSQL("INSERT INTO _synchro_scopes (scope_id) VALUES (?)", arrayOf(unassignedScope))
+            }
+            beforeRejection = localDurableState(database)
+        }
+
+        val collector = TransportObservationCollector()
+        val rejected = SynchroClient(config.withTransportObservationCollector(collector), context)
+        Closeable(rejected::close).use {
+            try {
+                rejected.start()
+                fail("connect with an unassigned scope started")
+            } catch (_: SynchroError) {
+            }
+            assertEquals(
+                listOf("CONNECT 400 invalid_request"),
+                collector.snapshot().observations.map { "${it.operationClass} ${it.statusCode} ${it.errorCode}" },
+            )
+            assertTrue(rejected.getSyncStatus() is SyncStatus.Error)
+            assertEquals(beforeRejection, localDurableState(database(rejected)))
+        }
+
+        val resumed = SynchroClient(config, context)
+        val reader = SynchroClient(makeConfig(userID = userID), context)
+        Closeable(resumed::close).use {
+            Closeable(reader::close).use {
+                database(resumed).writeTransaction { db ->
+                    db.execSQL("DELETE FROM _synchro_scopes WHERE scope_id = ?", arrayOf(unassignedScope))
+                }
+                resumed.retry()
+                waitForCondition(timeoutMs = 30_000) {
+                    syncNowRetryingCapturePending(resumed)
+                    resumed.pendingChangeCount() == 0
+                }
+                assertEquals(connectedGeneration, localMeta(database(resumed), "client_generation"))
+                reader.start()
+                waitForCondition(timeoutMs = 30_000) {
+                    syncNowRetryingCapturePending(reader)
+                    reader.query("SELECT id, name FROM customers WHERE user_id = ?", arrayOf(userID))
+                        .associate { it["id"] as String to it["name"] as String } == mapOf(customerID to "queued before rejection")
+                }
+            }
+        }
+    }
+
+    private fun localMeta(database: SynchroDatabase, key: String): Any? =
+        database.queryOne("SELECT value FROM _synchro_meta WHERE key = ?", arrayOf(key))?.get("value")
+
+    /** Every local row except the lifecycle and failure record, in a stable order. */
+    private fun localDurableState(database: SynchroDatabase): List<String> =
+        database.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name <> '_synchro_client_state' ORDER BY name",
+        ).flatMap { table ->
+            val name = table.getValue("name") as String
+            val row = database.query("SELECT name FROM pragma_table_info(?) ORDER BY cid", arrayOf(name))
+                .joinToString(" || '|' || ") { column -> "quote(\"${column.getValue("name")}\")" }
+            database.query("SELECT $row AS value FROM \"$name\"").map { "$name ${it.getValue("value")}" }.sorted()
+        }
 
     @Test
     fun testAuthFailure() = runBlocking {
@@ -190,11 +380,11 @@ class IntegrationTests {
         try {
             clientA.start()
             seedOrder(clientA, userID, customerID, orderID, """{"street":"123 Main St"}""", "2026-01-01T00:00:00.000Z")
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
 
             clientB.start()
-            waitForCondition {
-                clientB.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientB)
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"123 Main St"}"""
             }
@@ -217,13 +407,13 @@ class IntegrationTests {
         try {
             writer.start()
             seedOrder(writer, userID, customerID, orderID, """{"street":"Bootstrap Ave"}""", "2026-01-02T00:00:00.000Z")
-            writer.syncNow()
+            syncNowRetryingCapturePending(writer)
             writer.stop()
             writer.close()
 
             reader.start()
-            waitForCondition {
-                reader.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(reader)
                 val row = reader.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"Bootstrap Ave"}"""
             }
@@ -244,10 +434,10 @@ class IntegrationTests {
         try {
             clientA.start()
             seedOrder(clientA, userID, customerID, orderID, """{"street":"Delete Me"}""", "2026-01-03T00:00:00.000Z")
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
 
             clientB.start()
-            waitForCondition {
+            waitForCondition(timeoutMs = 30_000) {
                 val row = clientB.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("ship_address") == """{"street":"Delete Me"}"""
             }
@@ -256,14 +446,14 @@ class IntegrationTests {
                 "UPDATE orders SET deleted_at = ?, updated_at = ? WHERE id = ?",
                 arrayOf("2026-01-04T00:00:00.000Z", "2026-01-04T00:00:00.000Z", orderID)
             )
-            clientA.syncNow()
+            syncNowRetryingCapturePending(clientA)
             val expectedDeletedAt = clientA.queryOne(
                 "SELECT deleted_at FROM orders WHERE id = ?",
                 arrayOf(orderID)
             )?.get("deleted_at") as? String
             assertNotNull(expectedDeletedAt)
-            waitForCondition {
-                clientB.syncNow()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientB)
                 val row = clientB.queryOne("SELECT deleted_at FROM orders WHERE id = ?", arrayOf(orderID))
                 row?.get("deleted_at") == expectedDeletedAt
             }
@@ -287,7 +477,7 @@ class IntegrationTests {
             clientA.executeBatch(names.map { (id, name) -> insertCustomer(userID, id, name) })
             val database = database(clientA)
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 names.keys.all { ledgerState(database, it) == "accepted" }
             }
 
@@ -314,7 +504,7 @@ class IntegrationTests {
 
             clientB.start()
             waitForCondition(timeoutMs = 30_000) {
-                clientB.syncNow()
+                syncNowRetryingCapturePending(clientB)
                 clientB.query("SELECT id, name FROM customers")
                     .associate { it["id"] as String to it["name"] as String } == names
             }
@@ -341,7 +531,7 @@ class IntegrationTests {
             val database = database(clientA)
             clientA.executeBatch(listOf(insertCustomer(userID, probeID, "")))
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 ledgerState(database, probeID) == "accepted"
             }
             val probe = sentRequests(database).single().second.mutations.single()
@@ -356,7 +546,7 @@ class IntegrationTests {
                 ),
             )
             waitForCondition(timeoutMs = 30_000) {
-                clientA.syncNow()
+                syncNowRetryingCapturePending(clientA)
                 ledgerState(database, exactID) == "accepted" && ledgerState(database, laterID) == "accepted"
             }
 
@@ -372,7 +562,7 @@ class IntegrationTests {
 
             clientB.start()
             waitForCondition(timeoutMs = 30_000) {
-                clientB.syncNow()
+                syncNowRetryingCapturePending(clientB)
                 val later = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(laterID))
                 val exactRow = clientB.queryOne("SELECT name FROM customers WHERE id = ?", arrayOf(exactID))
                 later?.get("name") == "later" && exactRow?.get("name") == exactName

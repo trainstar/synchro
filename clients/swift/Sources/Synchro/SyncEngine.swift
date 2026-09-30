@@ -974,7 +974,9 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            if try changeTracker.hasPendingChanges() {
+            // The replayed pull completed the incremental step. The cycle
+            // continues only for work that must precede another pull.
+            if try changeTracker.hasPendingChanges() || !(try scopeIDsNeedingRebuild()).isEmpty {
                 try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
             }
 

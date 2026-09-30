@@ -50,7 +50,7 @@ func TestValidateRebuildCardinalityScenarioRejectsContractChanges(t *testing.T) 
 
 func TestNewRebuildCardinalityCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewRebuildCardinalityCoordinator(RebuildCardinalityCoordinatorConfig{
-		Scenario: loadRebuildCardinalityAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRebuildCardinalityAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android rebuild-cardinality coordinator was rejected: %v", err)
@@ -162,6 +162,208 @@ func TestRebuildCardinalityReceiptAttemptCountUsesRebuildIdentities(t *testing.T
 	if err != nil || attempts != 2 {
 		t.Fatalf("distinct rebuild attempt count = %d, want 2: %v", attempts, err)
 	}
+}
+
+func TestValidateRebuildCardinalityCaptureRequiresReceiptPredicatesAndCompletion(t *testing.T) {
+	scenario := loadRebuildCardinalityAuthoredScenario(t)
+	step := scenario.Steps[3]
+	workload, err := decodeRebuildCardinalityWorkload(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator := func() *RebuildCardinalityCoordinator {
+		return &RebuildCardinalityCoordinator{
+			expected: rebuildCardinalityExpectedState(scenario), steps: []scenarios.Step{step},
+			workloads: []rebuildCardinalityWorkload{workload}, tableName: "runtime_items",
+			runtimeIDs: map[string]json.RawMessage{
+				"current-schema": json.RawMessage(`{"version":1,"hash":"` + strings.Repeat("d", 64) + `"}`),
+				"scope-a":        json.RawMessage(`"scope-a"`),
+			},
+		}
+	}
+	if err := coordinator().validateCapture(rebuildCardinalityCaptureFixture(t, workload)); err != nil {
+		t.Fatalf("valid rebuild-cardinality capture rejected: %v", err)
+	}
+	withProof := func(change func(receipts []any) []any) func(*finalCapture) {
+		return func(capture *finalCapture) {
+			var proof map[string]any
+			if err := json.Unmarshal(capture.DurableProof, &proof); err != nil {
+				t.Fatalf("decode rebuild-cardinality proof fixture: %v", err)
+			}
+			proof["rebuild_receipt_proofs"] = change(proof["rebuild_receipt_proofs"].([]any))
+			capture.DurableProof = marshalRebuildCardinalityFixture(t, proof)
+		}
+	}
+	withReceipt := func(member string, value any) func(*finalCapture) {
+		return withProof(func(receipts []any) []any {
+			receipts[0].(map[string]any)[member] = value
+			return receipts
+		})
+	}
+	withEvents := func(events ...any) func(*finalCapture) {
+		return func(capture *finalCapture) {
+			capture.Events = marshalRebuildCardinalityFixture(t, append([]any{}, events...))
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*finalCapture)
+		detail string
+	}{
+		{name: "request chain invalid", change: withReceipt("request_chain_valid", false), detail: "false=[request_chain_valid]"},
+		{name: "records out of canonical order", change: withReceipt("records_in_canonical_order", false), detail: "false=[records_in_canonical_order]"},
+		{name: "row checksums invalid", change: withReceipt("row_checksums_valid", false), detail: "false=[row_checksums_valid]"},
+		{name: "scope checksum invalid", change: withReceipt("scope_checksum_valid", false), detail: "false=[scope_checksum_valid]"},
+		{name: "final checksum differs", change: withReceipt("final_checksum_matches_local", false), detail: "false=[final_checksum_matches_local] page_count=2 returned_records=101 prior_pages=0 state_pages=2 want_pages=2"},
+		{name: "returned records differ", change: withReceipt("returned_record_count", workload.RecordCount+1)},
+		{name: "one rebuild split across two receipt proofs", change: withProof(func(receipts []any) []any {
+			first, second := map[string]any{}, map[string]any{}
+			for member, value := range receipts[0].(map[string]any) {
+				first[member], second[member] = value, value
+			}
+			first["page_count"], first["returned_record_count"] = 1, workload.PageSize
+			second["page_count"], second["returned_record_count"] = 1, workload.RecordCount-workload.PageSize
+			return []any{first, second}
+		})},
+		{name: "completion event absent", change: withEvents()},
+		{name: "completion event for another scope", change: withEvents(map[string]any{"type": "rebuild_completed", "scope_id": "scope-b", "rebuild_id": "rebuild-a"})},
+		{name: "completion event without receipt", change: withEvents(map[string]any{"type": "rebuild_completed", "scope_id": "scope-a", "rebuild_id": "rebuild-b"})},
+		{name: "provenance row differs from scope row", change: func(capture *finalCapture) {
+			var provenance []map[string]any
+			if err := json.Unmarshal(capture.Provenance, &provenance); err != nil {
+				t.Fatalf("decode rebuild-cardinality provenance fixture: %v", err)
+			}
+			provenance[0]["recordID"] = "runtime-row-other"
+			capture.Provenance = marshalRebuildCardinalityFixture(t, provenance)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := rebuildCardinalityCaptureFixture(t, workload)
+			test.change(&capture)
+			err := coordinator().validateCapture(capture)
+			if err == nil {
+				t.Fatal("changed rebuild-cardinality capture passed validation")
+			}
+			if !strings.Contains(err.Error(), test.detail) {
+				t.Fatalf("changed rebuild-cardinality capture error = %v, want %q", err, test.detail)
+			}
+		})
+	}
+}
+
+func TestRebuildClientGenerationUsesEstablishedRequestTrace(t *testing.T) {
+	traces := []traceSnapshot{{Observations: []transportObservation{
+		{OperationClass: "connect", RequestFacts: json.RawMessage(`{"schema_version":1}`)},
+		{OperationClass: "rebuild", RequestFacts: json.RawMessage(`{"client_generation":7}`)},
+		{OperationClass: "pull", RequestFacts: json.RawMessage(`{"client_generation":7}`)},
+	}}}
+	generation, err := rebuildClientGeneration(traces)
+	if err != nil || generation != 7 {
+		t.Fatalf("rebuild client generation = %d, error = %v, want 7", generation, err)
+	}
+	traces[0].Observations[2].RequestFacts = json.RawMessage(`{"client_generation":8}`)
+	if _, err := rebuildClientGeneration(traces); err == nil {
+		t.Fatal("changed rebuild client generation accepted")
+	}
+	traces = []traceSnapshot{{Observations: traces[0].Observations[:1]}}
+	if _, err := rebuildClientGeneration(traces); err == nil || !strings.Contains(err.Error(), "request-trace source") {
+		t.Fatalf("absent rebuild client generation error = %v, want request-trace source", err)
+	}
+}
+
+func rebuildCardinalityCaptureFixture(t *testing.T, workload rebuildCardinalityWorkload) finalCapture {
+	t.Helper()
+	pages := (workload.RecordCount + workload.PageSize - 1) / workload.PageSize
+	scopeFingerprint := strings.Repeat("a", 64)
+	finalCursorFingerprint := strings.Repeat("b", 64)
+	continuationFingerprint := strings.Repeat("c", 64)
+	observations := []any{map[string]any{
+		"sequence": 1, "operationClass": "connect", "statusCode": 200,
+		"durationNanoseconds": 1, "requestFacts": map[string]any{"schema_version": 1},
+	}}
+	for page := uint64(0); page < pages; page++ {
+		remaining := workload.RecordCount - page*workload.PageSize
+		records := workload.PageSize
+		if remaining < records {
+			records = remaining
+		}
+		terminal := page == pages-1
+		requestFacts := map[string]any{
+			"client_generation": 1, "limit": workload.PageSize,
+			"scope_fingerprint": scopeFingerprint, "rebuild_id_fingerprint": hashFingerprint("rebuild-a"),
+		}
+		if page > 0 {
+			requestFacts["cursor_fingerprint"] = continuationFingerprint
+		}
+		responseFacts := map[string]any{
+			"record_count": records, "has_more": !terminal, "has_cursor": !terminal,
+			"has_final_scope_cursor": terminal, "has_checksum": terminal,
+			"scope_fingerprint": scopeFingerprint,
+		}
+		if terminal {
+			responseFacts["final_scope_cursor_fingerprint"] = finalCursorFingerprint
+		}
+		observations = append(observations, map[string]any{
+			"sequence": page + 2, "operationClass": "rebuild", "statusCode": 200,
+			"durationNanoseconds": 1, "requestFacts": requestFacts, "rebuildResponseFacts": responseFacts,
+		})
+	}
+	observations = append(observations, map[string]any{
+		"sequence": pages + 2, "operationClass": "pull", "statusCode": 200,
+		"durationNanoseconds": 1, "cursorFingerprints": []string{finalCursorFingerprint},
+		"cursorFingerprintsComplete": true, "requestFacts": map[string]any{"client_generation": 1, "scope_count": 1},
+		"pullResponseFacts": map[string]any{
+			"change_count": 0, "has_more": false, "rebuild_scope_count": 0,
+			"checksum_count": 1, "scope_cursor_fingerprints": []string{finalCursorFingerprint},
+			"scope_cursor_fingerprints_complete": true,
+		},
+	})
+	scopeRows := make([]any, workload.RecordCount)
+	for index := range scopeRows {
+		scopeRows[index] = map[string]any{"scopeID": "scope-a", "tableName": "runtime_items", "recordID": fmt.Sprintf("runtime-row-%03d", index+1)}
+	}
+	state := map[string]any{
+		"schema":              map[string]any{"version": 1, "hash": strings.Repeat("d", 64)},
+		"scopeStates":         []any{map[string]any{"scopeID": "scope-a"}},
+		"scopeRows":           scopeRows,
+		"rebuildAttempts":     []any{},
+		"applicationRowCount": workload.RecordCount, "provenanceCount": workload.RecordCount,
+		"scopeStateCount": 1, "scopeRowCount": workload.RecordCount, "rowMetadataCount": workload.RecordCount,
+		"rebuildAttemptCount": 0, "rebuildReceiptCount": pages,
+		"provenanceMaintenanceWorkCursor": "cursor",
+	}
+	proof := map[string]any{
+		"row_metadata": nil,
+		"rebuild_receipt_proofs": []any{map[string]any{
+			"rebuild_id_fingerprint": hashFingerprint("rebuild-a"), "page_count": pages,
+			"returned_record_count": workload.RecordCount, "request_chain_valid": true,
+			"records_in_canonical_order": true, "row_checksums_valid": true,
+			"scope_checksum_valid": true, "final_checksum_matches_local": true,
+		}},
+	}
+	return finalCapture{
+		ClientState: marshalRebuildCardinalityFixture(t, state),
+		Pending:     marshalRebuildCardinalityFixture(t, []any{}),
+		Rejected:    marshalRebuildCardinalityFixture(t, []any{}),
+		Status:      marshalRebuildCardinalityFixture(t, map[string]any{"state": "ready", "retry_at": nil, "operation": nil, "failure": nil}),
+		Events: marshalRebuildCardinalityFixture(t, []any{map[string]any{
+			"type": "rebuild_completed", "scope_id": "scope-a", "rebuild_id": "rebuild-a",
+		}}),
+		Provenance: marshalRebuildCardinalityFixture(t, scopeRows),
+		Trace: marshalRebuildCardinalityFixture(t, map[string]any{
+			"observations": observations, "overflowed": false, "sequenceCheckpoint": pages + 2,
+		}),
+		DurableProof: marshalRebuildCardinalityFixture(t, proof),
+	}
+}
+
+func marshalRebuildCardinalityFixture(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal rebuild-cardinality fixture: %v", err)
+	}
+	return raw
 }
 
 func loadRebuildCardinalityAuthoredScenario(t *testing.T) scenarios.Scenario {

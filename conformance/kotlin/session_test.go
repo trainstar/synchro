@@ -154,7 +154,7 @@ func TestDecodeResponseCarriesBoundedCommandErrorDetail(t *testing.T) {
 }
 
 func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
-	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":false,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
+	observation := `{"sequence":1,"operation_class":"push","status_code":200,"error_code":null,"retryable":null,"duration_nanoseconds":1,"request_facts":{"client_generation":1,"schema_version":1,"schema_hash":"` + testDigest + `","mutation_count":2}}`
 	result, err := DecodeResponse([]byte(responseWithObservations(observation)))
 	if err != nil {
 		t.Fatalf("valid push response failed: %v", err)
@@ -166,8 +166,8 @@ func TestDecodeResponseValidatesPushMutationCount(t *testing.T) {
 	for _, invalid := range []string{
 		strings.Replace(observation, `,"mutation_count":2`, "", 1),
 		strings.Replace(observation, `,"error_code":null`, "", 1),
-		strings.Replace(observation, `,"retryable":false`, "", 1),
-		strings.Replace(observation, `"retryable":false`, `"retryable":true`, 1),
+		strings.Replace(observation, `,"retryable":null`, "", 1),
+		strings.Replace(observation, `"retryable":null`, `"retryable":false`, 1),
 		strings.Replace(observation, `"mutation_count":2`, `"mutation_count":0`, 1),
 		strings.Replace(observation, `"mutation_count":2`, `"mutation_count":1001`, 1),
 		strings.Replace(observation, `"operation_class":"push"`, `"operation_class":"pull"`, 1),
@@ -264,6 +264,71 @@ func TestSessionRejectsChangedOrBackwardCheckpoint(t *testing.T) {
 	if err := session.acceptResult(testResult(nil)); err == nil {
 		t.Fatal("backward checkpoint passed")
 	}
+}
+
+func TestSessionRetainsImmutableRebuildObservationFacts(t *testing.T) {
+	scopeFingerprint := strings.Repeat("b", 64)
+	// Each call returns new values, so a mutation of one result cannot change another.
+	accepted := func() []TransportObservation {
+		return []TransportObservation{{
+			Sequence:            1,
+			OperationClass:      "rebuild",
+			StatusCode:          200,
+			DurationNanoseconds: 1,
+			RequestFacts: &TransportRequestFacts{
+				ClientGeneration:     pointer(int64(1)),
+				SchemaVersion:        1,
+				SchemaHash:           testDigest,
+				Limit:                pointer(100),
+				ScopeFingerprint:     pointer(scopeFingerprint),
+				RebuildIDFingerprint: pointer(strings.Repeat("c", 64)),
+				CursorPresent:        pointer(false),
+			},
+			RebuildResponseFacts: &TransportRebuildResponseFacts{
+				RecordCount:        1,
+				HasMore:            true,
+				HasCursor:          true,
+				ScopeFingerprint:   scopeFingerprint,
+				ResponseBodySHA256: pointer(strings.Repeat("d", 64)),
+			},
+		}}
+	}
+	if err := validateTransportSnapshot(testResult(accepted()).TransportObservations); err != nil {
+		t.Fatalf("rebuild observation fixture is invalid: %v", err)
+	}
+	requireRetained := func(boundary string, session *Session) {
+		t.Helper()
+		stored, err := session.ObservationsAfter(0)
+		if err != nil {
+			t.Fatalf("%s: read retained history: %v", boundary, err)
+		}
+		if want := accepted(); !reflect.DeepEqual(stored, want) {
+			got, _ := json.Marshal(stored)
+			expected, _ := json.Marshal(want)
+			t.Errorf("%s changed retained history:\n got %s\nwant %s", boundary, got, expected)
+		}
+	}
+
+	input := testResult(accepted())
+	session := &Session{}
+	if err := session.acceptResult(input); err != nil {
+		t.Fatalf("accept observations: %v", err)
+	}
+	*input.TransportObservations.Observations[0].RequestFacts.ScopeFingerprint = "changed"
+	*input.TransportObservations.Observations[0].RebuildResponseFacts.ResponseBodySHA256 = "changed"
+	requireRetained("accepted input mutation", session)
+
+	session = &Session{}
+	if err := session.acceptResult(testResult(accepted())); err != nil {
+		t.Fatalf("accept observations: %v", err)
+	}
+	returned, err := session.ObservationsAfter(0)
+	if err != nil || len(returned) != 1 {
+		t.Fatalf("read observations: %v, %d", err, len(returned))
+	}
+	*returned[0].RequestFacts.ScopeFingerprint = "returned mutation"
+	*returned[0].RebuildResponseFacts.ResponseBodySHA256 = "returned mutation"
+	requireRetained("returned observation mutation", session)
 }
 
 func TestBoundedOutputAndResponseLimit(t *testing.T) {
@@ -415,4 +480,15 @@ func hasCommandSuffix(commands [][]string, suffix []string) bool {
 		}
 	}
 	return false
+}
+
+func TestDatabaseFamilySelectsDestinationSidecarsAndSeedCandidates(t *testing.T) {
+	listing := ".\n..\nclient-db\nclient-db-wal\nclient-db-shm\nclient-db-journal\n.client-db.seed-1f2e\n.client-db.seed-1f2e-wal\nclient-db2\nother-db\n"
+	want := []string{"client-db", "client-db-wal", "client-db-shm", "client-db-journal", ".client-db.seed-1f2e", ".client-db.seed-1f2e-wal"}
+	if got := databaseFamily(listing, "client-db"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("database family = %#v, want %#v", got, want)
+	}
+	if got := databaseFamily(".\n..\n", "client-db"); len(got) != 0 {
+		t.Fatalf("empty storage family = %#v", got)
+	}
 }

@@ -330,7 +330,9 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             db.execSQL("ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
         }
         createPendingNormalizationIndex(db)
-        restoreCaptureTriggers(db)
+        // The regenerated triggers copy the atomic group ID into the new column.
+        // Earlier INSERT capture also aborts a key-only insert. It now captures empty columns. D-01.
+        migrateCaptureTriggers(db)
     }
 
     private fun migrateClientStateFailureMetadata(db: SQLiteDatabase) {
@@ -866,14 +868,16 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
     }
 
     fun <T> applicationReadTransaction(block: (ApplicationReadTransaction) -> T): T =
-        readTransaction { db ->
-            withApplicationTransactionScope {
-                val transaction = ApplicationReadTransaction(db)
-                try {
-                    block(transaction)
-                } finally {
-                    transaction.invalidate()
-                }
+        readTransaction { db -> applicationRead(db, block) }
+
+    /** Runs an application read on a transaction that the caller already owns. */
+    internal fun <T> applicationRead(db: SQLiteDatabase, block: (ApplicationReadTransaction) -> T): T =
+        withApplicationTransactionScope {
+            val transaction = ApplicationReadTransaction(db)
+            try {
+                block(transaction)
+            } finally {
+                transaction.invalidate()
             }
         }
 

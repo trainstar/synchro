@@ -181,27 +181,15 @@ enum SQLiteSchema {
         }
 
         let writableColumns = table.columns.filter(\.writable)
-        let intentHasWritable: String
-        if writableColumns.isEmpty {
-            intentHasWritable = "0"
-        } else {
-            let writableNames = writableColumns
-                .map { sqlLiteral($0.name) }
-                .joined(separator: ", ")
-            intentHasWritable = """
-                EXISTS (
-                    SELECT 1
-                    FROM _synchro_capture_context AS context
-                    JOIN _synchro_capture_fields AS field
-                      ON field.statement_token = context.statement_token
-                     AND field.table_name = context.table_name
-                    WHERE context.table_name = \(sqlLiteral(safeName))
-                      AND field.column_name IN (\(writableNames))
-                )
-                """.replacingOccurrences(of: "\n", with: " ")
+        // Ordinary UPDATE statements install no context, so a trigger-driven
+        // change is captured too. Any context row, including an empty mask or a
+        // mask for another table, keeps the authored mask in force. Issue #219.
+        let noCaptureContext = "NOT EXISTS (SELECT 1 FROM _synchro_capture_context)"
+        func updateCaptures(_ column: LocalSchemaColumn) -> String {
+            "(\(changedExpression(column)) AND (\(noCaptureContext) OR \(intentHas(column.name))))"
         }
         let updateHasWritableChange = writableColumns
-            .map { "((\(intentHas($0.name))) AND \(changedExpression($0)))" }
+            .map(updateCaptures)
             .joined(separator: " OR ")
         let updateIsDelete = !deletedAtCol.isEmpty
             ? "(NEW.\(quotedDeletedAt) IS NOT NULL AND OLD.\(quotedDeletedAt) IS NULL)"
@@ -328,17 +316,18 @@ enum SQLiteSchema {
         triggers.append("DROP TRIGGER IF EXISTS \(quotedDeleteTrigger)")
 
         // INSERT trigger. Inserts have no server base, and they retain every
-        // authored writable column the capture context names.
-        let insertIntentGuard = writableColumns.isEmpty
-            ? "SELECT RAISE(ABORT, 'synced insert has no writable fields');"
-            : "SELECT CASE WHEN NOT (\(intentHasWritable)) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"
+        // authored writable column the capture context names. An insert that
+        // authors no writable column is a key-only create with empty columns.
+        // An insert without its own context did not come through the SDK, so
+        // its authored fields are unknown.
+        let insertContextGuard = "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM _synchro_capture_context AS context WHERE context.table_name = \(sqlLiteral(safeName))) THEN RAISE(ABORT, 'synced insert has no authored capture context') END;"
         triggers.append("""
             CREATE TRIGGER \(quotedInsertTrigger)
             AFTER INSERT ON \(quoted)
             WHEN \(lockCheck)
             BEGIN
                 \(schemaGuard)
-                \(insertIntentGuard)
+                \(insertContextGuard)
                 \(insertLedger(operation: "insert", captureCondition: "1", baseVersion: "NULL", recordReference: "NEW.\(quotedPK)") )
                 \(writableColumns.map { valueInsert($0, changed: intentHas($0.name)) }.joined())
             END
@@ -359,7 +348,7 @@ enum SQLiteSchema {
                     baseVersion: "CASE WHEN \(dependencyExpression(recordReference: "NEW.\(quotedPK)")) IS NOT NULL THEN NULL ELSE (SELECT server_version FROM _synchro_row_versions WHERE table_name = \(sqlLiteral(name)) AND record_id = CAST(NEW.\(quotedPK) AS TEXT)) END",
                     recordReference: "NEW.\(quotedPK)"
                 ))
-                \(writableColumns.map { valueInsert($0, changed: "(\(intentHas($0.name))) AND \(changedExpression($0))") }.joined())
+                \(writableColumns.map { valueInsert($0, changed: updateCaptures($0)) }.joined())
             END
             """)
 

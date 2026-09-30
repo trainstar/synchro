@@ -21,7 +21,9 @@ const (
 // source row has the row lock mode of the source statement that follows it. A stronger lock
 // blocks the foreign key checks of child rows. A weaker lock makes the statement upgrade the
 // lock while it holds the weaker lock. The push also holds the table lock of the statement
-// before it reads the key columns.
+// before it reads the key columns. Through a registered partitioned table, the key columns come
+// from the partition of the row, and the push takes the table lock only on the relations from the
+// registered table down to that partition.
 func TestRealPushRowLockMatchesSourceStatement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -324,6 +326,167 @@ func TestRealPushRowLockMatchesSourceStatement(t *testing.T) {
 		})
 		observer.requireOutcomes(push, []map[string]any{update}, nil)
 	})
+
+	// The unique index on code exists only on cf_lock_parts_leaf, so code is a key column of that
+	// leaf and not of the registered root. Each native statement is the PostgreSQL control.
+	t.Run("partition_leaf", func(t *testing.T) {
+		observer := newRowLockObserver(t, ctx, fixture)
+		// A rebuild waits for WAL capture of the accepted pushes of the client.
+		observer.poll("capture of the accepted pushes", func(ctx context.Context) (bool, error) {
+			var pending bool
+			var poison string
+			if err := fixture.admin.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM synchro.sync_write_fences
+					WHERE client_id = $1 AND mutation_id IS NOT NULL AND coverage = 'pending'
+				),
+				COALESCE((
+					SELECT string_agg(concat_ws(': ', failure_class, failure_detail), '; ')
+					FROM synchro.sync_wal_poison WHERE lifecycle = 'active'
+				), '')`, fixture.client.ID).Scan(&pending, &poison); err != nil {
+				return false, err
+			}
+			if poison != "" {
+				return false, fmt.Errorf("WAL capture is poisoned: %s", poison)
+			}
+			return !pending, nil
+		})
+		parts := waitForRealShapeTable(t, ctx, harness, "cf_lock_parts")
+		tables := []realShapeTable{parts}
+		rebuildRealShapeOtherScope(t, ctx, harness, token, fixture.client, realShapeUserScope, fixture.nextID())
+		states := rebuildRealShapeRows(t, ctx, harness, token, admin, fixture.client, realShapeUserScope, fixture.nextID(), tables)
+		var path string
+		observer.scan(`
+			SELECT string_agg(tree.relid::regclass::text, ',' ORDER BY tree.level)
+			FROM pg_catalog.pg_partition_tree('public.cf_lock_parts') tree
+			JOIN pg_catalog.pg_partition_ancestors('public.cf_lock_parts_leaf') path
+			  ON path.relid = tree.relid`, &path)
+		requirePath := func(name string, pid int) {
+			t.Helper()
+			if locks := observer.partitionLocks(pid); locks != path {
+				observer.fatalf("%s holds RowExclusiveLock on %q, want %q", name, locks, path)
+			}
+		}
+		gate := observer.session()
+		native := observer.session()
+		writer := observer.session()
+
+		observer.holdGate(gate, 7)
+		nativeWrites := observer.begin(native)
+		nativeUpdate := observer.statement("native update of S1", func() (sql.Result, error) {
+			return nativeWrites.ExecContext(native.ctx,
+				"UPDATE public.cf_lock_parts SET value = 'native' WHERE id = 'lock-s1'")
+		})
+		observer.gateWait(nativeUpdate, native.pid, 7)
+		requirePath("native update of S1", native.pid)
+		writes := observer.begin(writer)
+		observer.notBlocked(writer, native.pid, "insert child of S1", 1, func() (sql.Result, error) {
+			return writes.ExecContext(writer.ctx,
+				"INSERT INTO public.cf_lock_parts_children (id, parent_id) VALUES ('lock-child-s1', 'lock-s1')")
+		})
+		observer.commit("writer", writes)
+		observer.releaseGate(gate, 7)
+		observer.wait(nativeUpdate)
+		if nativeUpdate.err != nil || nativeUpdate.rows != 1 {
+			observer.fatalf("native update of S1 = %d rows, error %v, want 1 row", nativeUpdate.rows, nativeUpdate.err)
+		}
+		observer.commit("native transaction", nativeWrites)
+
+		observer.holdGate(gate, 8)
+		update := fixture.mutation(fixture.parts, "lock-s2", "update",
+			map[string]any{fixture.parts.ValueField: "s2-new"})
+		push := observer.push(update)
+		pushPID := observer.pushPID(push)
+		observer.gateWait(push, pushPID, 8)
+		requirePath("push update of S2", pushPID)
+		writes = observer.begin(writer)
+		observer.notBlocked(writer, pushPID, "insert child of S2", 1, func() (sql.Result, error) {
+			return writes.ExecContext(writer.ctx,
+				"INSERT INTO public.cf_lock_parts_children (id, parent_id) VALUES ('lock-child-s2', 'lock-s2')")
+		})
+		observer.commit("writer", writes)
+		observer.releaseGate(gate, 8)
+		observer.wait(push)
+		observer.requireOutcomes(push, []map[string]any{update}, nil)
+
+		writes = observer.begin(writer)
+		observer.exec("insert child of S3", 1, func() (sql.Result, error) {
+			return writes.ExecContext(writer.ctx,
+				"INSERT INTO public.cf_lock_parts_children (id, parent_id) VALUES ('lock-child-s3', 'lock-s3')")
+		})
+		nativeWrites = observer.begin(native)
+		nativeKey := observer.statement("native key update of S3", func() (sql.Result, error) {
+			return nativeWrites.ExecContext(native.ctx,
+				"UPDATE public.cf_lock_parts SET code = 'code-s3-native' WHERE id = 'lock-s3'")
+		})
+		observer.blocked(nativeKey, native.pid, writer.pid)
+		requirePath("native key update of S3", native.pid)
+		observer.commit("writer", writes)
+		observer.wait(nativeKey)
+		if nativeKey.err != nil || nativeKey.rows != 1 {
+			observer.fatalf("native key update of S3 = %d rows, error %v, want 1 row", nativeKey.rows, nativeKey.err)
+		}
+		observer.commit("native transaction", nativeWrites)
+
+		writes = observer.begin(writer)
+		observer.exec("insert child of S4", 1, func() (sql.Result, error) {
+			return writes.ExecContext(writer.ctx,
+				"INSERT INTO public.cf_lock_parts_children (id, parent_id) VALUES ('lock-child-s4', 'lock-s4')")
+		})
+		keyed := fixture.mutation(fixture.parts, "lock-s4", "update",
+			map[string]any{fixture.partsCode: "code-s4-new"})
+		push = observer.push(keyed)
+		pushPID = observer.pushPID(push)
+		observer.blocked(push, pushPID, writer.pid)
+		requirePath("push key update of S4", pushPID)
+		// The push waits for its first lock and holds no row lock on S4.
+		observer.notBlocked(writer, pushPID, "update value of S4", 1, func() (sql.Result, error) {
+			return writes.ExecContext(writer.ctx,
+				"UPDATE public.cf_lock_parts SET value = 'writer' WHERE id = 'lock-s4'")
+		})
+		observer.commit("writer", writes)
+		observer.wait(push)
+		row := observer.requireOutcomes(push, nil, []map[string]any{keyed})[keyed["mutation_id"].(string)]
+		if row[fixture.parts.ValueField] != "writer" || row[fixture.partsCode] != "code-s4" {
+			observer.fatalf("S4 server row = %#v, want value writer and code code-s4", row)
+		}
+
+		// WAL capture of the leaf rows continues, so pull reaches each committed row and version.
+		pullRealShapeUntilServer(t, ctx, harness, token, admin, fixture.client, realShapeUserScope, tables, states)
+		want := map[string][2]string{
+			"lock-s1": {"code-s1", "native"},
+			"lock-s2": {"code-s2", "s2-new"},
+			"lock-s3": {"code-s3-native", "value-s3"},
+			"lock-s4": {"code-s4", "writer"},
+		}
+		for id, values := range want {
+			if row := states["cf_lock_parts"][id].values; row["code"] != values[0] || row["value"] != values[1] {
+				observer.fatalf("pulled %s row = %#v, want code %s and value %s", id, row, values[0], values[1])
+			}
+		}
+	})
+}
+
+// partitionLocks returns each relation of the cf_lock_parts partition tree on which the backend
+// holds RowExclusiveLock, from the root down.
+func (observer *rowLockObserver) partitionLocks(pid int) string {
+	observer.t.Helper()
+	var relations string
+	if err := observer.fixture.admin.QueryRowContext(observer.ctx, `
+		SELECT COALESCE(string_agg(tree.relid::regclass::text, ',' ORDER BY tree.level, tree.relid::regclass::text), '')
+		FROM pg_catalog.pg_partition_tree('public.cf_lock_parts') tree
+		WHERE EXISTS (
+			SELECT 1 FROM pg_catalog.pg_locks held
+			WHERE held.locktype = 'relation'
+			  AND held.database = (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database())
+			  AND held.relation = tree.relid
+			  AND held.pid = $1::integer
+			  AND held.mode = 'RowExclusiveLock'
+			  AND held.granted
+		)`, pid).Scan(&relations); err != nil {
+		observer.fatalf("read partition locks of backend %d: %v", pid, err)
+	}
+	return relations
 }
 
 // rowLockFixture holds the registered relations and the row versions of the row lock test.
@@ -336,8 +499,10 @@ type rowLockFixture struct {
 	parents     realProtocolTable
 	hardParents realProtocolTable
 	catalog     realProtocolTable
+	parts       realProtocolTable
 	parentCode  string
 	catalogCode string
+	partsCode   string
 	versions    map[string]string
 	sequence    int
 }
@@ -754,6 +919,11 @@ func (observer *rowLockObserver) scan(query string, destinations ...any) {
 // row with one push, and records the version of each row.
 func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.Harness, token string, admin *sql.DB) *rowLockFixture {
 	t.Helper()
+	// Registration of a partitioned table requires the D-02 root publication identity.
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf(
+		"ALTER PUBLICATION %q SET (publish_via_partition_root = true)", harness.Names().Publication)); err != nil {
+		t.Fatalf("publish partitioned tables under their root identity: %v", err)
+	}
 	if _, err := admin.ExecContext(ctx, `
 		CREATE TABLE public.cf_lock_gates (
 			id text PRIMARY KEY,
@@ -787,22 +957,46 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 			id text PRIMARY KEY,
 			parent_id text NOT NULL REFERENCES public.cf_lock_catalog (id)
 		);
-		GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_lock_parents TO synchro_owner;
+		CREATE TABLE public.cf_lock_parts (
+			id text PRIMARY KEY,
+			code text NOT NULL,
+			value text NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+			deleted_at timestamptz
+		) PARTITION BY RANGE (id);
+		CREATE TABLE public.cf_lock_parts_other PARTITION OF public.cf_lock_parts
+			FOR VALUES FROM (MINVALUE) TO ('lock-s');
+		CREATE TABLE public.cf_lock_parts_sub PARTITION OF public.cf_lock_parts
+			FOR VALUES FROM ('lock-s') TO (MAXVALUE) PARTITION BY RANGE (id);
+		CREATE TABLE public.cf_lock_parts_leaf PARTITION OF public.cf_lock_parts_sub
+			FOR VALUES FROM ('lock-s') TO ('lock-t');
+		CREATE TABLE public.cf_lock_parts_sibling PARTITION OF public.cf_lock_parts_sub
+			FOR VALUES FROM ('lock-t') TO (MAXVALUE);
+		CREATE UNIQUE INDEX cf_lock_parts_leaf_code ON public.cf_lock_parts_leaf (code);
+		CREATE TABLE public.cf_lock_parts_children (
+			id text PRIMARY KEY,
+			parent_id text NOT NULL REFERENCES public.cf_lock_parts (id)
+		);
+		GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_lock_parents, public.cf_lock_parts TO synchro_owner;
 		GRANT SELECT, INSERT, UPDATE, DELETE
 			ON TABLE public.cf_lock_hard_parents, public.cf_lock_catalog
 			TO synchro_owner;
 		GRANT SELECT
-			ON TABLE public.cf_lock_parents, public.cf_lock_hard_parents, public.cf_lock_catalog
+			ON TABLE public.cf_lock_parents, public.cf_lock_hard_parents, public.cf_lock_catalog,
+				public.cf_lock_parts
 			TO synchro_worker;
 		GRANT SELECT ON public.cf_lock_gates TO synchro_owner;
 		ALTER TABLE public.cf_lock_parents ENABLE ROW LEVEL SECURITY;
 		ALTER TABLE public.cf_lock_hard_parents ENABLE ROW LEVEL SECURITY;
 		ALTER TABLE public.cf_lock_catalog ENABLE ROW LEVEL SECURITY;
+		ALTER TABLE public.cf_lock_parts ENABLE ROW LEVEL SECURITY;
 		CREATE POLICY synchro_owner_all ON public.cf_lock_parents
 			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
 		CREATE POLICY synchro_owner_all ON public.cf_lock_hard_parents
 			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
 		CREATE POLICY synchro_owner_all ON public.cf_lock_catalog
+			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+		CREATE POLICY synchro_owner_all ON public.cf_lock_parts
 			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
 		CREATE FUNCTION public.cf_lock_parents_membership(p_id text)
 		RETURNS SETOF text
@@ -816,15 +1010,21 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 		RETURNS SETOF text
 		LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
 		BEGIN ATOMIC SELECT 'user:diagnostic-user'::text; END;
+		CREATE FUNCTION public.cf_lock_parts_membership(p_id text)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC SELECT 'user:diagnostic-user'::text; END;
 		REVOKE ALL ON FUNCTION
 			public.cf_lock_parents_membership(text),
 			public.cf_lock_hard_parents_membership(text),
-			public.cf_lock_catalog_membership(text)
+			public.cf_lock_catalog_membership(text),
+			public.cf_lock_parts_membership(text)
 			FROM PUBLIC;
 		GRANT EXECUTE ON FUNCTION
 			public.cf_lock_parents_membership(text),
 			public.cf_lock_hard_parents_membership(text),
-			public.cf_lock_catalog_membership(text)
+			public.cf_lock_catalog_membership(text),
+			public.cf_lock_parts_membership(text)
 			TO synchro_owner, synchro_worker;
 		CREATE FUNCTION public.cf_lock_gate() RETURNS trigger
 		LANGUAGE plpgsql AS $$
@@ -861,12 +1061,15 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 			FOR EACH ROW EXECUTE FUNCTION public.cf_lock_gate();
 		CREATE TRIGGER cf_lock_a_gate BEFORE UPDATE ON public.cf_lock_catalog
 			FOR EACH ROW EXECUTE FUNCTION public.cf_lock_gate();
+		CREATE TRIGGER cf_lock_a_gate BEFORE UPDATE ON public.cf_lock_parts
+			FOR EACH ROW EXECUTE FUNCTION public.cf_lock_gate();
 		CREATE TRIGGER cf_lock_b_rekey BEFORE UPDATE ON public.cf_lock_parents
 			FOR EACH ROW EXECUTE FUNCTION public.cf_lock_rekey();
 		CREATE TRIGGER cf_lock_c_target_key BEFORE UPDATE ON public.cf_lock_parents
 			FOR EACH ROW EXECUTE FUNCTION public.cf_lock_target_key();
 		INSERT INTO public.cf_lock_gates (id, gate) VALUES
-			('lock-p1', 1), ('lock-p2', 2), ('lock-p4', 4), ('lock-p5', 5), ('lock-q1', 6);
+			('lock-p1', 1), ('lock-p2', 2), ('lock-p4', 4), ('lock-p5', 5), ('lock-q1', 6),
+			('lock-s1', 7), ('lock-s2', 8);
 		SELECT synchro.synchro_register_table(
 			'public.cf_lock_parents', 'public.cf_lock_parents_membership', 'single_scope',
 			'id', 'updated_at', 'deleted_at', 'enabled');
@@ -875,11 +1078,14 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 			'id', 'updated_at', 'deleted_at', 'enabled');
 		SELECT synchro.synchro_register_table(
 			'public.cf_lock_catalog', 'public.cf_lock_catalog_membership', 'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled');
+		SELECT synchro.synchro_register_table(
+			'public.cf_lock_parts', 'public.cf_lock_parts_membership', 'single_scope',
 			'id', 'updated_at', 'deleted_at', 'enabled')`); err != nil {
 		t.Fatalf("install row lock fixture: %v", err)
 	}
 	deadline := time.Now().Add(30 * time.Second)
-	for _, name := range []string{"cf_lock_parents", "cf_lock_hard_parents", "cf_lock_catalog"} {
+	for _, name := range []string{"cf_lock_parents", "cf_lock_hard_parents", "cf_lock_catalog", "cf_lock_parts"} {
 		for {
 			_, err := fetchRealSchemaTableReference(ctx, harness.AdapterURL(), name)
 			if err == nil {
@@ -911,8 +1117,10 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 		parents:     requireRealTable(t, client, "cf_lock_parents"),
 		hardParents: requireRealTable(t, client, "cf_lock_hard_parents"),
 		catalog:     requireRealTable(t, client, "cf_lock_catalog"),
+		parts:       requireRealTable(t, client, "cf_lock_parts"),
 		parentCode:  loadRealProtocolFieldID(t, ctx, harness, "cf_lock_parents", "code"),
 		catalogCode: loadRealProtocolFieldID(t, ctx, harness, "cf_lock_catalog", "code"),
+		partsCode:   loadRealProtocolFieldID(t, ctx, harness, "cf_lock_parts", "code"),
 		versions:    make(map[string]string),
 	}
 	var inserts []map[string]any
@@ -933,6 +1141,12 @@ func installRowLockFixture(t *testing.T, ctx context.Context, harness *blackbox.
 		insert(fixture.catalog, "lock-"+key, map[string]any{
 			fixture.catalogCode:        "code-" + key,
 			fixture.catalog.ValueField: "value-" + key,
+		})
+	}
+	for _, key := range []string{"s1", "s2", "s3", "s4"} {
+		insert(fixture.parts, "lock-"+key, map[string]any{
+			fixture.partsCode:        "code-" + key,
+			fixture.parts.ValueField: "value-" + key,
 		})
 	}
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push",

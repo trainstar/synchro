@@ -7,10 +7,29 @@ final class InspectionFacadeContractTests: XCTestCase {
         let data = try Data(contentsOf: try contractURL())
         let contract = try JSONDecoder().decode(FacadeContract.self, from: data)
 
-        XCTAssertEqual(contract.schemaVersion, 1)
+        XCTAssertEqual(contract.schemaVersion, 2)
         XCTAssertEqual(contract.facade, String(describing: SynchroInspection.self))
         XCTAssertEqual(contract.operations.sorted { $0.name < $1.name }, actualOperations.sorted { $0.name < $1.name })
         XCTAssertEqual(contract.models.sorted { $0.name < $1.name }, actualModels.sorted { $0.name < $1.name })
+        XCTAssertEqual(contract.references.sorted(), referencedNames(actualOperations, actualModels))
+    }
+
+    /// Named types that the facade uses but does not define. The public client API owns them.
+    private func referencedNames(_ operations: [Operation], _ models: [Model]) -> [String] {
+        let defined = Set(models.map(\.name)).union(["array", "function", "void", "string", "bool", "int", "int64"])
+        var names = Set<String>()
+        func visit(_ shape: TypeShape) {
+            if !defined.contains(shape.name) { names.insert(shape.name) }
+            [shape.element].compactMap { $0 }.forEach(visit)
+            (shape.parameters ?? []).forEach(visit)
+            [shape.result].compactMap { $0 }.forEach(visit)
+        }
+        operations.forEach { operation in
+            operation.parameters.forEach { visit($0.type) }
+            visit(operation.result)
+        }
+        models.forEach { $0.fields.forEach { visit($0.type) } }
+        return names.sorted()
     }
 
     private var actualOperations: [Operation] {
@@ -19,6 +38,7 @@ final class InspectionFacadeContractTests: XCTestCase {
             operation("scopeStates", SynchroInspection.scopeStates),
             operation("scopeRows", SynchroInspection.scopeRows),
             operation("captureState", SynchroInspection.captureState, parameter: ("maximumRecords", Int.self)),
+            snapshotOperation(SynchroInspection.captureSnapshot),
             operation(
                 "rowMetadata",
                 SynchroInspection.rowMetadata,
@@ -61,7 +81,36 @@ final class InspectionFacadeContractTests: XCTestCase {
             rowMetadataCount: 1, rebuildAttemptCount: 1, rebuildReceiptCount: 1,
             provenanceMaintenanceWorkCursor: 1
         )
-        return [schema, scopeState, scopeRow, capture, metadata, attempt, receipt].map(model)
+        let snapshot = ClientStateSnapshotInspection(
+            capture: capture, pendingChangeCount: 1, retainedMutations: nil, rejectedMutations: nil,
+            blockingFailure: nil
+        )
+        return [schema, scopeState, scopeRow, capture, snapshot, metadata, attempt, receipt].map(model)
+    }
+
+    private func snapshotOperation(
+        _ function: @escaping (SynchroInspection) -> (
+            Int,
+            (ClientStateCaptureInspection, ApplicationTransaction) throws -> Void
+        ) throws -> ClientStateSnapshotInspection
+    ) -> Operation {
+        _ = function
+        return Operation(
+            name: "captureSnapshot",
+            parameters: [
+                Member(name: "maximumRecords", type: typeShape(Int.self)),
+                Member(
+                    name: "readApplicationRows",
+                    type: TypeShape(
+                        name: "function",
+                        nullable: false,
+                        parameters: [typeShape(ClientStateCaptureInspection.self), typeShape(ApplicationTransaction.self)],
+                        result: TypeShape(name: "void", nullable: false)
+                    )
+                ),
+            ],
+            result: typeShape(ClientStateSnapshotInspection.self)
+        )
     }
 
     private func operation<Result>(
@@ -108,6 +157,16 @@ final class InspectionFacadeContractTests: XCTestCase {
 
     private func typeShape(_ type: Any.Type) -> TypeShape {
         if type == Optional<SchemaRef>.self { return TypeShape(name: "SchemaRef", nullable: true) }
+        if type == ClientStateSnapshotInspection.self { return TypeShape(name: "ClientStateSnapshotInspection", nullable: false) }
+        // Swift has one application transaction type. The snapshot gives it a read-only connection.
+        if type == ApplicationTransaction.self { return TypeShape(name: "ApplicationReadTransaction", nullable: false) }
+        if type == Optional<[RetainedMutationInspection]>.self {
+            return TypeShape(name: "array", nullable: true, element: TypeShape(name: "RetainedMutationInspection", nullable: false))
+        }
+        if type == Optional<[RetainedRejectionInspection]>.self {
+            return TypeShape(name: "array", nullable: true, element: TypeShape(name: "RetainedRejectionInspection", nullable: false))
+        }
+        if type == Optional<SyncFailure>.self { return TypeShape(name: "SyncFailure", nullable: true) }
         if type == [ScopeStateInspection].self {
             return TypeShape(name: "array", nullable: false, element: TypeShape(name: "ScopeStateInspection", nullable: false))
         }
@@ -132,6 +191,8 @@ final class InspectionFacadeContractTests: XCTestCase {
     }
 
     private func typeShape(_ value: Any) -> TypeShape {
+        let declared = typeShape(type(of: value))
+        if declared.name != String(describing: type(of: value)) { return declared }
         let mirror = Mirror(reflecting: value)
         if mirror.displayStyle == .optional {
             return TypeShape(name: typeShape(mirror.children.first!.value).name, nullable: true)
@@ -145,7 +206,7 @@ final class InspectionFacadeContractTests: XCTestCase {
     private func contractURL() throws -> URL {
         var current = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         for _ in 0..<8 {
-            let candidate = current.appendingPathComponent("conformance/protocol/inspection-facade-v1.json")
+            let candidate = current.appendingPathComponent("conformance/protocol/inspection-facade-v2.json")
             if FileManager.default.fileExists(atPath: candidate.path) {
                 return candidate
             }
@@ -158,12 +219,13 @@ final class InspectionFacadeContractTests: XCTestCase {
 private struct FacadeContract: Decodable {
     let schemaVersion: Int
     let facade: String
+    let references: [String]
     let operations: [Operation]
     let models: [Model]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case facade, operations, models
+        case facade, references, operations, models
     }
 }
 
@@ -187,14 +249,25 @@ private final class TypeShape: Codable, Equatable {
     let name: String
     let nullable: Bool
     let element: TypeShape?
+    let parameters: [TypeShape]?
+    let result: TypeShape?
 
-    init(name: String, nullable: Bool, element: TypeShape? = nil) {
+    init(
+        name: String,
+        nullable: Bool,
+        element: TypeShape? = nil,
+        parameters: [TypeShape]? = nil,
+        result: TypeShape? = nil
+    ) {
         self.name = name
         self.nullable = nullable
         self.element = element
+        self.parameters = parameters
+        self.result = result
     }
 
     static func == (lhs: TypeShape, rhs: TypeShape) -> Bool {
         lhs.name == rhs.name && lhs.nullable == rhs.nullable && lhs.element == rhs.element
+            && lhs.parameters == rhs.parameters && lhs.result == rhs.result
     }
 }

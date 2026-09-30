@@ -1,12 +1,12 @@
 import XCTest
 import GRDB
-@testable import Synchro
+@testable @_spi(Inspection) import Synchro
 
 final class DatabaseMigrationTests: XCTestCase {
-    func testShippedVersionFiveUpgradePreservesIntentAndAddsProtocolThreeState() throws {
+    func testShippedVersionFiveUpgradePreservesIntentAndAddsProtocolThreeState() async throws {
         let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("synchro_migration_\(UUID().uuidString).sqlite")
         let legacy = try DatabaseQueue(path: path)
-        try legacy.write { db in
+        try await legacy.write { db in
             try db.execute(sql: "CREATE TABLE _grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
             for identifier in ["synchro_v1", "synchro_v2_buckets", "synchro_v3_scopes", "synchro_v4_scope_integrity", "synchro_v5_rejected_mutations"] {
                 try db.execute(sql: "INSERT INTO _grdb_migrations (identifier) VALUES (?)", arguments: [identifier])
@@ -20,7 +20,7 @@ final class DatabaseMigrationTests: XCTestCase {
             try db.execute(sql: "CREATE TABLE _synchro_bucket_members (bucket_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, checksum INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (bucket_id, table_name, record_id))")
             try db.execute(sql: "CREATE TABLE _synchro_bucket_checkpoints (bucket_id TEXT PRIMARY KEY, checkpoint INTEGER NOT NULL DEFAULT 0)")
             try db.execute(sql: "INSERT INTO _synchro_pending_changes VALUES (?, ?, ?, NULL, ?)", arguments: ["r1", "orders", "create", "2026-01-01T00:00:00.000000Z"])
-            try db.execute(sql: "INSERT INTO _synchro_rejected_mutations VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', NULL, NULL, '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')")
+            try db.execute(sql: "INSERT INTO _synchro_rejected_mutations VALUES ('m1', 'orders', 'r0', 'rejected_terminal', 'policy_rejected', 'blocked', '{\"id\":\"r0\"}', 'server-v7', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')")
             try db.execute(sql: "INSERT INTO _synchro_scopes VALUES ('orders:user-1', 'old-cursor', 'old-checksum', 4, 7)")
             try db.execute(sql: "INSERT INTO _synchro_scope_rows VALUES ('orders:user-1', 'orders', 'r0', 7, 4)")
         }
@@ -68,6 +68,67 @@ final class DatabaseMigrationTests: XCTestCase {
         XCTAssertNil(scope?.checksum)
         XCTAssertEqual(scope?.generation, 0)
         XCTAssertEqual(try db.query("SELECT * FROM _synchro_scope_rows", params: nil).count, 0)
+
+        // The old queue stored no binding or field values, so inspection reports none.
+        let legacyID: String = try XCTUnwrap(
+            db.queryOne("SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = 'r1'", params: nil)?["mutation_id"]
+        )
+        let legacyIntent = RetainedMutationInspection.legacy(LegacyMutationInspection(
+            mutationID: legacyID,
+            localOrder: 1,
+            tableName: "orders",
+            recordID: "r1",
+            operation: .insert,
+            baseVersion: nil,
+            clientVersion: "2026-01-01T00:00:00.000000Z",
+            status: .blockedByPredecessor,
+            sourceKind: "legacy_import"
+        ))
+        let client = try SynchroClient(config: SynchroConfig(
+            dbPath: path,
+            serverURL: URL(string: "http://localhost:8080")!,
+            authProvider: { "test-token" },
+            clientID: "legacy-device",
+            appVersion: "1.0.0"
+        ))
+        XCTAssertEqual(try client.inspectRetainedMutationRecords(), [legacyIntent])
+        // The deprecated methods keep their published result: a legacy import cannot be inspected.
+        XCTAssertThrowsError(try client.inspectPendingMutations())
+        XCTAssertThrowsError(try client.inspectRetainedMutations())
+        // The old rejection table stored no mutation or rejection JSON, so inspection reports none.
+        let legacyRejected = RetainedRejectionInspection.legacy(LegacyRejectionInspection(
+            mutationID: "m1",
+            tableName: "orders",
+            recordID: "r0",
+            status: .rejectedTerminal,
+            code: .policyRejected,
+            message: "blocked",
+            serverRowJSON: #"{"id":"r0"}"#,
+            serverVersion: "server-v7",
+            createdAt: "2026-01-01T00:00:00.000000Z",
+            updatedAt: "2026-01-01T00:00:00.000000Z"
+        ))
+        XCTAssertEqual(try client.inspectRejectedMutationRecords(), [legacyRejected])
+        XCTAssertThrowsError(try client.inspectRejectedMutations())
+        let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 8) { _, _ in }
+        XCTAssertEqual(snapshot.retainedMutations, [legacyIntent])
+        XCTAssertEqual(snapshot.rejectedMutations, [legacyRejected])
+        XCTAssertEqual(snapshot.capture.rejectedMutationCount, 1)
+        XCTAssertEqual(snapshot.pendingChangeCount, 1)
+
+        try db.writeTransaction { db in
+            try db.execute(
+                sql: "UPDATE _synchro_pending_changes SET table_id = 'table-orders' WHERE mutation_id = ?",
+                arguments: [legacyID]
+            )
+        }
+        XCTAssertThrowsError(try client.inspectRetainedMutationRecords())
+        try db.writeTransaction { db in
+            try db.execute(sql: "UPDATE _synchro_rejected_mutations SET mutation_json = '{}' WHERE mutation_id = 'm1'")
+        }
+        XCTAssertThrowsError(try client.inspectRejectedMutationRecords())
+        try await client.close()
+        try db.close()
     }
 
     func testVersionTenUpgradeAddsBackoffWithoutChangingQueueOrRebuildState() throws {

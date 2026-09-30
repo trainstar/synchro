@@ -180,6 +180,8 @@ public struct TransportObservation: Codable, Sendable, Equatable {
     /// The error code the server reported. A status code alone cannot name it,
     /// because one status carries more than one code.
     public let errorCode: String?
+    /// The retryability the server reported in the same failure body.
+    public let retryable: Bool?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -192,6 +194,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         case rebuildResponseFacts = "rebuild_response_facts"
         case pullResponseFacts = "pull_response_facts"
         case errorCode = "error_code"
+        case retryable
     }
 
     public init(
@@ -204,7 +207,8 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
         pullResponseFacts: TransportPullResponseFacts? = nil,
-        errorCode: String? = nil
+        errorCode: String? = nil,
+        retryable: Bool? = nil
     ) {
         self.sequence = sequence
         self.operationClass = operationClass
@@ -216,6 +220,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         self.rebuildResponseFacts = rebuildResponseFacts
         self.pullResponseFacts = pullResponseFacts
         self.errorCode = errorCode
+        self.retryable = retryable
     }
 }
 
@@ -437,7 +442,8 @@ public final class TransportObservationCollector: @unchecked Sendable {
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
         pullResponseFacts: TransportPullResponseFacts? = nil,
-        errorCode: String? = nil
+        errorCode: String? = nil,
+        retryable: Bool? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -457,7 +463,8 @@ public final class TransportObservationCollector: @unchecked Sendable {
             requestFacts: requestFacts,
             rebuildResponseFacts: rebuildResponseFacts,
             pullResponseFacts: pullResponseFacts,
-            errorCode: errorCode
+            errorCode: errorCode,
+            retryable: retryable
         ))
     }
 

@@ -10,6 +10,7 @@ The client SQL API accepts application reads and writes, but it is not an unrest
 Use one statement per `query`, `queryOne`, `execute`, or transaction operation.
 
 - Reads use `SELECT`, including read-only common table expressions.
+- Swift `query` and `queryOne` accept only read-only statements. In a write transaction, the SDK checks this before SQLite runs the statement. A write with `RETURNING` fails this check.
 - Writes use ordinary `INSERT`, `UPDATE`, and `DELETE` statements.
 - Writes to Synchro metadata, queue tables, capture triggers, and synced-table DDL are rejected.
 - Application writes to a synced table require its generated capture triggers to remain installed.
@@ -29,13 +30,27 @@ The `ON CONFLICT DO UPDATE` statements visible in the client implementation main
 
 ## Savepoints and transaction control
 
-The Kotlin application SQL parser rejects `SAVEPOINT`, `RELEASE`, `ROLLBACK`, `BEGIN`, and `COMMIT` statements. The Swift application transaction surface does not expose a nested transaction API, and its writes already run inside the SDK-managed GRDB transaction.
+The Kotlin application SQL parser rejects `SAVEPOINT`, `RELEASE`, `ROLLBACK`, `BEGIN`, and `COMMIT` statements. Swift application writes already run inside the SDK-managed GRDB transaction. While that write runs, the Swift SQLite authorizer rejects these statements and `END`. This rule applies to `execute`, `query`, and `queryOne`.
 
 Use `client.transaction { ... }` on Kotlin or `client.writeTransaction { ... }` on Swift for one local transaction of application statements. If the closure throws, the SDK rolls back the managed transaction. Do not issue `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, `BEGIN`, or `COMMIT` through application SQL.
 
 A local transaction does not make the server apply its mutations together. The server can apply some mutations and reject others. Use an atomic write transaction when the server must apply all mutations or none.
 
 These limits apply to the public client SQL surfaces, including the React Native bridge. React Native forwards SQL to the native SDK and does not add a separate SQL engine.
+
+## Swift change capture
+
+The Swift SDK selects captured fields from the statement and the capture context:
+
+- An ordinary `INSERT` captures the writable columns that the statement names. Without a column list, it captures all writable columns.
+- An ordinary `UPDATE` captures each writable field whose value changes. This includes a change that a trigger on a local table makes to a synced row.
+- `authoredWriteTransaction` keeps its named-column mask for the complete transaction. An `UPDATE` captures only the changed fields that the mask names for its table.
+- While that mask is active, an `UPDATE` of another synced table creates no update mutation. An empty column list also creates no update mutation.
+- A soft-delete transition records a delete mutation without field values. A mask does not change this rule.
+
+An `INSERT` that names no writable column is a key-only create. Swift and Kotlin capture it as an insert with empty `columns`, and the server supplies the other values. An `INSERT` into a synced table without its own capture context aborts, because its authored fields are unknown. A trigger on a local table that inserts a synced row is one example.
+
+The SDK removes an inferred `INSERT` context after its statement. It removes an authored mask when the authored transaction callback ends. If a removal fails, the SDK throws a database error. A managed write with remaining capture context fails and rolls back. This also occurs when the callback caught the earlier error.
 
 ## Atomic write transactions
 
@@ -179,9 +194,9 @@ integer outside the JavaScript safe-integer range.
 
 - Kotlin statement parsing: `clients/kotlin/synchro/src/main/kotlin/com/trainstar/synchro/ApplicationSql.kt:172-237,290-324`
 - Kotlin managed application transaction: `clients/kotlin/synchro/src/main/kotlin/com/trainstar/synchro/SynchroDatabase.kt:793-835,1110-1154`
-- Swift application authorizer and transaction surface: `clients/swift/Sources/Synchro/ApplicationDatabase.swift:71-170,242-272`
-- Swift managed application writes: `clients/swift/Sources/Synchro/Database.swift:118-139,170-185`
-- Swift synced-table capture triggers: `clients/swift/Sources/Synchro/SQLiteSchema.swift:201-258`
+- Swift application authorizer and transaction surface: `clients/swift/Sources/Synchro/ApplicationDatabase.swift:8-85,87-325`
+- Swift managed application writes and capture context: `clients/swift/Sources/Synchro/ApplicationDatabase.swift:358-513` and `clients/swift/Sources/Synchro/Database.swift:120-125,194-235`
+- Swift synced-table capture triggers: `clients/swift/Sources/Synchro/SQLiteSchema.swift:167-217,255-370`
 - React Native client boundary: `docs/src/content/docs/clients/overview.mdx:28-39`
 - Atomic write group contract: `docs/src/content/docs/spec/02-client-contract.mdx:325-406`
 - Atomic batch wire contract: `docs/src/content/docs/spec/01-wire-protocol.mdx:705-719`

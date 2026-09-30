@@ -237,6 +237,14 @@ Get `accessToken` from the application identity provider. Call `client.close()`
 when the client is no longer needed. Pass `http://10.0.2.2:8091` only for the
 local Android emulator tutorial adapter. Use an HTTPS URL in production.
 
+The Kotlin client delivers `onStatusChange`, `onConflict`, `onSyncEvent`, and
+`initialSyncCompleted` callbacks synchronously from sync work. A callback must
+return before the application calls `start`, `stop`, `retry`, `resetSchema`,
+`syncNow`, or `close`. A synchronous call from a callback throws
+`IllegalStateException` before it cancels work, waits, or closes the database.
+To stop or close from a callback, launch the call on another coroutine and let
+the callback return.
+
 ## React Native
 
 Install the published package after Synchro `0.4.0` is available:

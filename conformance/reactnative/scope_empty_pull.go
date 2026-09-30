@@ -36,7 +36,6 @@ type ScopeEmptyPullCoordinatorConfig struct {
 	Platform   string
 	ServerURL  string
 	AuthToken  string
-	AppVersion string
 }
 
 // ScopeEmptyPullCoordinatorResult contains the resolved identity evidence.
@@ -206,9 +205,6 @@ func NewScopeEmptyPullCoordinator(config ScopeEmptyPullCoordinatorConfig) (*Scop
 	}
 	if config.Platform != "ios" && config.Platform != "android" {
 		return nil, errors.New("React Native scope-empty-pull coordinator platform must be ios or android")
-	}
-	if config.AppVersion == "" {
-		config.AppVersion = defaultAppVersion
 	}
 	if config.AuthToken == "" && config.Harness == nil {
 		return nil, errors.New("React Native scope-empty-pull coordinator auth token is required")

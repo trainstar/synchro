@@ -104,21 +104,31 @@ func (executor *OperatorExecutor) transitionSchemaQueue(ctx context.Context, rem
 
 // bootstrapStagedTransition completes a committed transition that the WAL
 // activation path cannot finish alone. The extension activates a removal-only
-// transition from commit order. A transition that adds a field or changes a
-// type over a nonempty relation requires the operator projection bootstrap,
-// so the staged generation stays pending until this runs it.
+// transition from commit order. Registration records whether an added field or
+// a changed type over a nonempty relation needs the operator projection
+// bootstrap. A Class 2 nullable addition needs none, so the worker can activate
+// it before this runs. Otherwise the staged generation stays pending until
+// this runs the bootstrap.
 func (executor *OperatorExecutor) bootstrapStagedTransition(ctx context.Context, database *sql.DB, shapeChanged, nonempty bool) error {
 	if !shapeChanged || !nonempty {
 		return nil
 	}
 	var generation int64
+	var state string
+	var requirement int16
 	if err := database.QueryRowContext(ctx, `
-		SELECT generation
+		SELECT generation, state, source_requirement
 		FROM synchro.sync_registry_generations
-		WHERE state = 'pending' AND validated
+		WHERE validated
 		ORDER BY generation DESC
-		LIMIT 1`).Scan(&generation); err != nil || generation <= 0 {
+		LIMIT 1`).Scan(&generation, &state, &requirement); err != nil || generation <= 0 {
 		return errors.New("read staged schema transition generation failed")
+	}
+	if requirement == 0 {
+		return nil
+	}
+	if state != "pending" {
+		return fmt.Errorf("staged schema transition generation %d is %s before its bootstrap", generation, state)
 	}
 	if _, err := executor.RunProjectionBootstrap(ctx, generation); err != nil {
 		return fmt.Errorf("bootstrap staged schema transition generation %d failed: %w", generation, err)

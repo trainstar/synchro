@@ -138,14 +138,6 @@ var closedPayloadShapes = map[string]*payloadShape{
 	"rebuild/request-page": shapeWith(closedOperationFields["rebuild/request-page"], map[string]payloadChild{"schema": objectChild(schemaReferenceShape)}),
 }
 
-// OperationClass identifies the package that executes one closed scenario operation.
-type OperationClass string
-
-const (
-	OperationClassReference        OperationClass = "reference"
-	OperationClassModelRunnerMacro OperationClass = "model_runner_macro"
-)
-
 type operationFields struct {
 	required []string
 	optional []string
@@ -160,6 +152,25 @@ var forbiddenSetupMembers = map[string]struct{}{
 }
 
 // OperationKey returns the stable closed key for one operation.
+// AcknowledgementOf returns the acknowledgement of the stream prefix that one
+// materialize operation completes. The WAL worker acknowledges after it
+// materializes, so a check that compares server state across a later window
+// waits for this acknowledgement first. Otherwise the asynchronous
+// acknowledgement lands inside the window.
+func AcknowledgementOf(materialize Operation) (Operation, error) {
+	var payload struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if OperationKey(materialize) != "process/materialize-source-transaction" || json.Unmarshal(materialize.Payload, &payload) != nil || payload.StreamGeneration == "" {
+		return Operation{}, errors.New("materialize operation has no stream generation")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return Operation{}, errors.New("encode acknowledgement stream generation failed")
+	}
+	return Operation{ContractOperation: "process", Name: "acknowledge-contiguous-prefix", Payload: encoded}, nil
+}
+
 func OperationKey(operation Operation) string {
 	return operation.ContractOperation + "/" + operation.Name
 }
@@ -172,17 +183,6 @@ func OperationKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// LookupOperationClass returns the execution class for one closed operation key.
-func LookupOperationClass(key string) (OperationClass, bool) {
-	if _, found := closedOperationFields[key]; !found {
-		return "", false
-	}
-	if key == "workload/prepare" {
-		return OperationClassModelRunnerMacro, true
-	}
-	return OperationClassReference, true
 }
 
 // ValidateOperation validates an operation name and its closed payload shape.

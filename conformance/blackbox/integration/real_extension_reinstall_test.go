@@ -395,6 +395,11 @@ func TestRealExtensionReinstallRebindsWorkerSlot(t *testing.T) {
 			t.Fatalf("release prior WAL worker: %v", err)
 		}
 		workerReleased = true
+		// An unbound worker never drops an existing configured slot, so the
+		// documented reinstall drops the slot that the prior worker releases.
+		if err := harness.DropReleasedWorkerSlot(ctx, harness.Names().ReplicationSlot); err != nil {
+			t.Fatalf("drop released prior slot: %v", err)
+		}
 
 		var slotBoundary string
 		deadline := time.Now().Add(90 * time.Second)
@@ -537,4 +542,272 @@ func waitForReinstalledWorker(
 	}
 	t.Fatalf("reinstalled worker did not bind a fresh active slot: %#v, %v; %s", observation, err, harness.FailureDiagnostics())
 	return blackbox.ExtensionReinstallObservation{}
+}
+
+// TestRealWorkerStartupRetainsUnownedConfiguredSlot proves that an unbound worker
+// never drops an existing slot with the configured name. Only the runtime binding
+// is ownership evidence, and a fresh installation has no binding.
+func TestRealWorkerStartupRetainsUnownedConfiguredSlot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	slot := harness.Names().ReplicationSlot
+	admin := openIssue49Admin(t, ctx, harness)
+	priorPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
+	if err != nil {
+		t.Fatalf("observe worker before cold reinstall: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'off'"); err != nil {
+		t.Fatalf("disable worker for cold reinstall: %v", err)
+	}
+	if err := admin.Close(); err != nil {
+		t.Fatalf("close administrator connection before worker detachment: %v", err)
+	}
+	if err := harness.RestartPostgres(ctx); err != nil {
+		t.Fatalf("restart isolated PostgreSQL without worker: %v", err)
+	}
+	admin = openIssue49Admin(t, ctx, harness)
+	// The runtime binding proves that the harness worker owns this slot.
+	if _, err := admin.ExecContext(ctx, `
+		SELECT pg_catalog.pg_drop_replication_slot(runtime.active_slot_name)
+		FROM synchro.sync_runtime_state runtime
+		WHERE runtime.singleton AND runtime.active_slot_name = $1`, slot); err != nil {
+		t.Fatalf("drop owned prior slot: %v", err)
+	}
+	tx, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin cold reinstall: %v", err)
+	}
+	defer tx.Rollback()
+	publication := pgx.Identifier{harness.Names().Publication}.Sanitize()
+	if _, err := tx.ExecContext(ctx,
+		"DROP PUBLICATION "+publication+"; DROP EXTENSION synchro_pg CASCADE; CREATE EXTENSION synchro_pg; CREATE PUBLICATION "+publication,
+	); err != nil {
+		t.Fatalf("replace extension and publication atomically: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit cold reinstall: %v", err)
+	}
+	if err := harness.RestoreDiagnosticRegistrations(ctx); err != nil {
+		t.Fatalf("register relations before slot creation: %v", err)
+	}
+
+	// Another consumer owns this slot. Its retained position must survive worker startup.
+	type slotState struct {
+		plugin, database, restartLSN, confirmedLSN string
+		active, temporary                          bool
+	}
+	readSlot := func() (slotState, bool) {
+		var state slotState
+		err := admin.QueryRowContext(ctx, `
+			SELECT plugin, database, restart_lsn::text, confirmed_flush_lsn::text, active, temporary
+			FROM pg_catalog.pg_replication_slots WHERE slot_name = $1`, slot,
+		).Scan(&state.plugin, &state.database, &state.restartLSN, &state.confirmedLSN, &state.active, &state.temporary)
+		if errors.Is(err, sql.ErrNoRows) {
+			return slotState{}, false
+		}
+		if err != nil {
+			t.Fatalf("observe configured slot: %v", err)
+		}
+		return state, true
+	}
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_create_logical_replication_slot($1, 'pgoutput')", slot); err != nil {
+		t.Fatalf("create unrelated consumer slot: %v", err)
+	}
+	created, _ := readSlot()
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_logical_emit_message(true, 'unrelated_consumer', 'progress')"); err != nil {
+		t.Fatalf("write unrelated consumer progress: %v", err)
+	}
+	var advancedLSN string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT end_lsn::text FROM pg_catalog.pg_replication_slot_advance($1, pg_catalog.pg_current_wal_lsn())", slot,
+	).Scan(&advancedLSN); err != nil {
+		t.Fatalf("advance unrelated consumer slot: %v", err)
+	}
+	foreign, present := readSlot()
+	if !present || foreign.confirmedLSN != advancedLSN || foreign.confirmedLSN == created.confirmedLSN ||
+		foreign.plugin != "pgoutput" || foreign.active || foreign.temporary {
+		t.Fatalf("unrelated consumer slot setup is invalid: present=%t created=%#v state=%#v advanced=%s", present, created, foreign, advancedLSN)
+	}
+
+	if _, err := admin.ExecContext(ctx, "ALTER SYSTEM SET synchro.auto_start = 'on'"); err != nil {
+		t.Fatalf("enable worker: %v", err)
+	}
+	if err := admin.Close(); err != nil {
+		t.Fatalf("close administrator connection before worker startup: %v", err)
+	}
+	if err := harness.RestartPostgres(ctx); err != nil {
+		t.Fatalf("restart isolated PostgreSQL with worker: %v", err)
+	}
+	admin = openIssue49Admin(t, ctx, harness)
+
+	// A worker exhausts its 30-second preparation budget before PostgreSQL restarts it.
+	// A second worker process proves that one complete startup attempt refused the slot.
+	workerPIDs := map[int]bool{}
+	deadline := time.Now().Add(120 * time.Second)
+	for len(workerPIDs) < 2 && time.Now().Before(deadline) {
+		rows, err := admin.QueryContext(ctx, `
+			SELECT pid FROM pg_catalog.pg_stat_activity
+			WHERE datname = current_database() AND backend_type = 'synchro WAL consumer'`)
+		if err != nil {
+			t.Fatalf("observe worker processes: %v", err)
+		}
+		for rows.Next() {
+			var pid int
+			if err := rows.Scan(&pid); err != nil {
+				t.Fatalf("scan worker process: %v", err)
+			}
+			if pid != priorPID {
+				workerPIDs[pid] = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("read worker processes: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var unbound bool
+	if err := admin.QueryRowContext(ctx, `
+		SELECT runtime.active_slot_name IS NULL AND progress.generation_start_lsn IS NULL
+		FROM synchro.sync_runtime_state runtime
+		JOIN synchro.sync_wal_progress progress ON progress.singleton
+		WHERE runtime.singleton`).Scan(&unbound); err != nil {
+		t.Fatalf("observe worker binding: %v", err)
+	}
+	retained, present := readSlot()
+	t.Run("assertion", func(t *testing.T) {
+		if !present || retained != foreign {
+			t.Fatalf("worker startup changed the unrelated consumer slot: present=%t before=%#v after=%#v", present, foreign, retained)
+		}
+		if !unbound {
+			t.Fatal("worker bound a slot that it does not own")
+		}
+		if len(workerPIDs) < 2 {
+			t.Fatalf("worker did not complete one refused startup attempt: processes=%d", len(workerPIDs))
+		}
+	})
+
+	// Explicit operator removal is the recovery path. The worker then creates and binds a fresh slot.
+	if _, err := admin.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slot); err != nil {
+		t.Fatalf("drop unrelated consumer slot as the operator: %v", err)
+	}
+	recovered := waitForReinstalledWorker(t, ctx, harness, blackbox.ExtensionReinstallResult{PriorWorkerPID: priorPID, ReinstallLSN: advancedLSN}, 1)
+	if recovered.PendingRegistryGenerationCount != 0 {
+		t.Fatalf("worker did not activate registrations after operator recovery: %#v", recovered)
+	}
+}
+
+// A fixture in the same database, such as the client integration schema, can
+// register tables that the diagnostic registry does not restore. Readiness
+// requires publication members to equal the active registry, so the scenario
+// reset must remove them. Every native scenario runner starts from this reset
+// on an attached database, so the reset must also leave no connected client,
+// no source row, and no captured row of an earlier scenario, and the worker
+// must capture a new write.
+func TestRealScenarioResetLeavesPublicationEqualToRestoredRegistry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, token := provisionRealProofHarness(t, ctx)
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open administrator connection: %v", err)
+	}
+	defer database.Close()
+	publication := pgx.Identifier{harness.Names().Publication}.Sanitize()
+	if _, err := database.ExecContext(ctx, "CREATE TABLE public.reset_foreign_fixture (id text PRIMARY KEY)"); err != nil {
+		t.Fatalf("create foreign fixture table: %v", err)
+	}
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, err := database.ExecContext(cleanupContext, "DROP TABLE IF EXISTS public.reset_foreign_fixture"); err != nil {
+			t.Errorf("drop foreign fixture table: %v", err)
+		}
+	}()
+	if _, err := database.ExecContext(ctx, "ALTER PUBLICATION "+publication+" ADD TABLE public.reset_foreign_fixture"); err != nil {
+		t.Fatalf("publish foreign fixture table: %v", err)
+	}
+	const retainedClientID = "reset-retained-client"
+	retainedID := "00000000-0000-4000-8c08-000000000001"
+	connectRealProtocolClient(t, ctx, harness, token, retainedClientID)
+	if err := harness.Source().ExecContext(ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'before-scenario-reset')", retainedID); err != nil {
+		t.Fatalf("insert source row before the reset: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", retainedID)
+
+	if err := harness.ResetScenarioServer(ctx); err != nil {
+		t.Fatalf("reset scenario server: %v", err)
+	}
+	var clients, sourceRows, capturedRows int
+	if err := database.QueryRowContext(ctx, `
+		SELECT (SELECT count(*) FROM synchro.sync_clients WHERE client_id = $1),
+		       (SELECT count(*) FROM public.cf_items WHERE id::text = $2::text),
+		       (SELECT count(*) FROM synchro.sync_captured_rows WHERE record_id = $2::text)`,
+		retainedClientID, retainedID).Scan(&clients, &sourceRows, &capturedRows); err != nil {
+		t.Fatalf("read state retained across the reset: %v", err)
+	}
+	if clients != 0 || sourceRows != 0 || capturedRows != 0 {
+		t.Fatalf("scenario reset retained earlier state: clients=%d source rows=%d captured rows=%d", clients, sourceRows, capturedRows)
+	}
+	freshID := "00000000-0000-4000-8c08-000000000002"
+	if err := harness.Source().ExecContext(ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'after-scenario-reset')", freshID); err != nil {
+		t.Fatalf("insert source row after the reset: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_items", freshID)
+	var unregistered, unpublished []string
+	for _, check := range []struct {
+		target *[]string
+		query  string
+	}{
+		{&unregistered, `
+			SELECT member.prrelid::regclass::text
+			FROM pg_catalog.pg_publication_rel member
+			JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+			WHERE publication.pubname = $1
+			EXCEPT
+			SELECT registry.physical_relation_oid::regclass::text
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation
+			JOIN synchro.sync_runtime_state runtime ON runtime.singleton AND runtime.stream_generation = generation.stream_generation
+			WHERE generation.state = 'active' AND generation.validated`},
+		{&unpublished, `
+			SELECT registry.physical_relation_oid::regclass::text
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation ON generation.generation = registry.registry_generation
+			JOIN synchro.sync_runtime_state runtime ON runtime.singleton AND runtime.stream_generation = generation.stream_generation
+			WHERE generation.state = 'active' AND generation.validated
+			EXCEPT
+			SELECT member.prrelid::regclass::text
+			FROM pg_catalog.pg_publication_rel member
+			JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+			WHERE publication.pubname = $1`},
+	} {
+		rows, err := database.QueryContext(ctx, check.query, harness.Names().Publication)
+		if err != nil {
+			t.Fatalf("compare publication with registry: %v", err)
+		}
+		for rows.Next() {
+			var relation string
+			if err := rows.Scan(&relation); err != nil {
+				t.Fatalf("read publication comparison: %v", err)
+			}
+			*check.target = append(*check.target, relation)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			t.Fatalf("read publication comparison: %v", err)
+		}
+	}
+	var published int
+	if err := database.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM pg_catalog.pg_publication_rel member
+		JOIN pg_catalog.pg_publication publication ON publication.oid = member.prpubid
+		WHERE publication.pubname = $1`, harness.Names().Publication).Scan(&published); err != nil || published == 0 {
+		t.Fatalf("restored publication has %d members: %v", published, err)
+	}
+	if len(unregistered) != 0 || len(unpublished) != 0 {
+		t.Fatalf("publication differs from the restored registry: published without registration %v, registered without publication %v", unregistered, unpublished)
+	}
 }

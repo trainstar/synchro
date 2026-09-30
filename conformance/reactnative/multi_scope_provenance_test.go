@@ -152,6 +152,50 @@ func TestMultiScopeProvenanceNoProgressBindsRenewedCursorsToTheServer(t *testing
 	}
 }
 
+func TestMultiScopeProvenanceContentsResolveRecordsByIdentityWhenAliasesReverseOrder(t *testing.T) {
+	expected := scenarios.ClientDurabilityFact{Provenance: []scenarios.ProvenanceFact{
+		{TableID: "items", CanonicalWireJSON: `"row-a"`, Scopes: []string{"scope-a", "scope-b"}},
+		{TableID: "items", CanonicalWireJSON: `"row-b"`, Scopes: []string{"scope-a"}},
+	}}
+	// Each runtime identity sorts in the reverse order of its authored identity.
+	records := map[string]multiScopeProvenanceRecord{
+		`"row-a"`: {tableName: "cf_items", recordID: "z-record", row: map[string]json.RawMessage{"id": json.RawMessage(`"z-record"`), "value": json.RawMessage(`"a"`)}},
+		`"row-b"`: {tableName: "cf_items", recordID: "a-record", row: map[string]json.RawMessage{"id": json.RawMessage(`"a-record"`), "value": json.RawMessage(`"b"`)}},
+	}
+	scopes := map[string]string{"scope-a": "z-scope", "scope-b": "a-scope"}
+	state := inspectedClientState{ScopeStates: []clientScopeState{{ScopeID: "z-scope", Generation: 1}, {ScopeID: "a-scope", Generation: 2}}}
+	capture := finalCapture{
+		Rows: json.RawMessage(`[{"id":"a-record","value":"b","owner":"user-a"},{"id":"z-record","value":"a","owner":"user-a"}]`),
+		Provenance: json.RawMessage(`[
+			{"scopeID":"z-scope","tableName":"cf_items","recordID":"a-record","checksum":"c","generation":1},
+			{"scopeID":"a-scope","tableName":"cf_items","recordID":"z-record","checksum":"c","generation":2},
+			{"scopeID":"z-scope","tableName":"cf_items","recordID":"z-record","checksum":"c","generation":1}
+		]`),
+	}
+	if err := validateMultiScopeProvenanceContents(expected, capture, state, records, scopes); err != nil {
+		t.Fatalf("provenance with order-reversing aliases was rejected: %v", err)
+	}
+	// Each record now belongs to the scopes of the other record.
+	capture.Provenance = json.RawMessage(`[
+		{"scopeID":"z-scope","tableName":"cf_items","recordID":"z-record","checksum":"c","generation":1},
+		{"scopeID":"a-scope","tableName":"cf_items","recordID":"a-record","checksum":"c","generation":2},
+		{"scopeID":"z-scope","tableName":"cf_items","recordID":"a-record","checksum":"c","generation":1}
+	]`)
+	if err := validateMultiScopeProvenanceContents(expected, capture, state, records, scopes); err == nil {
+		t.Fatal("provenance swapped between record identities was accepted")
+	}
+}
+
+func TestMultiScopeProvenanceRecordBindingKeepsJSONType(t *testing.T) {
+	resolution := blackbox.NativeIdentityResolution{AuthoredValue: json.RawMessage(`"42"`), RuntimeValue: json.RawMessage(`"7"`)}
+	if !resolutionAuthoredCanonicalMatches(resolution, `"42"`) {
+		t.Fatal("string record identity did not bind")
+	}
+	if resolutionAuthoredCanonicalMatches(resolution, `42`) {
+		t.Fatal("numeric authored key bound through a string alias")
+	}
+}
+
 func multiScopeProvenanceNoProgressTrace(t *testing.T, cursor string) json.RawMessage {
 	t.Helper()
 	complete := true

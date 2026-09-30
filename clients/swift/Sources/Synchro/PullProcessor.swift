@@ -515,7 +515,10 @@ final class PullProcessor: @unchecked Sendable {
 
             var upsertStatements: [String: Statement] = [:]
             for pageRecord in pageRecords {
-                let protected = protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
+                // Protection keeps an existing local row. A protected record without
+                // a local row, such as one a reset could not keep, gets the server row.
+                let protected = try protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
+                    && Self.hasLocalRow(db, schema: pageRecord.schema, recordID: pageRecord.recordID)
                 if !protected {
                     let statement: Statement
                     if let existing = upsertStatements[pageRecord.schema.tableName] {
@@ -1387,39 +1390,41 @@ final class PullProcessor: @unchecked Sendable {
         return value
     }
 
+    /// Selects each record ID of one table whose application row holds
+    /// unresolved local intent. A rebuild or reset must keep that row.
+    /// Arguments: the table name twice.
+    static let protectedRecordIDsSQL = """
+        SELECT record_id
+        FROM _synchro_pending_changes
+        WHERE table_name = ?
+          AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+        UNION
+        SELECT record_id
+        FROM _synchro_rejected_mutations
+        WHERE table_name = ?
+          AND status = 'rejected_terminal'
+          AND server_row_json IS NULL
+          AND server_version IS NULL
+        """
+
+    private static func hasLocalRow(_ db: GRDB.Database, schema: LocalSchemaTable, recordID: String) throws -> Bool {
+        let pkCol = schema.primaryKey.first ?? "id"
+        return try Row.fetchOne(
+            db,
+            sql: "SELECT 1 FROM \(SQLiteHelpers.quoteIdentifier(schema.tableName)) WHERE \(SQLiteHelpers.quoteIdentifier(pkCol)) = ? LIMIT 1",
+            arguments: [recordID]
+        ) != nil
+    }
+
     private static func isProtectedApplicationRow(
         db: GRDB.Database,
         tableName: String,
         recordID: String
     ) throws -> Bool {
-        if try Row.fetchOne(
+        try Row.fetchOne(
             db,
-            sql: """
-                SELECT 1
-                FROM _synchro_pending_changes
-                WHERE table_name = ?
-                  AND record_id = ?
-                  AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-                LIMIT 1
-                """,
-            arguments: [tableName, recordID]
-        ) != nil {
-            return true
-        }
-
-        return try Row.fetchOne(
-            db,
-            sql: """
-                SELECT 1
-                FROM _synchro_rejected_mutations
-                WHERE table_name = ?
-                  AND record_id = ?
-                  AND status = 'rejected_terminal'
-                  AND server_row_json IS NULL
-                  AND server_version IS NULL
-                LIMIT 1
-                """,
-            arguments: [tableName, recordID]
+            sql: "SELECT 1 FROM (\(protectedRecordIDsSQL)) WHERE record_id = ? LIMIT 1",
+            arguments: [tableName, tableName, recordID]
         ) != nil
     }
 

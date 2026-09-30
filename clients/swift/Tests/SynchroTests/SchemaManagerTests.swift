@@ -14,12 +14,11 @@ final class SchemaManagerTests: XCTestCase {
 
     private func makeColumn(
         name: String,
-        dbType: String = "text",
         logicalType: String = "string",
         nullable: Bool = true,
         isPrimaryKey: Bool = false
     ) -> SchemaColumn {
-        SchemaColumn(name: name, dbType: dbType, logicalType: logicalType, nullable: nullable, isPrimaryKey: isPrimaryKey)
+        SchemaColumn(name: name, logicalType: logicalType, nullable: nullable, isPrimaryKey: isPrimaryKey)
     }
 
     private func makeTable(
@@ -28,7 +27,6 @@ final class SchemaManagerTests: XCTestCase {
     ) -> SchemaTable {
         SchemaTable(
             tableName: name,
-            pushPolicy: "owner_only",
             updatedAtColumn: "updated_at",
             deletedAtColumn: "deleted_at",
             primaryKey: ["id"],
@@ -70,12 +68,12 @@ final class SchemaManagerTests: XCTestCase {
 
     private var standardColumns: [SchemaColumn] {
         [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
             // A synced table with no writable column accepts no insert, so the
             // fixture carries one authored column like every real registration.
-            makeColumn(name: "title", dbType: "text", logicalType: "string", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "title", logicalType: "string", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
     }
 
@@ -91,15 +89,14 @@ final class SchemaManagerTests: XCTestCase {
             tables: [
                 SchemaTable(
                     tableName: "orders",
-                    pushPolicy: "owner_only",
                     updatedAtColumn: "updated_at",
                     deletedAtColumn: "deleted_at",
                     primaryKey: ["id"],
                     columns: [
-                        SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-                        SchemaColumn(name: "ship_address", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
-                        SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+                        SchemaColumn(name: "ship_address", logicalType: "string", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
                     ]
                 )
             ]
@@ -218,14 +215,13 @@ final class SchemaManagerTests: XCTestCase {
             tables: [
                 SchemaTable(
                     tableName: "orders",
-                    pushPolicy: "owner_only",
                     updatedAtColumn: "updated_at",
                     deletedAtColumn: "deleted_at",
                     primaryKey: ["id"],
                     columns: [
-                        SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-                        SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+                        SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
                     ]
                 )
             ]
@@ -239,15 +235,14 @@ final class SchemaManagerTests: XCTestCase {
             tables: [
                 SchemaTable(
                     tableName: "orders",
-                    pushPolicy: "owner_only",
                     updatedAtColumn: "updated_at",
                     deletedAtColumn: "deleted_at",
                     primaryKey: ["id"],
                     columns: [
-                        SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-                        SchemaColumn(name: "description", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
-                        SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+                        SchemaColumn(name: "description", logicalType: "string", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
                     ]
                 )
             ]
@@ -271,15 +266,14 @@ final class SchemaManagerTests: XCTestCase {
             tables: [
                 SchemaTable(
                     tableName: "orders",
-                    pushPolicy: "owner_only",
                     updatedAtColumn: "updated_at",
                     deletedAtColumn: "deleted_at",
                     primaryKey: ["id"],
                     columns: [
-                        SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-                        SchemaColumn(name: "ship_address", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
-                        SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+                        SchemaColumn(name: "ship_address", logicalType: "string", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
                     ]
                 )
             ]
@@ -408,7 +402,7 @@ final class SchemaManagerTests: XCTestCase {
         // Migrate to v2 that adds a "description" column
         var v2Columns = standardColumns
         v2Columns.insert(
-            makeColumn(name: "description", dbType: "text", logicalType: "string", nullable: true),
+            makeColumn(name: "description", logicalType: "string", nullable: true),
             at: 1
         )
         let v2 = makeSchema(version: 2, hash: "v2", tables: [
@@ -469,11 +463,11 @@ final class SchemaManagerTests: XCTestCase {
 
         // Migrate to v2 that adds a second table "items"
         let itemColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "order_id", dbType: "uuid", logicalType: "string", nullable: false),
-            makeColumn(name: "quantity", dbType: "integer", logicalType: "int", nullable: false),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "order_id", logicalType: "string", nullable: false),
+            makeColumn(name: "quantity", logicalType: "int", nullable: false),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let v2 = makeSchema(version: 2, hash: "v2", tables: [
             makeTable(name: "orders", columns: standardColumns),
@@ -510,10 +504,10 @@ final class SchemaManagerTests: XCTestCase {
 
         // Create v1 with columns [id, description, updated_at, deleted_at]
         let v1Columns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "description", dbType: "text", logicalType: "string", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "description", logicalType: "string", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let v1 = makeSchema(version: 1, hash: "v1", tables: [
             makeTable(name: "orders", columns: v1Columns),
@@ -549,10 +543,10 @@ final class SchemaManagerTests: XCTestCase {
 
         // Create v1 with two tables: orders and items
         let itemColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "order_id", dbType: "uuid", logicalType: "string", nullable: false),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "order_id", logicalType: "string", nullable: false),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let v1 = makeSchema(version: 1, hash: "v1", tables: [
             makeTable(name: "orders", columns: standardColumns),
@@ -611,10 +605,10 @@ final class SchemaManagerTests: XCTestCase {
 
         // Server schema includes the "description" column the seed is missing
         let serverColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "description", dbType: "text", logicalType: "string", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "description", logicalType: "string", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let schema = makeSchema(version: 1, hash: "v1", tables: [
             makeTable(name: "orders", columns: serverColumns),
@@ -643,16 +637,16 @@ final class SchemaManagerTests: XCTestCase {
         let manager = SchemaManager(database: db)
 
         let orderColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "title", dbType: "text", logicalType: "string", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "title", logicalType: "string", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let itemColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "score", dbType: "text", logicalType: "string", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "score", logicalType: "string", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let v1 = makeSchema(version: 1, hash: "v1", tables: [
             makeTable(name: "orders", columns: orderColumns),
@@ -743,14 +737,14 @@ final class SchemaManagerTests: XCTestCase {
 
         var additiveOrderColumns = orderColumns
         additiveOrderColumns.insert(
-            makeColumn(name: "server_note", dbType: "text", logicalType: "string", nullable: true),
+            makeColumn(name: "server_note", logicalType: "string", nullable: true),
             at: 2
         )
         let incompatibleItemColumns: [SchemaColumn] = [
-            makeColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-            makeColumn(name: "score", dbType: "integer", logicalType: "int", nullable: true),
-            makeColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false),
-            makeColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true),
+            makeColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+            makeColumn(name: "score", logicalType: "int", nullable: true),
+            makeColumn(name: "updated_at", logicalType: "datetime", nullable: false),
+            makeColumn(name: "deleted_at", logicalType: "datetime", nullable: true),
         ]
         let v2 = makeSchema(version: 2, hash: "v2", tables: [
             makeTable(name: "orders", columns: additiveOrderColumns),
@@ -1360,6 +1354,63 @@ final class SchemaManagerTests: XCTestCase {
             pendingBefore
         )
         XCTAssertNil(try recoveredManager.activeMigration())
+    }
+
+    func testSchemaResetKeepsOnlyProtectedRowsThatTheTightenedTargetCanHold() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("synchro_reset_tightened_\(UUID().uuidString).sqlite")
+        var sourceManifest = protocolOrdersSchemaManifest(includeNotes: true)
+        sourceManifest.schemaHash = try Integrity.schemaManifestHash(sourceManifest)
+        var targetManifest = protocolOrdersSchemaManifest(
+            includeNotes: true,
+            schemaVersion: 2,
+            parentSchema: SchemaRef(version: 1, hash: sourceManifest.schemaHash),
+            transitionClass: "class_4",
+            compatibilityFloor: 2
+        )
+        let notes = try XCTUnwrap(targetManifest.tables[0].fields.firstIndex { $0.fieldID == "field-notes" })
+        targetManifest.tables[0].fields[notes].nullable = false
+        targetManifest.schemaHash = try Integrity.schemaManifestHash(targetManifest)
+
+        let database = try SynchroDatabase(path: path)
+        defer { try? database.close() }
+        let manager = SchemaManager(database: database)
+        try manager.createSyncedTables(schema: SchemaResponse(
+            schemaVersion: sourceManifest.schemaVersion,
+            schemaHash: sourceManifest.schemaHash,
+            serverTime: Date(),
+            manifest: sourceManifest
+        ))
+        _ = try database.execute(
+            """
+            INSERT INTO orders (id, ship_address, user_id, updated_at, notes) VALUES
+                ('fits', 'kept address', 'u1', '2026-01-01T00:00:00.000000Z', 'kept note'),
+                ('null-note', 'local address', 'u1', '2026-01-01T00:00:00.000000Z', NULL)
+            """,
+            params: nil
+        )
+        let pendingBefore = try ChangeTracker(database: database).inspectPendingMutations()
+        XCTAssertEqual(Set(pendingBefore.map(\.recordID)), ["fits", "null-note"])
+
+        _ = try manager.prepareMigration(
+            targetManifest: targetManifest,
+            action: .replace,
+            affectedScopes: [],
+            scopeCursorUpdates: [:],
+            schemaReset: true
+        )
+        let applied = try database.writeSyncLockedTransaction { connection in
+            try manager.applyPreparedMigrationInTransaction(connection)
+        }
+
+        XCTAssertEqual(applied.phase, .applied)
+        let rows = try database.query("SELECT id, ship_address, notes FROM orders ORDER BY id", params: nil)
+        XCTAssertEqual(rows.map { $0["id"] as String? }, ["fits"])
+        XCTAssertEqual(rows.first?["ship_address"] as String?, "kept address")
+        XCTAssertEqual(rows.first?["notes"] as String?, "kept note")
+        // The NULL note cannot exist in the target shape. Its row waits for the
+        // rebuild to install the server row, and its intent stays inspectable.
+        XCTAssertEqual(try ChangeTracker(database: database).inspectPendingMutations(), pendingBefore)
     }
 
     func testAppliedMigrationAbruptReopenDoesNotRepeatDDLOrScopeInvalidation() throws {

@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,10 +24,13 @@ import (
 	"github.com/trainstar/synchro/api/go/internal/testsupport"
 )
 
+// manifestMutationConnector wraps the real pgx connector. It can change the
+// portable manifest, run a hook before that query, and record Exec statements.
 type manifestMutationConnector struct {
 	connector driver.Connector
 	mutate    func([]byte) ([]byte, error)
 	before    func(context.Context) error
+	events    *[]string
 }
 
 func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -33,7 +38,7 @@ func (c *manifestMutationConnector) Connect(ctx context.Context) (driver.Conn, e
 	if err != nil {
 		return nil, err
 	}
-	return &manifestMutationConn{Conn: conn, mutate: c.mutate, before: c.before}, nil
+	return &manifestMutationConn{Conn: conn, mutate: c.mutate, before: c.before, events: c.events}, nil
 }
 
 func (c *manifestMutationConnector) Driver() driver.Driver {
@@ -44,6 +49,20 @@ type manifestMutationConn struct {
 	driver.Conn
 	mutate func([]byte) ([]byte, error)
 	before func(context.Context) error
+	events *[]string
+}
+
+// ResetSession and IsValid keep pgx's own dirty-connection discard in effect.
+func (c *manifestMutationConn) ResetSession(ctx context.Context) error {
+	if resetter, ok := c.Conn.(driver.SessionResetter); ok {
+		return resetter.ResetSession(ctx)
+	}
+	return nil
+}
+
+func (c *manifestMutationConn) IsValid() bool {
+	validator, ok := c.Conn.(driver.Validator)
+	return !ok || validator.IsValid()
 }
 
 func (c *manifestMutationConn) QueryContext(
@@ -73,6 +92,9 @@ func (c *manifestMutationConn) ExecContext(
 	query string,
 	args []driver.NamedValue,
 ) (driver.Result, error) {
+	if c.events != nil {
+		*c.events = append(*c.events, query)
+	}
 	execer, ok := c.Conn.(driver.ExecerContext)
 	if !ok {
 		return nil, driver.ErrSkip
@@ -92,41 +114,6 @@ type manifestMutationRows struct {
 	driver.Rows
 	mutate func([]byte) ([]byte, error)
 	done   bool
-}
-
-type transactionRecordingConnector struct {
-	connector driver.Connector
-	events    *[]string
-}
-
-func (c *transactionRecordingConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	conn, err := c.connector.Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &transactionRecordingConn{Conn: conn, events: c.events}, nil
-}
-
-func (c *transactionRecordingConnector) Driver() driver.Driver {
-	return c.connector.Driver()
-}
-
-type transactionRecordingConn struct {
-	driver.Conn
-	events *[]string
-}
-
-func (c *transactionRecordingConn) ExecContext(
-	ctx context.Context,
-	query string,
-	args []driver.NamedValue,
-) (driver.Result, error) {
-	*c.events = append(*c.events, query)
-	execer, ok := c.Conn.(driver.ExecerContext)
-	if !ok {
-		return nil, driver.ErrSkip
-	}
-	return execer.ExecContext(ctx, query, args)
 }
 
 func (r *manifestMutationRows) Next(values []driver.Value) error {
@@ -164,6 +151,13 @@ func manifestMutatingPostgres(
 	mutate func([]byte) ([]byte, error),
 ) *sql.DB {
 	t.Helper()
+	return openManifestMutationPostgres(t, &manifestMutationConnector{mutate: mutate}, "")
+}
+
+// openManifestMutationPostgres binds connector to the test database. A
+// nonempty applicationName identifies its sessions in pg_stat_activity.
+func openManifestMutationPostgres(t *testing.T, connector *manifestMutationConnector, applicationName string) *sql.DB {
+	t.Helper()
 	testPostgres(t)
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
@@ -173,10 +167,11 @@ func manifestMutatingPostgres(
 	if err != nil {
 		t.Fatalf("parsing postgres database URL: %v", err)
 	}
-	db := sql.OpenDB(&manifestMutationConnector{
-		connector: pgxstdlib.GetConnector(*config),
-		mutate:    mutate,
-	})
+	if applicationName != "" {
+		config.RuntimeParams["application_name"] = applicationName
+	}
+	connector.connector = pgxstdlib.GetConnector(*config)
+	db := sql.OpenDB(connector)
 	t.Cleanup(func() { _ = db.Close() })
 	if err := db.PingContext(context.Background()); err != nil {
 		t.Fatalf("pinging manifest-mutating postgres database: %v", err)
@@ -207,6 +202,11 @@ func registerSeedTestTable(t *testing.T, db *sql.DB, tableName string) (string, 
 }
 
 func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID string) (string, string) {
+	return registerSeedTestTableWithColumns(t, db, tableName, scopeID, "")
+}
+
+// registerSeedTestTableWithColumns adds extraColumns to the fixed table. Each column definition ends with a comma.
+func registerSeedTestTableWithColumns(t *testing.T, db *sql.DB, tableName, scopeID, extraColumns string) (string, string) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -219,10 +219,11 @@ func registerSeedTestTableForScope(t *testing.T, db *sql.DB, tableName, scopeID 
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			title TEXT NOT NULL,
+			%s
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			deleted_at TIMESTAMPTZ
 		)
-	`, quotePGIdent(actualTableName))
+	`, quotePGIdent(actualTableName), extraColumns)
 	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		t.Fatalf("creating test table: %v", err)
 	}
@@ -563,11 +564,13 @@ func TestCDCTriggerSQLSupportsTablesWithoutDeletedAt(t *testing.T) {
 		t.Fatalf("delete trigger should increment local_revision for an existing pending row: %q", statements[5])
 	}
 	for _, statement := range statements {
-		assertSQLite392CompatibleSQL(t, statement)
+		assertNoKnownPostSQLite392Syntax(t, statement)
 	}
 }
 
-func TestEmittedSQLiteSchemaUsesSQLite392Syntax(t *testing.T) {
+// TestEmittedSQLiteSchemaAvoidsKnownPostSQLite392Syntax is a source guard.
+// It rejects known later syntax but cannot prove SQLite 3.9.2 compatibility.
+func TestEmittedSQLiteSchemaAvoidsKnownPostSQLite392Syntax(t *testing.T) {
 	ctx := context.Background()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -617,14 +620,14 @@ func TestEmittedSQLiteSchemaUsesSQLite392Syntax(t *testing.T) {
 		if err := rows.Scan(&statement); err != nil {
 			t.Fatalf("scan emitted sqlite schema: %v", err)
 		}
-		assertSQLite392CompatibleSQL(t, statement)
+		assertNoKnownPostSQLite392Syntax(t, statement)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate emitted sqlite schema: %v", err)
 	}
 }
 
-func assertSQLite392CompatibleSQL(t *testing.T, statement string) {
+func assertNoKnownPostSQLite392Syntax(t *testing.T, statement string) {
 	t.Helper()
 	upper := strings.ToUpper(statement)
 	unsupported := []string{
@@ -878,42 +881,6 @@ func TestPublishRechecksDestinationSidecars(t *testing.T) {
 	}
 }
 
-func TestVerificationFailureRollsBackExportTransaction(t *testing.T) {
-	testPostgres(t)
-	dbURL := os.Getenv("TEST_DATABASE_URL")
-	if dbURL == "" {
-		t.Fatal("TEST_DATABASE_URL is required")
-	}
-	config, err := pgx.ParseConfig(dbURL)
-	if err != nil {
-		t.Fatalf("parsing postgres database URL: %v", err)
-	}
-	events := []string{}
-	db := sql.OpenDB(&transactionRecordingConnector{
-		connector: pgxstdlib.GetConnector(*config),
-		events:    &events,
-	})
-	t.Cleanup(func() { _ = db.Close() })
-
-	ctx := context.Background()
-	pgTx, err := beginPGReadTransaction(ctx, db)
-	if err != nil {
-		t.Fatalf("begin export transaction: %v", err)
-	}
-	badArtifact := filepath.Join(t.TempDir(), "invalid.db")
-	if err := os.WriteFile(badArtifact, []byte("not sqlite"), 0o600); err != nil {
-		t.Fatalf("write invalid sqlite artifact: %v", err)
-	}
-	if err := verifySQLiteOutput(ctx, badArtifact, manifestEnvelope{}, nil, portableSeedManifest{}, seedSnapshotComplete); err == nil {
-		t.Fatal("accepted an invalid finalized sqlite artifact")
-	}
-	pgTx.Close(ctx)
-
-	if len(events) != 2 || events[0] != "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE" || events[1] != "ROLLBACK" {
-		t.Fatalf("export transaction events = %v, want BEGIN followed by ROLLBACK", events)
-	}
-}
-
 func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	db := testPostgres(t)
 	tableName, scopeID := registerSeedTestTable(t, db, "test_seed_portable")
@@ -1061,6 +1028,87 @@ func TestGenerateHydratesPortableRowsAndScopeState(t *testing.T) {
 	}
 	if diff := cmp.Diff(clientCompatibleMigrationIdentifiers, identifiers); diff != "" {
 		t.Fatalf("unexpected grdb migration identifiers (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateExtractsSharedFloatWireValues(t *testing.T) {
+	data, err := os.ReadFile("../../../conformance/protocol/float-wire-boundaries-v1.json")
+	if err != nil {
+		t.Fatalf("reading shared float wire cases: %v", err)
+	}
+	var document struct {
+		Version int `json:"version"`
+		Cases   []struct {
+			Source    string `json:"source"`
+			Canonical string `json:"canonical"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil || document.Version != 1 || len(document.Cases) == 0 {
+		t.Fatalf("decoding shared float wire cases: version=%d cases=%d err=%v", document.Version, len(document.Cases), err)
+	}
+
+	db := testPostgres(t)
+	tableName, scopeID := registerSeedTestTableWithColumns(t, db, "test_seed_float_wire", "seed-float-wire", "measure DOUBLE PRECISION NOT NULL,")
+	registerSharedScope(t, db, scopeID, true)
+	ctx := context.Background()
+	for index, testCase := range document.Cases {
+		source, err := strconv.ParseFloat(testCase.Source, 64)
+		if err != nil {
+			t.Fatalf("parsing float wire source %q: %v", testCase.Source, err)
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			fmt.Sprintf("INSERT INTO %s (id, user_id, title, measure) VALUES ($1, 'user-1', 'float row', $2)", quotePGIdent(tableName)),
+			fmt.Sprintf("float-wire-%d", index),
+			source,
+		); err != nil {
+			t.Fatalf("inserting float wire row %d: %v", index, err)
+		}
+	}
+	for index := range document.Cases {
+		if !waitForPortableEdge(ctx, db, tableName, fmt.Sprintf("float-wire-%d", index), scopeID) {
+			t.Fatalf("float wire row %d did not become WAL-materialized", index)
+		}
+	}
+
+	// Generate verifies each extracted row digest and the scope digest before publication.
+	outputPath := filepath.Join(t.TempDir(), "float-wire-seed.db")
+	if err := Generate(ctx, db, GenerateOptions{OutputPath: outputPath}); err != nil {
+		t.Fatalf("generating float wire seed: %v", err)
+	}
+	sqliteDB, err := sql.Open("sqlite", outputPath)
+	if err != nil {
+		t.Fatalf("opening float wire seed: %v", err)
+	}
+	defer sqliteDB.Close()
+	for index, testCase := range document.Cases {
+		want, err := strconv.ParseFloat(testCase.Canonical, 64)
+		if err != nil {
+			t.Fatalf("parsing canonical float wire text %q: %v", testCase.Canonical, err)
+		}
+		var measure float64
+		var storage string
+		if err := sqliteDB.QueryRow(
+			fmt.Sprintf("SELECT measure, typeof(measure) FROM %s WHERE id = ?", quoteIdentifier(tableName)),
+			fmt.Sprintf("float-wire-%d", index),
+		).Scan(&measure, &storage); err != nil {
+			t.Fatalf("reading seeded float wire row %d: %v", index, err)
+		}
+		if math.Float64bits(measure) != math.Float64bits(want) || storage != "real" {
+			t.Fatalf("seeded float wire row %d = %v (%016x, %s), want %s (%016x, real)",
+				index, measure, math.Float64bits(measure), storage, testCase.Canonical, math.Float64bits(want))
+		}
+	}
+	var scopeRows int
+	if err := sqliteDB.QueryRow(
+		"SELECT count(*) FROM _synchro_scope_rows WHERE scope_id = ? AND table_name = ?",
+		scopeID,
+		tableName,
+	).Scan(&scopeRows); err != nil {
+		t.Fatalf("reading seeded float wire scope rows: %v", err)
+	}
+	if scopeRows != len(document.Cases) {
+		t.Fatalf("seeded float wire scope rows = %d, want %d", scopeRows, len(document.Cases))
 	}
 }
 
@@ -1263,7 +1311,9 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			corruptingDB := manifestMutatingPostgres(t, func(raw []byte) ([]byte, error) {
+			events := []string{}
+			connector := &manifestMutationConnector{events: &events}
+			connector.mutate = func(raw []byte) ([]byte, error) {
 				var manifest portableSeedManifest
 				if err := decodeJSON(raw, &manifest); err != nil {
 					return nil, err
@@ -1294,7 +1344,9 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 					return nil, errors.New("seed token corruption changed data outside the MAC")
 				}
 				return json.Marshal(manifest)
-			})
+			}
+			corruptingDB := openManifestMutationPostgres(t, connector, "")
+			corruptingDB.SetMaxOpenConns(1)
 
 			directory := t.TempDir()
 			outputPath := filepath.Join(directory, "seed.db")
@@ -1331,7 +1383,89 @@ func TestGenerateRejectsMACOnlyPortableSeedTokenCorruption(t *testing.T) {
 					t.Fatalf("token verification failure retained temporary output %s", entry.Name())
 				}
 			}
+			requireRolledBackExport(t, events)
+			requireCleanExportConnection(t, corruptingDB)
 		})
+	}
+}
+
+// Canceling Generate after its export transaction starts must not publish
+// output or leave that read-only snapshot open on a pooled connection.
+func TestGenerateCancellationReleasesExportTransaction(t *testing.T) {
+	observer := testPostgres(t)
+	_, scopeID := registerSeedTestTableForScope(t, observer, "test_seed_cancellation", "seed-cancellation")
+	registerSharedScope(t, observer, scopeID, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := []string{}
+	applicationName := testsupport.UniqueName(t, "seed_cancel")
+	connector := &manifestMutationConnector{events: &events, before: func(context.Context) error {
+		cancel()
+		return nil
+	}}
+	exportDB := openManifestMutationPostgres(t, connector, applicationName)
+	exportDB.SetMaxOpenConns(1)
+
+	directory := t.TempDir()
+	outputPath := filepath.Join(directory, "seed.db")
+	if err := os.WriteFile(outputPath, []byte("existing destination"), 0o600); err != nil {
+		t.Fatalf("writing existing destination: %v", err)
+	}
+	// The driver can report the canceled query as a bad connection, so the
+	// test requires failure after an observed cancellation, not one error value.
+	if err := Generate(ctx, exportDB, GenerateOptions{OutputPath: outputPath, Overwrite: true}); err == nil || ctx.Err() == nil {
+		t.Fatalf("Generate after cancellation returned %v with context error %v", err, ctx.Err())
+	}
+	if len(events) == 0 || events[0] != "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE" || slices.Contains(events, "COMMIT") {
+		t.Fatalf("canceled export transaction events = %v, want BEGIN and no COMMIT", events)
+	}
+	// A closed backend leaves pg_stat_activity asynchronously, so poll briefly.
+	openTransactions := -1
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if err := observer.QueryRowContext(context.Background(),
+			"SELECT count(*) FROM pg_stat_activity WHERE application_name = $1 AND xact_start IS NOT NULL",
+			applicationName,
+		).Scan(&openTransactions); err != nil {
+			t.Fatalf("observe canceled export sessions: %v", err)
+		}
+		if openTransactions == 0 {
+			break
+		}
+	}
+	if openTransactions != 0 {
+		t.Fatalf("canceled Generate left %d export transactions open", openTransactions)
+	}
+	requireCleanExportConnection(t, exportDB)
+	if got, readErr := os.ReadFile(outputPath); readErr != nil || string(got) != "existing destination" {
+		t.Fatalf("canceled Generate changed the destination: %q, %v", got, readErr)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("canceled Generate left output directory entries %v, %v", entries, err)
+	}
+}
+
+func requireRolledBackExport(t *testing.T, events []string) {
+	t.Helper()
+	if len(events) != 2 || events[0] != "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE" || events[1] != "ROLLBACK" {
+		t.Fatalf("export transaction events = %v, want BEGIN followed by ROLLBACK", events)
+	}
+}
+
+// requireCleanExportConnection checks the next pooled session of a one-connection
+// pool. It must run outside the failed read-only export transaction.
+func requireCleanExportConnection(t *testing.T, db *sql.DB) {
+	t.Helper()
+	// A connection that Generate never released would block this checkout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var readOnly string
+	if err := db.QueryRowContext(ctx, "SELECT current_setting('transaction_read_only')").Scan(&readOnly); err != nil {
+		t.Fatalf("reuse export connection: %v", err)
+	}
+	if readOnly != "off" {
+		t.Fatalf("reused export connection transaction_read_only = %q, want off", readOnly)
 	}
 }
 

@@ -1879,7 +1879,18 @@ fn registration_rejects_owner_without_projection_source_access() {
 
 #[pg_test]
 fn membership_test_schema_enforces_production_validation() {
-    for case in ["valid", "unparsed", "search_path", "live_table", "undeclared_field"] {
+    // Registration rejects each dependency that the catalog shows. It cannot see
+    // what a catalog function reads, so it accepts a session setting that the
+    // contract forbids. That acceptance does not make the function supported.
+    for case in [
+        "valid",
+        "unparsed",
+        "search_path",
+        "live_table",
+        "undeclared_field",
+        "application_function",
+        "session_setting",
+    ] {
         let fixture = registration_fixture(true, "enabled", true);
         let table = &fixture.table;
         let function = &fixture.function;
@@ -1917,6 +1928,28 @@ fn membership_test_schema_enforces_production_validation() {
                      WHERE record_id = p_key::text;
                  END"
             ),
+            "application_function" => {
+                Spi::run(&format!(
+                    "CREATE FUNCTION tests.{function}_scope() RETURNS text
+                     LANGUAGE SQL IMMUTABLE RETURN 'registration'"
+                ))
+                .expect("create application scope function");
+                format!(
+                    "SET search_path = pg_catalog, synchro
+                     BEGIN ATOMIC
+                         SELECT tests.{function}_scope() FROM synchro_projection.{table}
+                         WHERE record_id = p_key::text;
+                     END"
+                )
+            }
+            "session_setting" => format!(
+                "SET search_path = pg_catalog, synchro
+                 BEGIN ATOMIC
+                     SELECT pg_catalog.current_setting('synchro_test.scope', true)
+                     FROM synchro_projection.{table}
+                     WHERE record_id = p_key::text;
+                 END"
+            ),
             "valid" => format!(
                 "SET search_path = pg_catalog, synchro
                  BEGIN ATOMIC
@@ -1937,7 +1970,7 @@ fn membership_test_schema_enforces_production_validation() {
                  'id', 'updated_at', 'deleted_at', 'enabled', ARRAY['private_note']
              )"
         );
-        if case == "valid" {
+        if matches!(case, "valid" | "session_setting") {
             Spi::run(&format!("SELECT {registration}"))
                 .expect("register production-valid test membership");
             assert_eq!(fixture_registry_count(&fixture), 1);
@@ -1964,6 +1997,7 @@ fn membership_test_schema_enforces_production_validation() {
         }
         Spi::run(&format!(
             "DROP FUNCTION tests.{function}(UUID);
+             DROP FUNCTION IF EXISTS tests.{function}_scope();
              DROP TABLE public.{table}"
         ))
         .expect("remove membership validation fixture");

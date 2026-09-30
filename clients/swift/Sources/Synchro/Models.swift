@@ -214,7 +214,8 @@ public enum LocalMutationStatus: String, Codable, Sendable, Equatable {
     case pending
     case sealed
     case serverRejected = "server_rejected"
-    /// The mutation has more authored columns or normalized octets than the server accepts.
+    /// The mutation has more authored columns or normalized octets than the server accepts,
+    /// or an empty request with the reserved envelope cannot hold it.
     /// The client did not send it and does not retry it.
     case exceedsPushLimit = "exceeds_push_limit"
     case supersededBeforeSend = "superseded_before_send"
@@ -345,6 +346,34 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
         self.rebuildAttemptCount = rebuildAttemptCount
         self.rebuildReceiptCount = rebuildReceiptCount
         self.provenanceMaintenanceWorkCursor = provenanceMaintenanceWorkCursor
+    }
+}
+
+/// Durable client facts that one read-only database snapshot produced.
+///
+/// `retainedMutations` is present only when `capture.mutationLedgerCount`
+/// is at most the record limit. `rejectedMutations` is present only when
+/// `capture.rejectedMutationCount` is at most the record limit.
+@_spi(Inspection)
+public struct ClientStateSnapshotInspection: Sendable, Equatable {
+    public let capture: ClientStateCaptureInspection
+    public let pendingChangeCount: Int
+    public let retainedMutations: [RetainedMutationInspection]?
+    public let rejectedMutations: [RetainedRejectionInspection]?
+    public let blockingFailure: SyncFailure?
+
+    public init(
+        capture: ClientStateCaptureInspection,
+        pendingChangeCount: Int,
+        retainedMutations: [RetainedMutationInspection]?,
+        rejectedMutations: [RetainedRejectionInspection]?,
+        blockingFailure: SyncFailure?
+    ) {
+        self.capture = capture
+        self.pendingChangeCount = pendingChangeCount
+        self.retainedMutations = retainedMutations
+        self.rejectedMutations = rejectedMutations
+        self.blockingFailure = blockingFailure
     }
 }
 
@@ -501,6 +530,98 @@ public struct PendingMutationInspection: Sendable, Equatable {
     }
 }
 
+/// A retained mutation that the pre-ledger queue imported.
+///
+/// The old queue did not store a table ID, primary-key binding, authored
+/// schema, or authored field values. This record has only the stored fields.
+public struct LegacyMutationInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let localOrder: Int64
+    public let tableName: String
+    public let recordID: String
+    public let operation: Operation
+    public let baseVersion: String?
+    public let clientVersion: String
+    public let status: LocalMutationStatus
+    public let sourceKind: String
+
+    public init(
+        mutationID: String,
+        localOrder: Int64,
+        tableName: String,
+        recordID: String,
+        operation: Operation,
+        baseVersion: String?,
+        clientVersion: String,
+        status: LocalMutationStatus,
+        sourceKind: String
+    ) {
+        self.mutationID = mutationID
+        self.localOrder = localOrder
+        self.tableName = tableName
+        self.recordID = recordID
+        self.operation = operation
+        self.baseVersion = baseVersion
+        self.clientVersion = clientVersion
+        self.status = status
+        self.sourceKind = sourceKind
+    }
+}
+
+/// One retained local mutation in its stored representation.
+public enum RetainedMutationInspection: Sendable, Equatable {
+    case current(PendingMutationInspection)
+    case legacy(LegacyMutationInspection)
+
+    public var mutationID: String {
+        switch self {
+        case .current(let mutation): return mutation.mutationID
+        case .legacy(let mutation): return mutation.mutationID
+        }
+    }
+
+    public var localOrder: Int64 {
+        switch self {
+        case .current(let mutation): return mutation.localOrder
+        case .legacy(let mutation): return mutation.localOrder
+        }
+    }
+
+    public var tableName: String {
+        switch self {
+        case .current(let mutation): return mutation.tableName
+        case .legacy(let mutation): return mutation.tableName
+        }
+    }
+
+    public var recordID: String {
+        switch self {
+        case .current(let mutation): return mutation.recordID
+        case .legacy(let mutation): return mutation.recordID
+        }
+    }
+
+    public var operation: Operation {
+        switch self {
+        case .current(let mutation): return mutation.operation
+        case .legacy(let mutation): return mutation.operation
+        }
+    }
+
+    public var status: LocalMutationStatus {
+        switch self {
+        case .current(let mutation): return mutation.status
+        case .legacy(let mutation): return mutation.status
+        }
+    }
+
+    /// The current record, or nil for a legacy import.
+    public var current: PendingMutationInspection? {
+        guard case .current(let mutation) = self else { return nil }
+        return mutation
+    }
+}
+
 public struct RejectedMutationInspection: Sendable, Equatable {
     public let mutationID: String
     public let localOrder: Int64
@@ -550,6 +671,94 @@ public struct RejectedMutationInspection: Sendable, Equatable {
         self.rejection = rejection
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// A retained rejection that a database from before the mutation ledger stored.
+///
+/// The old rejection table did not store the exact mutation or rejection JSON,
+/// and the mutation has no ledger row. This record has only the stored fields.
+public struct LegacyRejectionInspection: Sendable, Equatable {
+    public let mutationID: String
+    public let tableName: String
+    public let recordID: String
+    public let status: MutationStatus
+    public let code: MutationRejectionCode
+    public let message: String?
+    public let serverRowJSON: String?
+    public let serverVersion: String?
+    public let createdAt: String
+    public let updatedAt: String
+
+    public init(
+        mutationID: String,
+        tableName: String,
+        recordID: String,
+        status: MutationStatus,
+        code: MutationRejectionCode,
+        message: String?,
+        serverRowJSON: String?,
+        serverVersion: String?,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.mutationID = mutationID
+        self.tableName = tableName
+        self.recordID = recordID
+        self.status = status
+        self.code = code
+        self.message = message
+        self.serverRowJSON = serverRowJSON
+        self.serverVersion = serverVersion
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// One retained rejection in its stored representation.
+public enum RetainedRejectionInspection: Sendable, Equatable {
+    case current(RejectedMutationInspection)
+    case legacy(LegacyRejectionInspection)
+
+    public var mutationID: String {
+        switch self {
+        case .current(let rejection): return rejection.mutationID
+        case .legacy(let rejection): return rejection.mutationID
+        }
+    }
+
+    public var tableName: String {
+        switch self {
+        case .current(let rejection): return rejection.tableName
+        case .legacy(let rejection): return rejection.tableName
+        }
+    }
+
+    public var recordID: String {
+        switch self {
+        case .current(let rejection): return rejection.recordID
+        case .legacy(let rejection): return rejection.recordID
+        }
+    }
+
+    public var status: MutationStatus {
+        switch self {
+        case .current(let rejection): return rejection.status
+        case .legacy(let rejection): return rejection.status
+        }
+    }
+
+    public var code: MutationRejectionCode {
+        switch self {
+        case .current(let rejection): return rejection.code
+        case .legacy(let rejection): return rejection.code
+        }
+    }
+
+    /// The current record, or nil for a legacy rejection.
+    public var current: RejectedMutationInspection? {
+        guard case .current(let rejection) = self else { return nil }
+        return rejection
     }
 }
 

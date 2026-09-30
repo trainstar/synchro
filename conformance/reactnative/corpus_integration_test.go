@@ -4,7 +4,6 @@ package reactnative
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -22,26 +21,11 @@ func TestRealReactNativeCorpusAndroid(t *testing.T) {
 
 func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 	t.Helper()
-	// Each runner needs the initial state of a fresh cluster. An attached
-	// database is reset before each runner, so the cluster must outlive each one.
-	attached := os.Getenv("SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL") != ""
-	var environment blackbox.EnvironmentConfig
-	if attached {
-		var err error
-		environment, err = blackbox.LoadLocalEnvironment()
-		if err != nil {
-			t.Fatalf("load React Native attached environment: %v", err)
-		}
-		if environment.AttachDestroyOnClose {
-			t.Fatal("React Native corpus requires SYNCHRO_CONFORMANCE_ATTACH_DESTROY_ON_CLOSE=false")
-		}
-	}
 	runners := map[string]func(*testing.T, string){
 		warmConnectScenarioID:          runRealReactNativeWarmConnect,
 		steadyPullScenarioID:           runRealReactNativeSteadyPull,
 		pendingCycleScenarioID:         runRealReactNativePendingCycle,
 		queueReplayScenarioID:          runRealReactNativeQueueReplay,
-		rebuildApplyScenarioID:         runRealReactNativeRebuildApply,
 		rebuildCardinalityScenarioID:   runRealReactNativeRebuildCardinality,
 		rebuildRequestsScenarioID:      runRealReactNativeRebuildRequests,
 		seededEmptyStartupScenarioID:   runRealReactNativeSeededEmptyStartup,
@@ -62,16 +46,51 @@ func runRealReactNativeCorpus(t *testing.T, platform, cell string) {
 		t.Fatal(err)
 	}
 	for _, id := range selected {
-		t.Run(id, func(t *testing.T) {
-			if attached {
-				resetContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				err := blackbox.ResetAttachedDatabase(resetContext, environment)
-				cancel()
-				if err != nil {
-					t.Fatalf("reset attached database: %v", err)
-				}
-			}
-			runners[id](t, platform)
-		})
+		t.Run(id, func(t *testing.T) { runners[id](t, platform) })
 	}
+	// The authored dataset flow is not a scenario document. Its expectations
+	// are the hand-written dataset checkpoints.
+	t.Run("dataset", func(t *testing.T) { runRealReactNativeDataset(t, platform) })
+}
+
+// newReactNativeScenarioHarness provisions or attaches the configured server
+// and resets it to the authored fixture state, the same as the Swift and
+// Kotlin scenario fixtures.
+func newReactNativeScenarioHarness(t *testing.T, ctx context.Context) (*blackbox.Harness, *blackbox.NativeController) {
+	t.Helper()
+	environment, err := blackbox.LoadLocalEnvironment()
+	if err != nil {
+		t.Fatalf("load React Native conformance environment: %v", err)
+	}
+	provisionContext, cancelProvision := context.WithTimeout(ctx, 2*time.Minute)
+	harness, err := blackbox.Provision(provisionContext, blackbox.HarnessConfig{Environment: environment})
+	cancelProvision()
+	if err != nil {
+		t.Fatalf("provision React Native conformance harness: %v", err)
+	}
+	if deadline, ok := t.Deadline(); ok {
+		disarm := harness.CloseBeforeDeadline(deadline)
+		t.Cleanup(func() { disarm() })
+	}
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		_ = harness.Close(closeContext)
+		t.Fatalf("create React Native native controller: %v", err)
+	}
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := controller.Close(closeContext); err != nil {
+			t.Errorf("close React Native native controller: %v", err)
+		}
+	})
+	resetContext, cancelReset := context.WithTimeout(ctx, 5*time.Minute)
+	err = harness.ResetScenarioServer(resetContext)
+	cancelReset()
+	if err != nil {
+		t.Fatalf("reset React Native scenario server: %v", err)
+	}
+	return harness, controller
 }

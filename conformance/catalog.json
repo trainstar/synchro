@@ -64,7 +64,7 @@
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "241d07dcf3a642e99fa1d182d69e15ae0227ff18c7ccdc042298532589b5412a"
+      "sha256": "13286d2e55fcd66734e3f3cadacd4b81657963a304716a5ec9bef8b3bd52ee21"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
@@ -109,17 +109,17 @@
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "path": "conformance/scenarios/server/registry-reload-001.json",
-      "sha256": "6da5b2453c08f379a03e64d2481c63a4989b70473e995e94cec5f6919b653e92"
+      "sha256": "ac2769280844a5f981228cf316805ca3ad9219e868e7c35591e1bcff54406390"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "path": "conformance/scenarios/server/retention-reconnect-001.json",
-      "sha256": "3b086ee8a940e2c9686e15b890ae2124f3a932372507fd007f4706c1b7662aef"
+      "sha256": "079a2efc687bd125bfc57536577d677fcfbf9d8d52e1e8b9ad1f9a026889369d"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "f2fd13889261424688f3d562a8a3404cecbfc366639e4e456896380b8767c5f1"
+      "sha256": "1b9e1666ba3cad5d7859f2a50391fa0e354d5dc4831939effe3f840a7d7a5259"
     },
     {
       "scenario_id": "SCN-SCOPE-ASSIGNMENT-BOUND-001",
@@ -139,7 +139,7 @@
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "path": "conformance/scenarios/server/wal-decode-failure-001.json",
-      "sha256": "da92ccb393489a3645714ed6c7d1676910c4edec215b819fb1aea5f8cbe3047c"
+      "sha256": "104c9705717e951bf0d4bfdcc00ffa71036635cde7b231e7a032b18c50104c63"
     },
     {
       "scenario_id": "SCN-WAL-ORDER-001",
