@@ -165,7 +165,6 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealKeyOnlyInsertCompletesSync":                            "regression",
 	"TestRealKeyOnlyInsertOnPredecessorServer":                      "regression",
 	"TestRealWALRestoresSlotPositionAfterImmediateShutdown":         "regression",
-	"TestRealWALRestoresSlotPositionAfterBackendCrash":              "regression",
 	"TestRealWALObservationUsesOneSnapshot":                         "framework",
 	"TestRealWorkerStartupRetainsUnownedConfiguredSlot":             "regression",
 	"TestRealRegistrationsCommittedBeforeActivationActivateInOrder": "regression",
