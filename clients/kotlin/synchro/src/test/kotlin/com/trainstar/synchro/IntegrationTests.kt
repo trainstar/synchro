@@ -517,6 +517,92 @@ class IntegrationTests {
     }
 
     @Test
+    fun testPushBatchAtTheRequestLimitAcceptsResponseAboveIt() = runBlocking {
+        val userID = UUID.randomUUID().toString()
+        val clientA = SynchroClient(makeConfig(userID = userID), context)
+        val clientB = SynchroClient(makeConfig(userID = userID), context)
+        val probeID = UUID.randomUUID().toString()
+        val rowCount = 80
+
+        try {
+            clientA.start()
+            val database = database(clientA)
+            clientA.executeBatch(listOf(insertCustomer(userID, probeID, "")))
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientA)
+                ledgerState(database, probeID) == "accepted"
+            }
+            val probeRequest = sentRequests(database).single().second
+            val probe = PushLimits.mutation(pushJSON, probeRequest.mutations.single())
+            val reserve = PushLimits.reservedEnvelope(
+                pushJSON, probeRequest.clientID, probeRequest.batchID, probeRequest.schema.hash, atomic = false,
+            )
+            // Each row differs from the probe only by fixed-width identifiers and its ASCII
+            // name, so the names fill the batch to exactly the client request measure.
+            val nameOctets = PushLimits.MAX_REQUEST_OCTETS - (rowCount - 1) - maxOf(
+                reserve.body + rowCount * probe.body,
+                reserve.canonical + rowCount * probe.canonical,
+            ).toInt()
+            val names = (0 until rowCount).associate { index ->
+                val length = nameOctets / rowCount + if (index < nameOctets % rowCount) 1 else 0
+                UUID.randomUUID().toString() to "${'a' + index % 26}".repeat(length)
+            }
+
+            clientA.executeBatch(names.map { (id, name) -> insertCustomer(userID, id, name) })
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientA)
+                names.keys.all { ledgerState(database, it) == "accepted" }
+            }
+
+            val (body, request) = sentRequests(database).single { (_, sent) -> sent.batchID != probeRequest.batchID }
+            assertEquals(names.size, request.mutations.size)
+            val measured = request.mutations.fold(reserve) { size, mutation ->
+                size.adding(PushLimits.mutation(pushJSON, mutation))
+            }
+            assertEquals(PushLimits.MAX_REQUEST_OCTETS.toLong(), maxOf(measured.body, measured.canonical))
+            assertTrue(octets(body) <= PushLimits.MAX_REQUEST_OCTETS)
+            assertTrue(octets(Integrity.canonicalJSON(Json.parseToJsonElement(body))) <= PushLimits.MAX_REQUEST_OCTETS)
+            // The stored outcomes are exact slices of the push response, so their sum is a
+            // lower bound of the response octets.
+            val outcomeOctets = database.queryOne(
+                """
+                SELECT COUNT(*) AS outcomes, SUM(length(CAST(accepted_outcome_json AS BLOB))) AS octets
+                FROM _synchro_pending_changes WHERE sealed_batch_id = ?
+                """.trimIndent(),
+                arrayOf(request.batchID),
+            )!!
+            assertEquals(names.size.toLong(), outcomeOctets.getValue("outcomes"))
+            val responseLowerBound = outcomeOctets.getValue("octets") as Long
+            println("request octets = ${octets(body)}, accepted outcome octets = $responseLowerBound")
+            assertTrue(responseLowerBound > PushLimits.MAX_REQUEST_OCTETS)
+            assertEquals(
+                0L,
+                database.queryOne(
+                    "SELECT COUNT(*) AS open FROM _synchro_pending_changes WHERE lifecycle_state <> 'accepted'",
+                )!!.getValue("open"),
+            )
+            assertTrue(clientA.inspectRetainedMutations().isEmpty())
+            val expected = names + (probeID to "")
+            assertEquals(
+                expected,
+                clientA.query("SELECT id, name FROM customers").associate { it["id"] as String to it["name"] as String },
+            )
+
+            clientB.start()
+            waitForCondition(timeoutMs = 30_000) {
+                syncNowRetryingCapturePending(clientB)
+                clientB.query("SELECT id, name FROM customers")
+                    .associate { it["id"] as String to it["name"] as String } == expected
+            }
+        } finally {
+            clientA.stop()
+            clientA.close()
+            clientB.stop()
+            clientB.close()
+        }
+    }
+
+    @Test
     fun testNormalizedMutationLimitAtTheServer() = runBlocking {
         val userID = UUID.randomUUID().toString()
         val clientA = SynchroClient(makeConfig(userID = userID), context)
