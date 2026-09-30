@@ -558,7 +558,7 @@ Version `0.3.1`, the first published Protocol 3 release, is the first supported 
 - Scope verification is a standard ordered streaming hash. Implementations may index and cache inputs, but they cannot substitute a different wire aggregate for speed.
 - Strict terminal maps and transition validation turn malformed or incomplete responses into explicit failures before cursor advancement.
 - Database deployment requires fixed roles, explicit application-relation grants and RLS policy, generated revokes and grants, and non-superuser authorization tests.
-- Readiness can remain unready during worker startup, stale heartbeat, unknown lag, registry drift, or poison recovery. This is intentional fail-closed behavior.
+- Readiness can remain unready during worker startup, stale heartbeat, unknown lag, registry drift, or poison recovery. This is intentional fail-closed behavior. Normal write processing within the configured limits does not make readiness unready.
 - Deferrable serializable seed export can wait for a safe snapshot and holds one transaction for the export duration. Export limits and operational scheduling must account for that cost.
 - Portable seeds are independently verified caches. They become resumable only after authenticated assignment validation issues client-bound cursors.
 - Existing version 2 checksums, seed cursors, public-schema installs, stale SQL, and permissive SemVer or state behavior are not accepted by the version 3 release.

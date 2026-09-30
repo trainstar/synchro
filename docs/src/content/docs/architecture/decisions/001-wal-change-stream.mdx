@@ -214,6 +214,8 @@ A readiness result is ready only when all of the following are known and healthy
 - the worker heartbeat age is within a finite configured limit; and
 - capture lag is known and within a finite configured limit.
 
+The contiguous ordering uses this position order. Durable progress keeps `generation_start_lsn <= acknowledged_end_lsn <= processed_end_lsn` and `materialized_end_lsn <= processed_end_lsn`. A null acknowledgement is equal to `generation_start_lsn`. Readiness requires the slot `confirmed_flush_lsn` to be at or after the acknowledgement and at or before the current WAL position. At the start of each loop, the worker requires the slot to equal the durable acknowledgement. A mismatch blocks the worker before it reads WAL, and the readiness worker check fails. The worker heartbeat copy of the registry generation and materialized positions is at or before durable progress. Readiness does not require these positions to be equal. The heartbeat, WAL lag, and commit lag limits bound the capture work in progress.
+
 Synchro v0.3 supports one explicitly configured Synchro database per PostgreSQL cluster worker topology. A worker connected to another database is unready.
 
 Missing, stale, inconsistent, unbounded, or unavailable readiness data is unready. In particular, an omitted or infinite lag limit is unready.

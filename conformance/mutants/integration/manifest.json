@@ -92,6 +92,7 @@
     {"id":"push-unit-mutation-deferred-start","patch":"conformance/mutants/integration/push-unit-mutation-deferred-start.patch","requirement_id":"SYNC-ATOMICITY-003","control_id":"CTRL-ATOMICITY-003","test_target":"TestRealPushUnitConstraintBoundary","assertion_subtest":"assertion#02"},
     {"id":"push-unit-group-deferred-start","patch":"conformance/mutants/integration/push-unit-group-deferred-start.patch","requirement_id":"SYNC-ATOMICITY-003","control_id":"CTRL-ATOMICITY-003","test_target":"TestRealPushUnitConstraintBoundary","assertion_subtest":"assertion#03"},
     {"id":"push-unit-mutation-end-check","patch":"conformance/mutants/integration/push-unit-mutation-end-check.patch","requirement_id":"SYNC-ATOMICITY-003","control_id":"CTRL-ATOMICITY-003","test_target":"TestRealPushUnitConstraintBoundary","assertion_subtest":"assertion"},
-    {"id":"push-unit-group-end-check","patch":"conformance/mutants/integration/push-unit-group-end-check.patch","requirement_id":"SYNC-ATOMICITY-003","control_id":"CTRL-ATOMICITY-003","test_target":"TestRealPushUnitConstraintBoundary","assertion_subtest":"assertion#04"}
+    {"id":"push-unit-group-end-check","patch":"conformance/mutants/integration/push-unit-group-end-check.patch","requirement_id":"SYNC-ATOMICITY-003","control_id":"CTRL-ATOMICITY-003","test_target":"TestRealPushUnitConstraintBoundary","assertion_subtest":"assertion#04"},
+    {"id":"readiness-position-equality","patch":"conformance/mutants/integration/readiness-position-equality.patch","requirement_id":"SYNC-WAL-008","control_id":"CTRL-WAL-008","test_target":"TestRealReadinessStaysReadyUnderWriteLoad","assertion_subtest":"assertion"}
   ]
 }
