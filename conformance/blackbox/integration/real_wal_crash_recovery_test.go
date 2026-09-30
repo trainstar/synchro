@@ -124,12 +124,12 @@ func TestRealWALRestoresSlotPositionAfterImmediateShutdown(t *testing.T) {
 		t.Fatalf("restart PostgreSQL with the WAL worker: %v; %s", err, harness.FailureDiagnostics())
 	}
 	admin = openIssue49Admin(t, ctx, harness)
-	waitForRealWALReadiness(t, ctx, harness, admin)
-	waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), true)
 	waitForRealWALIdleCondition(t, 30*time.Second, "slot was not restored to the durable acknowledgement", func() (bool, any) {
 		sample := loadRealWALIdleSample(t, ctx, admin)
 		return sample.aligned() && realWALLSNAtOrAfter(sample.acknowledged.String, durable), sample
 	})
+	waitForRealWALReadiness(t, ctx, harness, admin)
+	waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), true)
 	requireRealWALIdleNoActivePoison(t, ctx, admin)
 
 	secondID := "00000000-0000-4000-8186-000000000002"
