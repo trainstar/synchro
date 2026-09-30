@@ -3,8 +3,10 @@ package kotlin
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 
+	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
@@ -110,5 +112,52 @@ func TestMultiScopeProvenanceNoProgressIncludesApplicationRows(t *testing.T) {
 	after := scenarios.StateFacts{Clients: []scenarios.ClientDurabilityFact{{UserID: "user-a", ClientID: "client-a", RowCount: &afterCount}}}
 	if err := validateMultiScopeProvenanceNoProgress(plan, before, after); err == nil {
 		t.Fatal("post-restart application row change was accepted")
+	}
+}
+
+func TestMultiScopeProvenancePairsRecordsByIdentityWhenAliasesReverseOrder(t *testing.T) {
+	resolution := func(authored, runtime string) blackbox.NativeIdentityResolution {
+		return blackbox.NativeIdentityResolution{AuthoredValue: json.RawMessage(strconv.Quote(authored)), RuntimeValue: json.RawMessage(strconv.Quote(runtime))}
+	}
+	// Each runtime value sorts in the reverse order of its authored value.
+	resolutions := map[string]blackbox.NativeIdentityResolution{
+		"row-a-key": resolution("row-a", "z-record"), "row-b-key": resolution("row-b", "a-record"),
+		"scope-a": resolution("scope-a", "z-scope"), "scope-b": resolution("scope-b", "a-scope"),
+		"row-a-version": resolution("v-a", "z-version"), "row-b-version": resolution("v-b", "a-version"),
+	}
+	tableNames := map[string]string{"items": "cf_items"}
+	expected := []scenarios.ProvenanceFact{
+		{TableID: "items", CanonicalWireJSON: `"row-a"`, Scopes: []string{"scope-a", "scope-b"}, Version: "v-a"},
+		{TableID: "items", CanonicalWireJSON: `"row-b"`, Scopes: []string{"scope-a"}, Version: "v-b"},
+	}
+	observed := []scenarios.ProvenanceFact{
+		{TableID: "cf_items", CanonicalWireJSON: `"a-record"`, Scopes: []string{"z-scope"}, Version: "a-version"},
+		{TableID: "cf_items", CanonicalWireJSON: `"z-record"`, Scopes: []string{"a-scope", "z-scope"}, Version: "z-version"},
+	}
+	if err := validateMultiScopeProvenanceProvenance(expected, observed, resolutions, tableNames); err != nil {
+		t.Fatalf("provenance with order-reversing aliases was rejected: %v", err)
+	}
+	// Each record now carries the scopes and version of the other record.
+	swapped := []scenarios.ProvenanceFact{
+		{TableID: "cf_items", CanonicalWireJSON: `"a-record"`, Scopes: []string{"a-scope", "z-scope"}, Version: "z-version"},
+		{TableID: "cf_items", CanonicalWireJSON: `"z-record"`, Scopes: []string{"z-scope"}, Version: "a-version"},
+	}
+	if err := validateMultiScopeProvenanceProvenance(expected, swapped, resolutions, tableNames); err == nil {
+		t.Fatal("provenance swapped between record identities was accepted")
+	}
+}
+
+func TestMultiScopeProvenanceRecordIdentityKeepsJSONType(t *testing.T) {
+	resolutions := map[string]blackbox.NativeIdentityResolution{
+		"row-key": {AuthoredValue: json.RawMessage(`"42"`), RuntimeValue: json.RawMessage(`"7"`)},
+	}
+	if !multiScopeProvenanceCanonicalIdentityMatches(resolutions, `"42"`, `"7"`) {
+		t.Fatal("string record identity did not resolve")
+	}
+	if multiScopeProvenanceCanonicalIdentityMatches(resolutions, `42`, `"7"`) {
+		t.Fatal("numeric authored key resolved through a string alias")
+	}
+	if multiScopeProvenanceCanonicalIdentityMatches(resolutions, `"42"`, `7`) {
+		t.Fatal("numeric observed key resolved through a string alias")
 	}
 }

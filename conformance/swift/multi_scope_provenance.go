@@ -1262,26 +1262,32 @@ func validateMultiScopeProvenanceProvenance(expected, actual []scenarios.Provena
 	if len(expected) != len(actual) {
 		return errors.New("provenance count differs")
 	}
-	expected = append([]scenarios.ProvenanceFact(nil), expected...)
-	actual = append([]scenarios.ProvenanceFact(nil), actual...)
-	sort.Slice(expected, func(left, right int) bool {
-		return expected[left].CanonicalWireJSON < expected[right].CanonicalWireJSON
-	})
-	sort.Slice(actual, func(left, right int) bool {
-		return actual[left].CanonicalWireJSON < actual[right].CanonicalWireJSON
-	})
-	for index := range expected {
-		want := expected[index]
+	// Runtime record identities can sort in another order than the authored ones, so each
+	// authored record pairs with the observed record its alias resolves to.
+	claimed := make([]bool, len(actual))
+	for _, want := range expected {
+		index := -1
+		for candidate, got := range actual {
+			if !claimed[candidate] && multiScopeProvenanceCanonicalIdentityMatches(resolutions, want.CanonicalWireJSON, got.CanonicalWireJSON) {
+				index = candidate
+				break
+			}
+		}
+		if index < 0 {
+			observed := make([]string, 0, len(actual))
+			for _, got := range actual {
+				observed = append(observed, got.CanonicalWireJSON)
+			}
+			return fmt.Errorf("authored record %s resolves to no observed record in %v", want.CanonicalWireJSON, observed)
+		}
+		claimed[index] = true
 		got := actual[index]
 		// Every provenance field is an authored identity. The record, the
 		// scopes, and the row version are corpus values the client never
 		// stores, so each resolves through the aliases the scenario declares.
-		unresolved := make([]string, 0, 4)
+		unresolved := make([]string, 0, 3)
 		if tableNames[want.TableID] != got.TableID {
 			unresolved = append(unresolved, "table")
-		}
-		if !multiScopeProvenanceCanonicalIdentityMatches(resolutions, want.CanonicalWireJSON, got.CanonicalWireJSON) {
-			unresolved = append(unresolved, "record")
 		}
 		if !multiScopeProvenanceScopesMatch(resolutions, want.Scopes, got.Scopes) {
 			unresolved = append(unresolved, "scopes")
@@ -1290,7 +1296,7 @@ func validateMultiScopeProvenanceProvenance(expected, actual []scenarios.Provena
 			unresolved = append(unresolved, "version")
 		}
 		if len(unresolved) != 0 {
-			// Name the field that differs. Four fields share this comparison and
+			// Name the field that differs. Three fields share this comparison and
 			// the identity resolution hides which one failed.
 			aliases := make([]string, 0, len(resolutions))
 			for alias := range resolutions {
