@@ -1196,10 +1196,12 @@ test-client-schema-identity: conformance-mod-download
 		rm -f clients/swift/.build/test-results/schema-identity-seed.db*; \
 		exit $$status
 
+# ADAPTER_TEST_URL and TEST_ENV carry credentials, so Make does not echo the test commands.
 _test-client-schema-identity:
 	rm -f clients/swift/.build/test-results/schema-identity-seed.db*
 	mkdir -p clients/swift/.build/test-results
-	cd conformance && SYNCHRO_DDL_IDENTITY_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+	@echo 'cd conformance && go run ./cmd/testresult exact -dir ../api/go -test TestCanonicalClientSeedMatchesSeedDBDDL'
+	@cd conformance && SYNCHRO_DDL_IDENTITY_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" TEST_DATABASE_URL="$(ADAPTER_TEST_URL)" GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
 		-dir ../api/go \
 		-test TestCanonicalClientSeedMatchesSeedDBDDL \
 		-expect target_pass \
@@ -1212,7 +1214,8 @@ _test-client-schema-identity:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	rm -rf clients/kotlin/synchro/build/test-results
-	cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:testDebugUnitTest --tests 'com.trainstar.synchro.SchemaIntegrationTests.testCanonicalGoSeedDDLConvergesWithFreshKotlinDDL'
+	@echo 'cd clients/kotlin && ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:testDebugUnitTest --tests SchemaIntegrationTests.testCanonicalGoSeedDDLConvergesWithFreshKotlinDDL'
+	@cd clients/kotlin && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" $(TEST_ENV) SYNCHRO_TEST_SEED_PATH="$(CURDIR)/clients/swift/.build/test-results/schema-identity-seed.db" ./gradlew $(GRADLE_TEST_ARGS) -PsynchroTestSuite=integration :synchro:testDebugUnitTest --tests 'com.trainstar.synchro.SchemaIntegrationTests.testCanonicalGoSeedDDLConvergesWithFreshKotlinDDL'
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/kotlin/synchro/build/test-results
 
 test-swift-warm-connect: conformance-mod-download build-swift-native-runner
@@ -1925,11 +1928,13 @@ test-rn-e2e-ios-run: test-rn-e2e-ios-smoke
 	@$(MAKE) --no-print-directory test-rn-scenarios-ios
 
 .PHONY: test-rn-e2e-ios-smoke
+# TEST_ENV carries the database URL and JWT secret, so Make does not echo the Detox command.
 test-rn-e2e-ios-smoke:
 	$(call declared_selection,DETOX_ARGS)
 	rm -f clients/react-native/example/artifacts/ios-test-results.json
 	mkdir -p clients/react-native/example/artifacts
-	cd clients/react-native/example && \
+	@echo 'cd clients/react-native/example && npx detox test --configuration ios.sim.debug $(DETOX_ARGS)'
+	@cd clients/react-native/example && \
 		$(TEST_ENV) npx detox test --configuration ios.sim.debug $(DETOX_ARGS) --json --outputFile artifacts/ios-test-results.json
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult jest -path ../clients/react-native/example/artifacts/ios-test-results.json
 
