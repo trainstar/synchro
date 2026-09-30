@@ -42,6 +42,28 @@ func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, e
 	return result, nil
 }
 
+// StartUpdateBaselineAdapter starts the adapter against the update baseline
+// extension, so that a client can create state before the update. The caller
+// stops it with StopUpdateBaselineAdapter before the update, as an operator
+// stops the host before the PostgreSQL restart.
+func (h *Harness) StartUpdateBaselineAdapter(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady || h.config.UpdateBaselineExtensionArtifact == "" ||
+		h.config.SkipAdapter || h.attached || h.extensionUpdated || h.adapter != nil || h.closeRequested() {
+		return errors.New("update baseline adapter is unavailable")
+	}
+	return h.startAdapter(ctx)
+}
+
+// StopUpdateBaselineAdapter stops the adapter that StartUpdateBaselineAdapter
+// started.
+func (h *Harness) StopUpdateBaselineAdapter(ctx context.Context) error {
+	if h == nil || ctx == nil || h.config.UpdateBaselineExtensionArtifact == "" ||
+		h.extensionUpdated || h.adapter == nil {
+		return errors.New("update baseline adapter stop is unavailable")
+	}
+	return h.stopAdapter(ctx)
+}
+
 // ApplyExtensionUpdate installs the environment bundle over the update
 // baseline bundle, restarts PostgreSQL, and runs the documented update
 // statement. It does not require capture readiness, so a caller can observe
