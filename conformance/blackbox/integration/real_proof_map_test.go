@@ -175,6 +175,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealWorkerIdleWritesFollowHeartbeatLimit":                  "regression",
 	"TestRealPushRowStateRereadYieldsToDirectWriter":                "regression",
 	"TestRealPushRowLockMatchesSourceStatement":                     "regression",
+	"TestRealPushResponseAboveRequestLimit":                         "regression",
 	"TestRealWALIdleAcknowledgementFollowsFlush":                    "regression",
 	"TestRealWALIdleAcknowledgementDoesNotSkipTransactions":         "regression",
 	"TestRealWALIdleAcknowledgementCrashRecovery":                   "regression",
