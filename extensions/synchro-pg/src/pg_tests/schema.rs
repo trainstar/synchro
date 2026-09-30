@@ -92,13 +92,23 @@
         .unwrap();
 
         dblink_exec(pull_name, "SET lock_timeout = '5s'");
+        // Parallel tests hold the WAL worker gate until they roll back. The
+        // backfill session takes the gate before the timeout starts, so only
+        // the progress lock wait remains inside the bounded wait.
+        dblink_exec(backfill_name, "BEGIN");
+        dblink_query(
+            backfill_name,
+            &format!(
+                "SELECT 'locked' FROM pg_catalog.pg_advisory_xact_lock({})",
+                crate::WAL_WORKER_GATE_LOCK_KEY
+            ),
+        );
         dblink_exec(backfill_name, "SET statement_timeout = '5s'");
         dblink_exec(pull_name, "BEGIN");
         dblink_exec(
             pull_name,
             "LOCK TABLE synchro.sync_wal_progress IN SHARE MODE",
         );
-        dblink_exec(backfill_name, "BEGIN");
         let backfill_pid: i32 = dblink_query(backfill_name, "SELECT pg_backend_pid()")
             .parse()
             .expect("parse backfill PID");
