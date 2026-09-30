@@ -1433,7 +1433,32 @@ fn evaluate_mutation(
         serde_json::Value::Object(serde_json::Map::new())
     };
     let row_identity = logical_row_identity(table_reg, &pk_value);
-    let existing = load_existing_record(client, &record_id, table_reg);
+    let existing = load_existing_record(
+        client,
+        &record_id,
+        table_reg,
+        match mutation.op {
+            Operation::Insert => SourceStatement::NoRowWrite,
+            Operation::Delete if !table_reg.has_deleted_at => SourceStatement::Delete,
+            Operation::Update | Operation::Delete => {
+                let mut assigned = if mutation.op == Operation::Update {
+                    dml_data
+                        .as_object()
+                        .unwrap_or_else(|| pgrx::error!("push update payload is not an object"))
+                        .keys()
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![table_reg.deleted_at_col.clone()]
+                };
+                if table_reg.has_updated_at {
+                    assigned.push(table_reg.updated_at_col.clone());
+                }
+                SourceStatement::Update(assigned)
+            }
+            Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
+        },
+    );
 
     if existing.as_ref().is_some_and(|row| row.deleted) {
         return conflict_evaluation(
@@ -1503,8 +1528,13 @@ fn evaluate_mutation(
                 DmlOutcome::NotApplied => {
                     // The insert found no conflicting row that the caller can see, so a BEFORE
                     // trigger or row security denied the write.
-                    let current = load_existing_record(client, &record_id, table_reg)
-                        .filter(|current| !current.hidden_by_row_security());
+                    let current = load_existing_record(
+                        client,
+                        &record_id,
+                        table_reg,
+                        SourceStatement::NoRowWrite,
+                    )
+                    .filter(|current| !current.hidden_by_row_security());
                     let Some(current) = current else {
                         return policy_evaluation(
                             mutation,
@@ -2205,7 +2235,7 @@ fn reread_group_conflict(
     context: &EvaluationContext<'_>,
 ) -> EvaluatedMutation {
     let (table_reg, record_id) = group_evaluation_record(client, failure, context);
-    let existing = load_existing_record(client, &record_id, table_reg);
+    let existing = load_existing_record(client, &record_id, table_reg, SourceStatement::NoRowWrite);
     if existing
         .as_ref()
         .is_some_and(RowState::hidden_by_row_security)
@@ -2431,24 +2461,76 @@ fn load_existing_record(
     client: &SpiClient<'_>,
     record_id: &str,
     table_reg: &TableRegistration,
+    statement: SourceStatement,
 ) -> Option<RowState> {
     let deleted_at_expr = if table_reg.has_deleted_at {
         format!("{}::text", pg_quote_ident(&table_reg.deleted_at_col))
     } else {
         "NULL::text".into()
     };
-    let sql = format!(
-        "SELECT {deleted_at} AS deleted_at, ({projection})::text AS data
-         FROM {table} t WHERE {pk} = $1::{pk_type} FOR UPDATE OF t",
-        deleted_at = deleted_at_expr,
-        projection = synced_row_projection_sql(table_reg, "t"),
+    let source_rows = format!(
+        "FROM {table} t WHERE {pk} = $1::{pk_type}",
         table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    let load_source = |sql: &str| {
+    let sql = format!(
+        "SELECT {deleted_at} AS deleted_at, ({projection})::text AS data
+         {source_rows}",
+        deleted_at = deleted_at_expr,
+        projection = synced_row_projection_sql(table_reg, "t"),
+    );
+    let registered = pg_sys::Oid::from(table_reg.physical_relation_oid);
+    if matches!(statement, SourceStatement::Update(_)) {
+        // SAFETY: LockRelationOid only takes a lock. The source DML takes the same lock later.
+        unsafe {
+            pg_sys::LockRelationOid(registered, pg_sys::RowExclusiveLock as pg_sys::LOCKMODE)
+        };
+    }
+    let row_lock = || match &statement {
+        SourceStatement::NoRowWrite => Some(SourceRowLock::NoKeyUpdate),
+        SourceStatement::Delete => Some(SourceRowLock::Update),
+        SourceStatement::Update(assigned) => {
+            // SAFETY: get_rel_relkind only reads the system cache.
+            let relkind = unsafe { pg_sys::get_rel_relkind(registered) } as u8;
+            let partition = if relkind == pg_sys::RELKIND_PARTITIONED_TABLE {
+                let partition = client
+                    .select(
+                        &format!("SELECT t.tableoid {source_rows}"),
+                        None,
+                        &[record_id.into()],
+                    )
+                    .unwrap_or_else(|_| {
+                        pgrx::error!("finding authoritative source partition failed")
+                    })
+                    .next()?
+                    .get_by_name::<pg_sys::Oid, &str>("tableoid")
+                    .unwrap_or_else(|_| {
+                        pgrx::error!("reading authoritative source partition failed")
+                    })
+                    .unwrap_or_else(|| pgrx::error!("authoritative source partition is missing"));
+                if !lock_partition_path(registered, partition) {
+                    return None;
+                }
+                partition
+            } else {
+                registered
+            };
+            // The first lock takes the mode that PostgreSQL takes for the same statement before
+            // its BEFORE row triggers. A weaker lock forces an upgrade in the statement. A
+            // stronger lock blocks the foreign key checks of child rows.
+            Some(update_row_lock(partition, assigned))
+        }
+    };
+    let load_source = |nowait: bool| {
+        let lock = row_lock()?;
+        let nowait = if nowait { " NOWAIT" } else { "" };
         client
-            .select(sql, None, &[record_id.into()])
+            .select(
+                &format!("{sql} {}{nowait}", lock.clause()),
+                None,
+                &[record_id.into()],
+            )
             .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
             .next()
             .map(|row| {
@@ -2473,7 +2555,7 @@ fn load_existing_record(
                 (deleted, data)
             })
     };
-    let mut source = load_source(&sql);
+    let mut source = load_source(false);
     let versions = client
         .select(
             "SELECT row_version::text AS row_version, deleted
@@ -2498,7 +2580,7 @@ fn load_existing_record(
         // row in its own transaction, so the locked version fixes the committed source state.
         // A writer locks the source row before the version row. NOWAIT fails this push with a
         // retryable lock error instead of a deadlock that can abort that writer.
-        source = load_source(&format!("{sql} NOWAIT"));
+        source = load_source(true);
     }
     match (source, version) {
         (None, None) => None,
@@ -2512,6 +2594,151 @@ fn load_existing_record(
             })
         }
     }
+}
+
+/// Row lock mode for the authoritative source row of one push operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRowLock {
+    /// Serializes writers of the row and permits foreign key checks of child rows.
+    NoKeyUpdate,
+    /// Serializes writers and foreign key checks. A delete or a key update needs it.
+    Update,
+}
+
+impl SourceRowLock {
+    fn clause(self) -> &'static str {
+        match self {
+            Self::NoKeyUpdate => "FOR NO KEY UPDATE OF t",
+            Self::Update => "FOR UPDATE OF t",
+        }
+    }
+}
+
+/// Source statement that follows the lock of the authoritative source row.
+enum SourceStatement {
+    /// An insert or a reread. It does not write the locked row.
+    NoRowWrite,
+    /// A hard delete.
+    Delete,
+    /// An update or a soft delete that assigns these physical columns.
+    Update(Vec<String>),
+}
+
+/// Returns the row lock mode that `ExecUpdateLockMode` computes for an `UPDATE` of `relation`
+/// that assigns the `assigned` columns. The caller must hold a lock on `relation`.
+pub(crate) fn update_row_lock(relation: pg_sys::Oid, assigned: &[String]) -> SourceRowLock {
+    if assigned.is_empty() {
+        pgrx::error!("push update assigns no source column");
+    }
+    // A new statement accepts invalidation messages when it first locks the relation. The push
+    // can hold that lock from an earlier mutation. So the push accepts them here, and the
+    // statement of this mutation uses the same relation cache entry.
+    // SAFETY: AcceptInvalidationMessages only makes the caches of this backend current.
+    unsafe { pg_sys::AcceptInvalidationMessages() };
+    // SAFETY: The caller holds a lock on the relation.
+    let rel = unsafe { pg_sys::relation_open(relation, pg_sys::NoLock as pg_sys::LOCKMODE) };
+    let mut memory = pgrx::PgMemoryContexts::new("synchro source row lock");
+    // SAFETY: The relation stays open until the closure returns. The closure returns no value
+    // that the memory context owns.
+    let lock = unsafe {
+        memory.switch_to(|_| {
+            let mut assigned_columns: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+            for name in assigned {
+                let name = std::ffi::CString::new(name.as_str())
+                    .unwrap_or_else(|_| pgrx::error!("push update column name is invalid"));
+                let attnum = pg_sys::get_attnum(relation, name.as_ptr());
+                if attnum <= 0 {
+                    pgrx::error!("push update column is not a source column");
+                }
+                assigned_columns = pg_sys::bms_add_member(
+                    assigned_columns,
+                    i32::from(attnum) - pg_sys::FirstLowInvalidHeapAttributeNumber,
+                );
+            }
+            // This is the rule of ExecInitGenerated for an UPDATE.
+            let mut generated_columns: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+            let constraints = (*(*rel).rd_att).constr;
+            if !constraints.is_null()
+                && ((*constraints).has_generated_stored || (*constraints).has_generated_virtual)
+            {
+                let before_row_trigger =
+                    !(*rel).trigdesc.is_null() && (*(*rel).trigdesc).trig_update_before_row;
+                let descriptor = pgrx::PgTupleDesc::from_pg_unchecked((*rel).rd_att);
+                for (index, attribute) in descriptor.iter().enumerate() {
+                    if attribute.attgenerated == 0 {
+                        continue;
+                    }
+                    let attnum = i32::try_from(index + 1)
+                        .unwrap_or_else(|_| pgrx::error!("source column number is invalid"));
+                    if !before_row_trigger {
+                        let expression = pg_sys::build_column_default(rel, attnum);
+                        if expression.is_null() {
+                            pgrx::error!("generated source column has no expression");
+                        }
+                        let mut referenced: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+                        pg_sys::pull_varattnos(expression, 1, &mut referenced);
+                        if !pg_sys::bms_overlap(assigned_columns, referenced) {
+                            continue;
+                        }
+                    }
+                    generated_columns = pg_sys::bms_add_member(
+                        generated_columns,
+                        attnum - pg_sys::FirstLowInvalidHeapAttributeNumber,
+                    );
+                }
+            }
+            let key_columns = pg_sys::RelationGetIndexAttrBitmap(
+                rel,
+                pg_sys::IndexAttrBitmapKind::INDEX_ATTR_BITMAP_KEY,
+            );
+            if pg_sys::bms_overlap(key_columns, assigned_columns)
+                || pg_sys::bms_overlap(key_columns, generated_columns)
+            {
+                SourceRowLock::Update
+            } else {
+                SourceRowLock::NoKeyUpdate
+            }
+        })
+    };
+    drop(memory);
+    // SAFETY: relation_open opened this relation.
+    unsafe { pg_sys::relation_close(rel, pg_sys::NoLock as pg_sys::LOCKMODE) };
+    lock
+}
+
+/// Locks each relation below `registered` down to `partition` in `ROW EXCLUSIVE` mode, in that
+/// order, as an `UPDATE` of `registered` does. Returns `false` and takes no lock when
+/// `registered` is not an ancestor of `partition`.
+pub(crate) fn lock_partition_path(registered: pg_sys::Oid, partition: pg_sys::Oid) -> bool {
+    let ancestors = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT ancestor.relid::pg_catalog.oid AS relid
+                 FROM pg_catalog.pg_partition_ancestors($1::pg_catalog.regclass)
+                      WITH ORDINALITY AS ancestor(relid, ordinal)
+                 ORDER BY ancestor.ordinal",
+                None,
+                &[partition.into()],
+            )
+            .unwrap_or_else(|_| pgrx::error!("reading source partition ancestors failed"))
+            .map(|row| {
+                row.get_by_name::<pg_sys::Oid, &str>("relid")
+                    .unwrap_or_else(|_| pgrx::error!("reading source partition ancestor failed"))
+                    .unwrap_or_else(|| pgrx::error!("source partition ancestor is missing"))
+            })
+            .collect::<Vec<_>>()
+    });
+    let Some(depth) = ancestors
+        .iter()
+        .position(|ancestor| *ancestor == registered)
+    else {
+        return false;
+    };
+    for relation in ancestors[..depth].iter().rev() {
+        // SAFETY: LockRelationOid only takes a lock.
+        unsafe { pg_sys::LockRelationOid(*relation, pg_sys::RowExclusiveLock as pg_sys::LOCKMODE) };
+    }
+    true
 }
 
 fn load_current_server_row_json(
