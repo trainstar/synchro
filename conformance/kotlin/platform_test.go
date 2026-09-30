@@ -452,23 +452,30 @@ func TestPlatformSealedRetryPushInjects429Then503AndRejectsChangedBytes(t *testi
 		}
 	})
 
-	t.Run("changed canonical bytes", func(t *testing.T) {
-		platform := &Platform{}
-		release, armed, err := platform.armSealedRetryPush(operation)
-		if err != nil || !armed {
-			t.Fatalf("arm sealed retry: %t, %v", armed, err)
-		}
-		defer release()
-		platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
-		changed := strings.Replace(requestBody, `"runtime-mutation"`, `"changed-mutation"`, 1)
-		response := httptest.NewRecorder()
-		if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
-			t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
-		}
-		if err := platform.validateSealedRetryPush(1); err == nil {
-			t.Fatal("changed sealed request bytes passed validation")
-		}
-	})
+	// A new batch of the same size is not a replay, whether it renews the
+	// mutation identities or reseals the same mutations under a new batch.
+	for name, replacement := range map[string][2]string{
+		"changed mutation identity": {`"runtime-mutation"`, `"changed-mutation"`},
+		"changed batch identity":    {`"runtime-batch"`, `"renewed-batch"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			platform := &Platform{}
+			release, armed, err := platform.armSealedRetryPush(operation)
+			if err != nil || !armed {
+				t.Fatalf("arm sealed retry: %t, %v", armed, err)
+			}
+			defer release()
+			platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
+			changed := strings.Replace(requestBody, replacement[0], replacement[1], 1)
+			response := httptest.NewRecorder()
+			if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
+				t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
+			}
+			if err := platform.validateSealedRetryPush(1); err == nil {
+				t.Fatal("changed sealed request bytes passed validation")
+			}
+		})
+	}
 }
 
 func TestPlatformRecordsProxiedRebuildContinuationFingerprint(t *testing.T) {
