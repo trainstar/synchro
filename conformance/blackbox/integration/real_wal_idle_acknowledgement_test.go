@@ -93,8 +93,11 @@ func TestRealWALIdleAcknowledgementFollowsFlush(t *testing.T) {
 	harness, token := provisionRealProofHarness(t, ctx)
 	admin := openIssue49Admin(t, ctx, harness)
 	var byteLagLimit string
-	if err := admin.QueryRowContext(ctx, "SELECT current_setting('synchro.max_wal_lag_bytes')").Scan(&byteLagLimit); err != nil {
-		t.Fatalf("load WAL byte lag limit: %v", err)
+	var heartbeatLimitSeconds int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT current_setting('synchro.max_wal_lag_bytes'),
+		       current_setting('synchro.max_worker_heartbeat_age_seconds')::integer`).Scan(&byteLagLimit, &heartbeatLimitSeconds); err != nil {
+		t.Fatalf("load WAL readiness limits: %v", err)
 	}
 	if byteLagLimit != strconv.Itoa(realWALIdleDefaultByteLag) {
 		t.Fatalf("WAL byte lag limit is %s, want the default %d", byteLagLimit, realWALIdleDefaultByteLag)
@@ -113,7 +116,10 @@ func TestRealWALIdleAcknowledgementFollowsFlush(t *testing.T) {
 	table := requireRealTable(t, client, "cf_items")
 
 	flushZero := loadRealWALFlushLSN(t, ctx, admin)
-	followDelay := waitForRealWALIdleCondition(t, 20*time.Second, "idle acknowledgement did not follow the flush position", func() (bool, any) {
+	// The idle acknowledgement is due when the progress age reaches half of the heartbeat limit.
+	// A healthy worker poll finishes within the other half, so the budget is the full heartbeat limit.
+	followBudget := time.Duration(heartbeatLimitSeconds) * time.Second
+	followDelay := waitForRealWALIdleCondition(t, followBudget, "idle acknowledgement did not follow the flush position", func() (bool, any) {
 		sample := loadRealWALIdleSample(t, ctx, admin)
 		return sample.aligned() && realWALLSNAtOrAfter(sample.slot.String, flushZero), sample
 	})
