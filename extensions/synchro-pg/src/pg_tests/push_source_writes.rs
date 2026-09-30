@@ -610,3 +610,191 @@
             })
         );
     }
+
+    fn key_rule_relation(name: &str) -> pg_sys::Oid {
+        Spi::get_one_with_args::<pg_sys::Oid>(
+            "SELECT $1::pg_catalog.regclass::pg_catalog.oid",
+            &[name.into()],
+        )
+        .expect("read key rule relation")
+        .expect("key rule relation")
+    }
+
+    fn key_rule_lock(relation: pg_sys::Oid, assigned: &[&str]) -> crate::push::SourceRowLock {
+        let assigned = assigned
+            .iter()
+            .map(|column| column.to_string())
+            .collect::<Vec<_>>();
+        crate::push::update_row_lock(relation, &assigned)
+    }
+
+    fn key_rule_row_exclusive_locks() -> Vec<String> {
+        Spi::get_one::<Vec<String>>(
+            "SELECT COALESCE(
+                        array_agg(c.relname::text ORDER BY c.relname),
+                        ARRAY[]::text[]
+                    )
+             FROM pg_catalog.pg_locks l
+             JOIN pg_catalog.pg_class c ON c.oid = l.relation
+             WHERE l.pid = pg_catalog.pg_backend_pid()
+               AND l.locktype = 'relation'
+               AND l.database = (
+                   SELECT d.oid FROM pg_catalog.pg_database d
+                   WHERE d.datname = pg_catalog.current_database()
+               )
+               AND l.mode = 'RowExclusiveLock'
+               AND l.granted
+               AND c.relnamespace = 'public'::pg_catalog.regnamespace
+               AND c.relname IN (
+                   'test_key_rule_parts',
+                   'test_key_rule_parts_a',
+                   'test_key_rule_parts_b',
+                   'test_key_rule_parts_b1',
+                   'test_key_rule_parts_b2'
+               )",
+        )
+        .expect("read key rule row exclusive locks")
+        .expect("key rule row exclusive locks")
+    }
+
+    #[pg_test]
+    fn update_row_lock_follows_executor_rule() {
+        use crate::push::SourceRowLock::{NoKeyUpdate, Update};
+
+        Spi::run(
+            "CREATE TABLE public.test_key_rule (
+                 id text PRIMARY KEY,
+                 code text UNIQUE,
+                 partial_code text,
+                 expression_code text,
+                 covered text,
+                 included text,
+                 plain text,
+                 source text,
+                 derived text GENERATED ALWAYS AS (source || '-x') STORED UNIQUE
+             );
+             CREATE UNIQUE INDEX test_key_rule_partial_code
+             ON public.test_key_rule (partial_code) WHERE partial_code IS NOT NULL;
+             CREATE UNIQUE INDEX test_key_rule_expression_code
+             ON public.test_key_rule (lower(expression_code));
+             CREATE UNIQUE INDEX test_key_rule_covered
+             ON public.test_key_rule (covered) INCLUDE (included);
+             CREATE INDEX test_key_rule_plain ON public.test_key_rule (plain);
+             CREATE FUNCTION public.test_key_rule_return_new()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .expect("create key rule table");
+        let relation = key_rule_relation("public.test_key_rule");
+        for (assigned, expected) in [
+            (&["plain"][..], NoKeyUpdate),
+            (&["id"][..], Update),
+            (&["code"][..], Update),
+            (&["partial_code"][..], NoKeyUpdate),
+            (&["expression_code"][..], NoKeyUpdate),
+            (&["covered"][..], Update),
+            (&["included"][..], NoKeyUpdate),
+            (&["source"][..], Update),
+            (&["plain", "included"][..], NoKeyUpdate),
+            (&["plain", "code"][..], Update),
+        ] {
+            assert_eq!(
+                key_rule_lock(relation, assigned),
+                expected,
+                "assigned columns {assigned:?}"
+            );
+        }
+
+        Spi::run(
+            "CREATE TRIGGER test_key_rule_after_row
+             AFTER UPDATE ON public.test_key_rule
+             FOR EACH ROW EXECUTE FUNCTION public.test_key_rule_return_new();
+             CREATE TRIGGER test_key_rule_before_statement
+             BEFORE UPDATE ON public.test_key_rule
+             FOR EACH STATEMENT EXECUTE FUNCTION public.test_key_rule_return_new()",
+        )
+        .expect("create key rule triggers");
+        assert_eq!(key_rule_lock(relation, &["plain"]), NoKeyUpdate);
+
+        Spi::run(
+            "CREATE TRIGGER test_key_rule_before_row
+             BEFORE UPDATE ON public.test_key_rule
+             FOR EACH ROW EXECUTE FUNCTION public.test_key_rule_return_new();
+             ALTER TABLE public.test_key_rule DISABLE TRIGGER test_key_rule_before_row",
+        )
+        .expect("create disabled key rule row trigger");
+        assert_eq!(key_rule_lock(relation, &["plain"]), Update);
+
+        Spi::run(
+            "CREATE TABLE public.test_key_rule_trigger (
+                 id text PRIMARY KEY,
+                 code text UNIQUE,
+                 plain text
+             );
+             CREATE TRIGGER test_key_rule_trigger_before_row
+             BEFORE UPDATE ON public.test_key_rule_trigger
+             FOR EACH ROW EXECUTE FUNCTION public.test_key_rule_return_new()",
+        )
+        .expect("create key rule trigger table");
+        let relation = key_rule_relation("public.test_key_rule_trigger");
+        assert_eq!(key_rule_lock(relation, &["plain"]), NoKeyUpdate);
+        assert_eq!(key_rule_lock(relation, &["code"]), Update);
+    }
+
+    #[pg_test]
+    fn partition_path_lock_and_leaf_rule() {
+        use crate::push::SourceRowLock::{NoKeyUpdate, Update};
+
+        Spi::run(
+            "CREATE TABLE public.test_key_rule_parts (
+                 id text PRIMARY KEY,
+                 code text
+             ) PARTITION BY RANGE (id);
+             CREATE TABLE public.test_key_rule_parts_a
+             PARTITION OF public.test_key_rule_parts
+             FOR VALUES FROM (MINVALUE) TO ('m');
+             CREATE UNIQUE INDEX test_key_rule_parts_a_code
+             ON public.test_key_rule_parts_a (code);
+             CREATE TABLE public.test_key_rule_parts_b
+             PARTITION OF public.test_key_rule_parts
+             FOR VALUES FROM ('m') TO (MAXVALUE)
+             PARTITION BY RANGE (id);
+             CREATE TABLE public.test_key_rule_parts_b1
+             PARTITION OF public.test_key_rule_parts_b
+             FOR VALUES FROM ('m') TO ('t');
+             CREATE TABLE public.test_key_rule_parts_b2
+             PARTITION OF public.test_key_rule_parts_b
+             FOR VALUES FROM ('t') TO (MAXVALUE)",
+        )
+        .expect("create key rule partitions");
+        let root = key_rule_relation("public.test_key_rule_parts");
+        let part_a = key_rule_relation("public.test_key_rule_parts_a");
+        let part_b = key_rule_relation("public.test_key_rule_parts_b");
+        let part_b1 = key_rule_relation("public.test_key_rule_parts_b1");
+        let part_b2 = key_rule_relation("public.test_key_rule_parts_b2");
+
+        assert!(crate::push::lock_partition_path(root, part_b1));
+        assert_eq!(
+            key_rule_row_exclusive_locks(),
+            vec![
+                "test_key_rule_parts_b".to_string(),
+                "test_key_rule_parts_b1".to_string(),
+            ]
+        );
+
+        Spi::run(
+            "ALTER TABLE public.test_key_rule_parts_b
+             DETACH PARTITION public.test_key_rule_parts_b2",
+        )
+        .expect("detach key rule partition");
+        assert!(!crate::push::lock_partition_path(root, part_b2));
+        assert!(!key_rule_row_exclusive_locks().contains(&"test_key_rule_parts_b2".to_string()));
+
+        assert_eq!(key_rule_lock(part_a, &["code"]), Update);
+        assert_eq!(key_rule_lock(root, &["code"]), NoKeyUpdate);
+        assert_eq!(key_rule_lock(part_b, &["code"]), NoKeyUpdate);
+        assert_eq!(key_rule_lock(part_b1, &["code"]), NoKeyUpdate);
+    }
