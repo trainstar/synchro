@@ -889,6 +889,7 @@ func TestRealPartitionedTableCompletesSync(t *testing.T) {
 	if err := harness.RestartPostgres(ctx); err != nil {
 		t.Fatalf("restart PostgreSQL with a partitioned table: %v", err)
 	}
+	admin = openIssue49Admin(t, ctx, harness)
 	waitForRealGeneratedReadyAfterRestart(t, ctx, harness)
 	waitForIssue49PublicReady(t, ctx, harness.AdapterURL(), true)
 	witnessID := "00000000-0000-4000-8211-00000000d031"
