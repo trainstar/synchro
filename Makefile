@@ -504,9 +504,11 @@ set-version:
 	@test -n "$(VERSION)" || (echo "Provide VERSION=X.Y.Z"; exit 1)
 	cd api/go && GOWORK=off go run ./cmd/synchro-version set "$(VERSION)"
 
+# The adapter owner fingerprint hashes this binary. VCS stamping would change
+# the hash when a later step dirties a tracked file, such as Podfile.lock.
 build:
 	@mkdir -p "$(dir $(BINARY))"
-	cd api/go && GOWORK=off go build -o "$(abspath $(BINARY))" ./cmd/synchrod-pg
+	cd api/go && GOWORK=off go build -buildvcs=false -o "$(abspath $(BINARY))" ./cmd/synchrod-pg
 
 build-seed:
 	@mkdir -p "$(dir $(SEED_BINARY))"
