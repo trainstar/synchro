@@ -89,6 +89,28 @@ class PublicationStateTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, ref == "refs/heads/master")
 
+    def test_release_notes_select_one_dated_changelog_section(self) -> None:
+        changelog = (
+            "# Changelog\n\nIntro.\n\n## [1.2.3] - 2026-10-02\n\n### Fixed\n\n- [Fix](https://example.invalid).\n\n"
+            "## [1.2.3-rc.1] - 2026-10-01\n\n### Added\n\n- Feature.\n\n"
+            "[1.2.3]: https://example.invalid/1.2.3\n[1.2.3-rc.1]: https://example.invalid/rc\n"
+        )
+        self.assertEqual(
+            release_publish.release_notes(changelog, "1.2.3"),
+            "### Fixed\n\n- [Fix](https://example.invalid).\n",
+        )
+        self.assertEqual(release_publish.release_notes(changelog, "1.2.3-rc.1"), "### Added\n\n- Feature.\n")
+        for text, version, message in (
+            (changelog, "1.2.4", "exactly one dated section"),
+            (changelog.replace("[1.2.3] - 2026-10-02", "[1.2.3]"), "1.2.3", "exactly one dated section"),
+            (changelog + "## [1.2.3] - 2026-10-03\n\n- Again.\n", "1.2.3", "exactly one dated section"),
+            ("## [1.2.3] - 2026-10-02\n\n## [1.2.2] - 2026-09-01\n\n- Old.\n", "1.2.3", "is empty"),
+            (changelog, "1.2", "version is invalid"),
+        ):
+            with self.subTest(version=version, message=message):
+                with self.assertRaisesRegex(release_publish.PublicationError, message):
+                    release_publish.release_notes(text, version)
+
     def test_candidate_identity_rejects_invalid_commit_lengths(self) -> None:
         for commit in ("a" * 39, "a" * 41):
             with self.subTest(length=len(commit)):
@@ -719,8 +741,16 @@ class PublicationStateTests(unittest.TestCase):
                 """), encoding="utf-8")
             proxy.chmod(0o755)
             git = tools / "git"
+            changelog = root / "CHANGELOG.md"
+            changelog.write_text(
+                "# Changelog\n\n## [1.2.3] - 2026-10-02\n\n### Fixed\n\n- Release fix.\n\n"
+                "## [1.2.3-rc.1] - 2026-10-01\n\n### Added\n\n- Candidate feature.\n\n"
+                "[1.2.3]: https://example.invalid/1.2.3\n",
+                encoding="utf-8",
+            )
             git.write_text(
                 '#!/bin/sh\n'
+                'if [ "$1" = show ]; then test "$*" = "show $TEST_SOURCE_COMMIT:CHANGELOG.md" && exec cat "$TEST_CHANGELOG"; exit 1; fi\n'
                 'test "$*" = "ls-remote --tags origin refs/tags/$TEST_TAG" || exit 1\n'
                 'printf "%s\\trefs/tags/%s\\n" "$TEST_TAG_COMMIT" "$TEST_TAG"\n',
                 encoding="utf-8",
@@ -742,10 +772,12 @@ class PublicationStateTests(unittest.TestCase):
                 if args[1:4] == ["--method", "POST", "repos/trainstar/synchro/releases"]:
                     assert release is None
                     prerelease = "true" if "-rc." in tag else "false"
+                    notes = os.path.join(os.environ["RUNNER_TEMP"], "release-notes.md")
                     assert args[4:] == [
                         "-f", f"tag_name={tag}", "-F", "draft=true", "-F", f"prerelease={prerelease}",
-                        "-F", "generate_release_notes=true", "-f", "make_latest=false",
+                        "-F", f"body=@{notes}", "-f", "make_latest=false",
                     ], args
+                    state["body"] = Path(notes).read_text()
                     release = state["release"] = {
                         "id": 17, "tag_name": tag, "draft": True, "prerelease": prerelease == "true", "assets": [], "listed": False,
                         "upload_url": upload + "{?name,label}",
@@ -807,6 +839,7 @@ class PublicationStateTests(unittest.TestCase):
                             "GITHUB_REPOSITORY": "trainstar/synchro", "GH_TOKEN": "fixture-token",
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
                             "TEST_GITHUB_STATE": str(state_path), "TEST_TAG_COMMIT": tag_commit, "TEST_TAG": f"v{version}",
+                            "TEST_SOURCE_COMMIT": self.commit, "TEST_CHANGELOG": str(changelog),
                         },
                         capture_output=True, text=True, timeout=20, check=False,
                     )
@@ -821,6 +854,11 @@ class PublicationStateTests(unittest.TestCase):
                     self.assertFalse(state["release"]["draft"])
                     if not existing:
                         self.assertEqual(state["release"]["prerelease"], version != self.version)
+                        self.assertEqual(
+                            state["body"],
+                            "### Fixed\n\n- Release fix.\n" if version == self.version
+                            else "### Added\n\n- Candidate feature.\n",
+                        )
                     self.assertEqual(
                         state["operations"],
                         ["download", "upload", "upload", "upload", "publish"] if existing

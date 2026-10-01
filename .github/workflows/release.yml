@@ -129,6 +129,8 @@ jobs:
           git checkout --detach "$source_commit"
           test "$(tr -d '\n' < VERSION)" = "$version"
           make version-check
+          python3 "$RUNNER_TEMP/release-publish.py" release-notes \
+            --changelog CHANGELOG.md --version "$version" --output "$RUNNER_TEMP/release-notes.md"
 
           GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" ci-run \
             --sha "$source_commit" --output "$RUNNER_TEMP/candidate-ci-run.json"
@@ -1056,9 +1058,12 @@ jobs:
           esac
           if [ "$github_state" = absent ]; then
             test "$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)" = "$commit" || { echo "release tag is not at the candidate commit" >&2; exit 1; }
+            git show "$commit:CHANGELOG.md" > "$RUNNER_TEMP/changelog.md"
+            python3 "$RUNNER_TEMP/release-publish.py" release-notes \
+              --changelog "$RUNNER_TEMP/changelog.md" --version "${tag#v}" --output "$RUNNER_TEMP/release-notes.md"
             # The release list can omit a new draft, so later calls use the ID from this response.
             gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-              -f tag_name="$tag" -F draft=true -F prerelease="$prerelease" -F generate_release_notes=true -f make_latest=false \
+              -f tag_name="$tag" -F draft=true -F prerelease="$prerelease" -F body=@"$RUNNER_TEMP/release-notes.md" -f make_latest=false \
               > "$RUNNER_TEMP/github-release.json"
           else
             GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" github-release \
