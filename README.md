@@ -48,12 +48,17 @@ See the [support policy](https://trainstar.github.io/synchro/reference/support-p
 | Assign private and shared data | [Scope modeling](https://trainstar.github.io/synchro/architecture/scope-modeling/) |
 | Bundle an initial SQLite database | [Portable seeds](https://trainstar.github.io/synchro/architecture/portable-seeds/) |
 | Use the client SQL APIs | [Application SQL limits](https://trainstar.github.io/synchro/clients/application-sql/) |
+| Apply a group of writes all together or not at all | [Atomic write transactions](https://trainstar.github.io/synchro/clients/application-sql/#atomic-write-transactions) |
+| Assign scopes from application data | [Assignment function](https://trainstar.github.io/synchro/architecture/scope-modeling/#assignment-function) |
 | Configure and operate the server | [Configuration](https://trainstar.github.io/synchro/operations/configuration/) |
 | Implement or inspect protocol behavior | [Wire protocol](https://trainstar.github.io/synchro/spec/01-wire-protocol/) and [client contract](https://trainstar.github.io/synchro/spec/02-client-contract/) |
 | Understand validation evidence | [Testing evidence](https://trainstar.github.io/synchro/verification/overview/) |
+| Review the changes in each release | [CHANGELOG.md](CHANGELOG.md) |
 | Prepare or recover a release | [RELEASE.md](RELEASE.md) |
 
 Scopes are server-defined. Clients cannot supply arbitrary replication predicates.
+The server assigns scopes to each user from the default user scope, shared scopes, explicit grants, and an optional assignment function that reads application data.
+An atomic write transaction makes the server apply all of its synced mutations or none of them.
 Synchro does not provide a browser synchronization client or support server databases other than PostgreSQL.
 
 ## Development and contributions
