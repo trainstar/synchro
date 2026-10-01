@@ -349,8 +349,9 @@ func TestRealWALIdleAcknowledgementCrashRecovery(t *testing.T) {
 	if !realWALLSNAfter(processedOne, unacknowledged.acknowledged.String) {
 		t.Fatalf("processed boundary %s is not after the acknowledgement: %+v", processedOne, unacknowledged)
 	}
-	if unacknowledged.progress.String == "ok" {
-		t.Fatalf("materialization progress is ok before the idle acknowledgement: %+v", unacknowledged)
+	// A correct worker commits this state before its slot advance, so readiness accepts it.
+	if unacknowledged.progress.String != "ok" {
+		t.Fatalf("materialization progress is not ok before the idle acknowledgement: %+v", unacknowledged)
 	}
 	workerPID, err := harness.Operator().CurrentWALWorkerPID(ctx)
 	if err != nil {

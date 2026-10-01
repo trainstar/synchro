@@ -427,11 +427,25 @@ SELECT
         JOIN current_database_state database
           ON database.database_oid = worker.database_oid
          AND database.database_name = worker.database_name::text
-        JOIN active_registry ON active_registry.generation = worker.registry_generation
+        -- The heartbeat copies durable progress at the end of a poll cycle.
+        -- Thus the copy can be behind durable progress, but never ahead of it.
         JOIN progress
-          ON progress.registry_generation = worker.registry_generation
-         AND progress.materialized_commit_lsn IS NOT DISTINCT FROM worker.materialized_commit_lsn
-         AND progress.materialized_end_lsn IS NOT DISTINCT FROM worker.materialized_end_lsn
+          ON worker.registry_generation <= progress.registry_generation
+         AND (
+             worker.materialized_commit_lsn IS NULL
+             OR (
+                 progress.materialized_commit_lsn IS NOT NULL
+                 AND worker.materialized_commit_lsn <= progress.materialized_commit_lsn
+             )
+         )
+         AND (
+             worker.materialized_end_lsn IS NULL
+             OR (
+                 progress.materialized_end_lsn IS NOT NULL
+                 AND worker.materialized_end_lsn <= progress.materialized_end_lsn
+             )
+         )
+        JOIN active_registry ON active_registry.generation = progress.registry_generation
         JOIN pg_catalog.pg_stat_activity activity
           ON activity.pid = worker.backend_pid
          AND activity.datid = database.database_oid
@@ -461,8 +475,11 @@ SELECT
          AND progress.registry_generation = active_registry.generation
         WHERE progress.generation_start_lsn IS NOT NULL
         AND progress.processed_end_lsn IS NOT NULL
+        -- The worker commits processed_end_lsn before the acknowledgement.
+        AND progress.generation_start_lsn
+            <= COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
         AND COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
-            = progress.processed_end_lsn
+            <= progress.processed_end_lsn
         AND (
             (
                 progress.materialized_commit_lsn IS NULL
@@ -500,10 +517,13 @@ SELECT
         WHEN NOT EXISTS (SELECT 1 FROM progress) THEN NULL
         WHEN NOT EXISTS (SELECT 1 FROM runtime_slot) THEN NULL
         ELSE (
-            SELECT slot.confirmed_flush_lsn = COALESCE(
+            -- A slot advance changes shared memory before its acknowledgement commits.
+            -- The live slot can pass the snapshot progress, so no upper bound applies.
+            -- Each worker loop blocks on a slot that differs from the acknowledgement.
+            SELECT COALESCE(
                        progress.acknowledged_end_lsn,
                        progress.generation_start_lsn
-                   )
+                   ) <= slot.confirmed_flush_lsn
                    AND slot.confirmed_flush_lsn <= pg_catalog.pg_current_wal_lsn()
             FROM runtime_slot slot
             CROSS JOIN progress

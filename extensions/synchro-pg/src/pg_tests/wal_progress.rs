@@ -415,7 +415,7 @@
     }
 
     #[pg_test]
-    fn wal_progress_readiness_requires_acknowledged_processed_boundary() {
+    fn wal_progress_readiness_accepts_idle_boundaries() {
         // A pg_test transaction has a transaction ID before the test body runs.
         // PostgreSQL then rejects logical slot creation, so no runtime slot exists.
         // Without a runtime slot, a valid progress predicate gives an unknown slot check.
@@ -425,20 +425,6 @@
             .expect("readiness test database");
 
         lock_wal_progress_writers();
-        Spi::run_with_args(
-            "UPDATE synchro.sync_wal_progress
-             SET generation_start_lsn = $1::pg_lsn,
-                 processed_end_lsn = $1::pg_lsn + 8::numeric,
-                 acknowledged_end_lsn = NULL,
-                 materialized_commit_lsn = NULL,
-                 materialized_end_lsn = NULL,
-                 updated_at = now()
-             WHERE singleton",
-            &[base.as_str().into()],
-        )
-        .expect("set unacknowledged processed boundary");
-        let unacknowledged = wal_progress_readiness_check(&database);
-
         Spi::run_with_args(
             "UPDATE synchro.sync_wal_progress
              SET generation_start_lsn = $1::pg_lsn,
@@ -478,11 +464,6 @@
         .expect("set idle acknowledged processed boundary");
         let idle_acknowledged = wal_progress_readiness_check(&database);
 
-        assert_eq!(unacknowledged["state"], "failed", "{unacknowledged}");
-        assert_eq!(
-            unacknowledged["reason"], "materialization_progress_invalid",
-            "{unacknowledged}"
-        );
         for passed in [&bound, &idle_acknowledged] {
             assert_eq!(passed["state"], "unknown", "{passed}");
             assert_eq!(passed["reason"], "slot_acknowledgement_unknown", "{passed}");

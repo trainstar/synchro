@@ -1,0 +1,65 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -427,22 +427,22 @@
+         JOIN current_database_state database
+           ON database.database_oid = worker.database_oid
+          AND database.database_name = worker.database_name::text
+-        -- The heartbeat copies durable progress at the end of a poll cycle.
+-        -- Thus the copy can be behind durable progress, but never ahead of it.
++        -- Mutant: readiness requires the heartbeat copy to equal durable progress.
++        -- Mutant: a NULL copy is valid only with a NULL progress position.
+         JOIN progress
+-          ON worker.registry_generation <= progress.registry_generation
++          ON worker.registry_generation = progress.registry_generation
+          AND (
+-             worker.materialized_commit_lsn IS NULL
++             worker.materialized_commit_lsn IS NULL AND progress.materialized_commit_lsn IS NULL
+              OR (
+                  progress.materialized_commit_lsn IS NOT NULL
+-                 AND worker.materialized_commit_lsn <= progress.materialized_commit_lsn
++                 AND worker.materialized_commit_lsn = progress.materialized_commit_lsn
+              )
+          )
+          AND (
+-             worker.materialized_end_lsn IS NULL
++             worker.materialized_end_lsn IS NULL AND progress.materialized_end_lsn IS NULL
+              OR (
+                  progress.materialized_end_lsn IS NOT NULL
+-                 AND worker.materialized_end_lsn <= progress.materialized_end_lsn
++                 AND worker.materialized_end_lsn = progress.materialized_end_lsn
+              )
+          )
+         JOIN active_registry ON active_registry.generation = progress.registry_generation
+@@ -475,11 +475,11 @@
+          AND progress.registry_generation = active_registry.generation
+         WHERE progress.generation_start_lsn IS NOT NULL
+         AND progress.processed_end_lsn IS NOT NULL
+-        -- The worker commits processed_end_lsn before the acknowledgement.
++        -- Mutant: readiness requires the acknowledgement to equal the processed end.
+         AND progress.generation_start_lsn
+             <= COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+         AND COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+-            <= progress.processed_end_lsn
++            = progress.processed_end_lsn
+         AND (
+             (
+                 progress.materialized_commit_lsn IS NULL
+@@ -517,13 +517,13 @@
+         WHEN NOT EXISTS (SELECT 1 FROM progress) THEN NULL
+         WHEN NOT EXISTS (SELECT 1 FROM runtime_slot) THEN NULL
+         ELSE (
+-            -- A slot advance changes shared memory before its acknowledgement commits.
+-            -- The live slot can pass the snapshot progress, so no upper bound applies.
+-            -- Each worker loop blocks on a slot that differs from the acknowledgement.
++            -- Mutant: readiness requires the slot to equal the acknowledgement.
++            -- Mutant: this restores the equality check of the slot position.
++            -- Mutant: the line count stays the same, so the pgrx SQL is unchanged.
+             SELECT COALESCE(
+                        progress.acknowledged_end_lsn,
+                        progress.generation_start_lsn
+-                   ) <= slot.confirmed_flush_lsn
++                   ) = slot.confirmed_flush_lsn
+                    AND slot.confirmed_flush_lsn <= pg_catalog.pg_current_wal_lsn()
+             FROM runtime_slot slot
+             CROSS JOIN progress

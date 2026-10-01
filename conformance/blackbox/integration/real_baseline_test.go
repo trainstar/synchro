@@ -852,16 +852,18 @@ func TestRealWALPipeline(t *testing.T) {
 	if err := harness.Operator().AdvanceActiveSlotPastDurableBoundary(ctx); err != nil {
 		t.Fatalf("advance active slot past durable boundary: %v; %s", err, harness.FailureDiagnostics())
 	}
+	// Readiness accepts a slot after the acknowledgement. Each worker loop requires the slot to equal
+	// the durable acknowledgement. The mismatch blocks the worker, and the worker check fails.
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		resetObservation, err = harness.Operator().ObserveStreamReset(ctx, reset.ResetID, "cf_items", laterID)
-		if err == nil && !resetObservation.ReadinessReady && strings.Contains(resetObservation.ReadinessFailures, "materialization_progress") {
+		if err == nil && !resetObservation.ReadinessReady && strings.Contains(resetObservation.ReadinessFailures, "worker") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err != nil || resetObservation.ReadinessReady || !strings.Contains(resetObservation.ReadinessFailures, "materialization_progress") {
-		t.Fatalf("ahead replication slot remained ready: %#v, %v", resetObservation, err)
+	if err != nil || resetObservation.ReadinessReady || !strings.Contains(resetObservation.ReadinessFailures, "worker") {
+		t.Fatalf("ahead replication slot did not block the worker: %#v, %v", resetObservation, err)
 	}
 }
 

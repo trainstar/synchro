@@ -165,3 +165,23 @@ $$;
 CREATE TRIGGER zz_cf_source_filled_items_touch
 AFTER INSERT OR UPDATE ON cf_source_filled_items
 FOR EACH ROW EXECUTE FUNCTION zz_cf_source_filled_items_touch();
+
+CREATE OR REPLACE FUNCTION zz_cf_source_filled_items_peer()
+RETURNS trigger
+LANGUAGE plpgsql
+-- Push runs triggers with the Synchro search_path.
+SET search_path FROM CURRENT
+AS $$
+BEGIN
+    INSERT INTO cf_source_filled_items (id, owner_id, value)
+    VALUES ('00000000-0000-4000-8f01-000000000012', NEW.owner_id, 'peer-trigger-target');
+    RETURN NULL;
+END
+$$;
+
+-- This trigger writes a different row of the same relation, issue #234.
+CREATE TRIGGER zz_cf_source_filled_items_peer
+AFTER INSERT ON cf_source_filled_items
+FOR EACH ROW
+WHEN (NEW.value = 'peer-trigger-source')
+EXECUTE FUNCTION zz_cf_source_filled_items_peer();

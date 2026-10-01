@@ -521,8 +521,15 @@ func TestRealIssue49SecurityCaptureHealthFailsClosed(t *testing.T) {
 		{
 			name:      "contiguous progress",
 			wantCheck: "materialization_progress",
-			statements: []string{
-				"UPDATE synchro.sync_wal_progress SET acknowledged_end_lsn = NULL WHERE singleton",
+			// A correct worker never commits an acknowledgement after the slot.
+			// A worker slot advance cannot pass the committed processed end.
+			statements: []string{`
+				UPDATE synchro.sync_wal_progress progress
+				SET processed_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric,
+				    acknowledged_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric
+				FROM synchro.sync_runtime_state runtime
+				JOIN pg_catalog.pg_replication_slots slot ON slot.slot_name = runtime.active_slot_name
+				WHERE progress.singleton AND runtime.singleton`,
 			},
 		},
 		{
