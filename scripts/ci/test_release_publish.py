@@ -91,7 +91,7 @@ class PublicationStateTests(unittest.TestCase):
 
     def test_release_notes_select_one_dated_changelog_section(self) -> None:
         changelog = (
-            "# Changelog\n\nIntro.\n\n## [1.2.3] - 2026-10-02\n\n### Fixed\n\n- [Fix](https://example.invalid).\n\n"
+            "# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Added\n\n- Pending.\n\n## [1.2.3] - 2026-10-02\n\n### Fixed\n\n- [Fix](https://example.invalid).\n\n"
             "## [1.2.3-rc.1] - 2026-10-01\n\n### Added\n\n- Feature.\n\n"
             "[1.2.3]: https://example.invalid/1.2.3\n[1.2.3-rc.1]: https://example.invalid/rc\n"
         )

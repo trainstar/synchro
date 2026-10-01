@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Synchro uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/releases) notes.
 
+## [Unreleased]
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.
@@ -82,4 +84,5 @@ Clients:
 - Parser and rebuild diagnostics do not include submitted or record-owned values. ([#210](https://github.com/trainstar/synchro/issues/210))
 - The React Native lock file does not contain vulnerable `brace-expansion` versions. ([#279](https://github.com/trainstar/synchro/issues/279))
 
+[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...HEAD
 [0.4.0-rc.1]: https://github.com/trainstar/synchro/compare/v0.3.2...v0.4.0-rc.1

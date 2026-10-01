@@ -72,6 +72,7 @@ Report reproducible problems through [GitHub Issues](https://github.com/trainsta
 Include the version, platform, reproduction steps, and expected result.
 Do not include credentials or private application data.
 Keep pull requests focused and run the applicable Make checks.
+Add a `CHANGELOG.md` entry under `Unreleased` for each change that applications or operators can observe.
 Target ordinary development pull requests at `dev`.
 `master` is the stable default branch and accepts checked release promotions and stable hotfixes.
 Return stable hotfixes to `dev` so subsequent releases retain their corrections.
