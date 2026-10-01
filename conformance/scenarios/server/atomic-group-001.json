@@ -1,0 +1,886 @@
+{
+  "$schema": "https://synchro.dev/conformance/schemas/scenario-v2.schema.json",
+  "schema_version": 2,
+  "id": "SCN-ATOMIC-GROUP-001",
+  "title": "Atomic mutation group applies all or none",
+  "description": "Two failed atomic groups leave committed state unchanged and report committed conflict state, and a later group applies every mutation.",
+  "requirement_ids": [
+    "SYNC-ATOMICITY-002"
+  ],
+  "normative_references": [
+    {
+      "path": "docs/src/content/docs/spec/04-invariants.mdx",
+      "anchor": "#atomic-mutation-group"
+    }
+  ],
+  "proof_types": [
+    "server-black-box",
+    "fault-injection",
+    "negative-control"
+  ],
+  "proof_obligations": [
+    {
+      "obligation_id": "OBL-ATOMIC-GROUP-PG-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-ATOMICITY-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+        "ASSERT-ATOMIC-GROUP-APPLIED-SEMANTIC-001"
+      ],
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": null,
+      "control_id": null
+    },
+    {
+      "obligation_id": "OBL-ATOMIC-GROUP-FAULT-LINUX-X64-001",
+      "requirement_ids": [
+        "SYNC-ATOMICITY-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001"
+      ],
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001",
+      "artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001",
+        "ARTDEF-ADAPTER-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-blackbox",
+      "argv": [
+        "make",
+        "test-blackbox"
+      ],
+      "fault_plan_id": "FPL-ATOMIC-GROUP-001",
+      "control_id": "CTRL-ATOMICITY-002"
+    },
+    {
+      "obligation_id": "OBL-ATOMIC-GROUP-CONTROL-001",
+      "requirement_ids": [
+        "SYNC-ATOMICITY-002"
+      ],
+      "assertion_ids": [
+        "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001"
+      ],
+      "proof_type": "negative-control",
+      "support_cell_id": null,
+      "artifact_inventory_ids": [
+        "ARTDEF-CONFORMANCE-RUNNER-001",
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "performance_budget_ids": [],
+      "required_measurement_ids": [],
+      "required_vector_set_ids": [],
+      "make_target": "test-integration-mutants",
+      "argv": [
+        "make",
+        "test-integration-mutants"
+      ],
+      "fault_plan_id": "FPL-ATOMIC-GROUP-001",
+      "control_id": "CTRL-ATOMICITY-002"
+    }
+  ],
+  "ownership": [
+    {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "proof_obligation_id": "OBL-ATOMIC-GROUP-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "proof_obligation_id": "OBL-ATOMIC-GROUP-PG-LINUX-X64-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-APPLIED-SEMANTIC-001",
+      "proof_type": "server-black-box",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "proof_obligation_id": "OBL-ATOMIC-GROUP-FAULT-LINUX-X64-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "proof_type": "fault-injection",
+      "support_cell_id": "SUP-PG-LINUX-X64-001"
+    },
+    {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "proof_obligation_id": "OBL-ATOMIC-GROUP-CONTROL-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "proof_type": "negative-control",
+      "support_cell_id": null
+    }
+  ],
+  "model": {
+    "setup": [
+      {
+        "contract_operation": "model",
+        "name": "install-current-contract",
+        "payload": {
+          "installation": {
+            "installed": true,
+            "schema_name": "synchro",
+            "extension_version": "0.4.0-rc.1",
+            "protocol_version": 3,
+            "minimum_client_runtime": 3,
+            "stale_client_interval_milliseconds": 3600000,
+            "endpoints": [
+              "connect",
+              "push",
+              "pull",
+              "rebuild"
+            ],
+            "capabilities": [
+              {
+                "capability_id": "protocol-3",
+                "enabled": true
+              }
+            ]
+          },
+          "initial_schema": {
+            "schema": {
+              "version": 1,
+              "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+            },
+            "body": "{\"compatibility_floor\":1,\"parent_schema\":null,\"schema_hash\":\"07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b\",\"schema_version\":1,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-a-pk\",\"name\":\"items_a_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_a\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_a\",\"table_id\":\"items-a\"},{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"int\",\"writable\":false},{\"field_id\":\"value\",\"name\":\"value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-b-pk\",\"name\":\"items_b_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items_b\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items_b\",\"table_id\":\"items-b\"}],\"transition_class\":\"initial\"}",
+            "transition_class": "initial",
+            "compatibility_floor": 1,
+            "tables": [
+              {
+                "table_id": "items-a",
+                "relation_id": "public.items_a",
+                "name": "items_a",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "string",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-a-pk",
+                    "name": "items_a_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              },
+              {
+                "table_id": "items-b",
+                "relation_id": "public.items_b",
+                "name": "items_b",
+                "composition": "multi_scope",
+                "primary_key_field_id": "id",
+                "created_at_field_id": null,
+                "updated_at_field_id": null,
+                "deleted_at_field_id": null,
+                "fields": [
+                  {
+                    "field_id": "id",
+                    "name": "id",
+                    "type": "int",
+                    "primary_key": true,
+                    "nullable": false,
+                    "writable": false,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": null
+                  },
+                  {
+                    "field_id": "value",
+                    "name": "value",
+                    "type": "string",
+                    "primary_key": false,
+                    "nullable": false,
+                    "writable": true,
+                    "decimal_precision": null,
+                    "decimal_scale": null,
+                    "default_wire_json": "\"\""
+                  }
+                ],
+                "indexes": [
+                  {
+                    "index_id": "items-b-pk",
+                    "name": "items_b_pk",
+                    "field_ids": [
+                      "id"
+                    ],
+                    "unique": true
+                  }
+                ]
+              }
+            ],
+            "affected_scopes": []
+          },
+          "initial_registry": {
+            "registry_generation": 1,
+            "relations": [
+              {
+                "relation": "public.items_a",
+                "registration_kind": "synced",
+                "table_id": "items-a",
+                "physical": {
+                  "schema": "public",
+                  "name": "items_a",
+                  "oid": 101,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "string",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items_a",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              },
+              {
+                "relation": "public.items_b",
+                "registration_kind": "synced",
+                "table_id": "items-b",
+                "physical": {
+                  "schema": "public",
+                  "name": "items_b",
+                  "oid": 102,
+                  "replica_identity": "default"
+                },
+                "primary_key_field_id": "id",
+                "primary_key_physical_column": "id",
+                "primary_key_portable_type": "int",
+                "capture_key_field_ids": [],
+                "captured_field_ids": [
+                  "id",
+                  "value"
+                ],
+                "membership_function": "synchro.scope_items_b",
+                "positive_fanout_bound": 8,
+                "dependency_impact_function": null,
+                "dependency_captured_field_ids": [],
+                "positive_dependency_row_bound": null
+              }
+            ],
+            "capture_dependencies": [],
+            "scope_rules": [
+              {
+                "scope_rule_id": "scope-items-a-001",
+                "relation": "public.items_a",
+                "membership_function": "synchro.scope_items_a",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-string:1",
+                      "table_id": "items-a",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"1\""
+                    },
+                    "scopes": [
+                      "scope-a",
+                      "scope-b"
+                    ]
+                  },
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-string:row-b",
+                      "table_id": "items-a",
+                      "primary_key_field_id": "id",
+                      "portable_type": "string",
+                      "canonical_wire_json": "\"row-b\""
+                    },
+                    "scopes": [
+                      "scope-b"
+                    ]
+                  }
+                ]
+              },
+              {
+                "scope_rule_id": "scope-items-b-001",
+                "relation": "public.items_b",
+                "membership_function": "synchro.scope_items_b",
+                "positive_fanout_bound": 8,
+                "evaluations": [
+                  {
+                    "row": {
+                      "canonical_identity_bytes": "typed-int:1",
+                      "table_id": "items-b",
+                      "primary_key_field_id": "id",
+                      "portable_type": "int",
+                      "canonical_wire_json": "1"
+                    },
+                    "scopes": [
+                      "scope-a"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "dependency_impacts": []
+          },
+          "stream": {
+            "stream_generation": "stream-1",
+            "database": "synchro",
+            "worker_id": "worker-1",
+            "slot_id": "slot-1"
+          },
+          "empty_scopes": [
+            {
+              "scope_id": "scope-a",
+              "membership_generation": 1,
+              "retention_generation": 1
+            },
+            {
+              "scope_id": "scope-b",
+              "membership_generation": 1,
+              "retention_generation": 1
+            }
+          ],
+          "clients": [
+            {
+              "user_id": "user-a",
+              "client_id": "client-a",
+              "client_generation": 1,
+              "scope_set_version": 1,
+              "accepted_write_epoch": 0,
+              "last_cursor_acknowledged_at": null,
+              "assigned_scope_ids": [
+                "scope-a",
+                "scope-b"
+              ],
+              "local_schema": {
+                "version": 1,
+                "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+              },
+              "local_lifecycle": "local_ready"
+            }
+          ],
+          "write_policies": [
+            {
+              "user_id": "user-a",
+              "table_id": "items-a",
+              "allowed": true
+            },
+            {
+              "user_id": "user-a",
+              "table_id": "items-b",
+              "allowed": true
+            }
+          ],
+          "configured_limits": {
+            "max_scope_fanout": 8,
+            "max_impact_rows": 1000,
+            "pull_maximum": 1000,
+            "rebuild_maximum": 1000,
+            "compaction_batch_maximum": 10000,
+            "backfill_batch_maximum": 1000
+          }
+        }
+      }
+    ],
+    "expected_state": [
+      {
+        "id": "EXPECT-ATOMIC-GROUP-WIRE-001",
+        "predicate": {
+          "contract_predicate": "wire-outcome",
+          "name": "canonical-wire-outcome",
+          "payload": {}
+        }
+      },
+      {
+        "id": "EXPECT-ATOMIC-GROUP-STATE-001",
+        "predicate": {
+          "contract_predicate": "state-equality",
+          "name": "state-unchanged",
+          "payload": {}
+        }
+      }
+    ]
+  },
+  "barrier_plan": {
+    "barriers": [
+      {
+        "id": "BAR-ATOMIC-GROUP-CONTROL-001",
+        "name": "After the first failing group outcome and before the subtransaction rollback",
+        "release_order": 1,
+        "participants": [
+          "runner",
+          "push-handler"
+        ]
+      }
+    ]
+  },
+  "fault_plans": [
+    {
+      "id": "FPL-ATOMIC-GROUP-001",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "fault_id": "FAULT-ATOMICITY-002",
+      "control_id": "CTRL-ATOMICITY-002",
+      "barrier_id": "BAR-ATOMIC-GROUP-CONTROL-001",
+      "expected_assertion_ids": [
+        "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001"
+      ],
+      "injection": {
+        "mechanism": "source-mutant",
+        "target": "atomic push subtransaction and failed-group outcome",
+        "operator": "omit",
+        "parameters": {
+          "scenario": "push an atomic group whose later mutation conflicts after earlier writes, including a cascaded delete of the conflicting row",
+          "defect": "skip the subtransaction rollback or skip the post-rollback reread of the conflicting row"
+        }
+      }
+    }
+  ],
+  "replay": {
+    "mode": "deterministic",
+    "seed_required": false,
+    "barrier_trace_required": true
+  },
+  "negative_controls": [
+    {
+      "control_id": "CTRL-ATOMICITY-002",
+      "requirement_id": "SYNC-ATOMICITY-002",
+      "fault_id": "FAULT-ATOMICITY-002",
+      "subject_artifact_inventory_ids": [
+        "ARTDEF-PG-EXTENSION-001"
+      ],
+      "detected_by": [
+        "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "id": "STEP-ATOMIC-GROUP-COMMIT-001",
+      "phase": "setup",
+      "transport": "model",
+      "description": "Commit the parent row in items-a and the child row in items-b. The realized child row references the parent with ON DELETE CASCADE.",
+      "operation": {
+        "contract_operation": "model",
+        "name": "commit-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10",
+          "end_lsn": "11",
+          "events": [
+            {
+              "event_ordinal": 1,
+              "relation": "public.items_a",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-string:1",
+                    "table_id": "items-a",
+                    "primary_key_field_id": "id",
+                    "portable_type": "string",
+                    "canonical_wire_json": "\"1\""
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "string",
+                    "wire_json": "\"1\""
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"parent\""
+                  }
+                ],
+                "version": "parent-v1",
+                "checksum": "1111111111111111111111111111111111111111111111111111111111111111",
+                "deleted": false
+              }
+            },
+            {
+              "event_ordinal": 2,
+              "relation": "public.items_b",
+              "operation": "insert",
+              "before": null,
+              "after": {
+                "identity": {
+                  "kind": "synced",
+                  "synced_row": {
+                    "canonical_identity_bytes": "typed-int:1",
+                    "table_id": "items-b",
+                    "primary_key_field_id": "id",
+                    "portable_type": "int",
+                    "canonical_wire_json": "1"
+                  },
+                  "capture_key": null
+                },
+                "fields": [
+                  {
+                    "field": "id",
+                    "type": "int",
+                    "wire_json": "1"
+                  },
+                  {
+                    "field": "value",
+                    "type": "string",
+                    "wire_json": "\"child\""
+                  }
+                ],
+                "version": "child-v1",
+                "checksum": "2222222222222222222222222222222222222222222222222222222222222222",
+                "deleted": false
+              }
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-ATOMIC-GROUP-MATERIALIZE-001",
+      "phase": "setup",
+      "transport": "process",
+      "description": "Materialize the parent and child rows.",
+      "operation": {
+        "contract_operation": "process",
+        "name": "materialize-source-transaction",
+        "payload": {
+          "stream_generation": "stream-1",
+          "commit_lsn": "10"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-ATOMIC-GROUP-ROLLBACK-PUSH-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Submit an atomic group whose third mutation conflicts with the live parent row after two earlier writes.",
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-00000000a010",
+            "schema": {
+              "version": 1,
+              "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+            },
+            "atomic": true,
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a011",
+                "table": "items-a",
+                "pk": {
+                  "id": "row-b"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "insert",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "rollback-insert"
+                }
+              },
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a012",
+                "table": "items-b",
+                "pk": {
+                  "id": 1
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "update",
+                "base_version": "child-v1",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "rollback-update"
+                }
+              },
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a013",
+                "table": "items-a",
+                "pk": {
+                  "id": "1"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "insert",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "rollback-conflict"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "20",
+          "end_lsn": "21"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-ATOMIC-GROUP-CASCADE-PUSH-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Submit an atomic group that deletes the parent row and then updates the cascaded child row.",
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-00000000a020",
+            "schema": {
+              "version": 1,
+              "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+            },
+            "atomic": true,
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a021",
+                "table": "items-a",
+                "pk": {
+                  "id": "1"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "delete",
+                "base_version": "parent-v1",
+                "client_version": "2032-01-02T03:04:05.000000Z"
+              },
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a022",
+                "table": "items-b",
+                "pk": {
+                  "id": 1
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "update",
+                "base_version": "child-v1",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "cascade-update"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "30",
+          "end_lsn": "31"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-ATOMIC-GROUP-APPLIED-PUSH-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Submit an atomic group that uses the original child base version after both failed groups.",
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-00000000a030",
+            "schema": {
+              "version": 1,
+              "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+            },
+            "atomic": true,
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a031",
+                "table": "items-a",
+                "pk": {
+                  "id": "row-b"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "insert",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "applied-insert"
+                }
+              },
+              {
+                "mutation_id": "00000000-0000-4000-8000-00000000a032",
+                "table": "items-b",
+                "pk": {
+                  "id": 1
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "07904a21452931ca3c189218ad44ad9b7c45c888dff6156e5ac669560025f17b"
+                },
+                "op": "update",
+                "base_version": "child-v1",
+                "client_version": "2032-01-02T03:04:05.000000Z",
+                "columns": {
+                  "value": "applied-update"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "40",
+          "end_lsn": "41"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    }
+  ],
+  "wire_expectations": [
+    {
+      "step_id": "STEP-ATOMIC-GROUP-ROLLBACK-PUSH-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "contract_case": "push_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-ATOMIC-GROUP-CASCADE-PUSH-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "contract_case": "push_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-ATOMIC-GROUP-APPLIED-PUSH-001",
+      "assertion_id": "ASSERT-ATOMIC-GROUP-APPLIED-SEMANTIC-001",
+      "contract_case": "push_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    }
+  ],
+  "assertions": [
+    {
+      "id": "ASSERT-ATOMIC-GROUP-ROLLBACK-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-ATOMICITY-002"
+      ],
+      "description": "Each failed group returns HTTP 200 with an empty accepted array and every outcome in rejected in request order. The failing mutation keeps its conflict code and carries the committed row and version read after the rollback: items-a 1 at parent-v1, then items-b 1 at child-v1. Every other mutation has rejected_terminal atomic_batch_rejected without row, checksum, or version. No group source write, version, fence, or accepted-write epoch change remains.",
+      "expectation_ids": [
+        "EXPECT-ATOMIC-GROUP-WIRE-001",
+        "EXPECT-ATOMIC-GROUP-STATE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": [
+        "CTRL-ATOMICITY-002"
+      ]
+    },
+    {
+      "id": "ASSERT-ATOMIC-GROUP-APPLIED-SEMANTIC-001",
+      "requirement_ids": [
+        "SYNC-ATOMICITY-002"
+      ],
+      "description": "The last group returns HTTP 200 with both mutations applied in request order, each with a complete row, matching checksum, and new version, and an empty rejected array.",
+      "expectation_ids": [
+        "EXPECT-ATOMIC-GROUP-WIRE-001"
+      ],
+      "predicate": {
+        "contract_predicate": "wire-outcome",
+        "name": "canonical-wire-outcome",
+        "payload": {}
+      },
+      "oracle": {
+        "kind": "wire-contract",
+        "expected_source": "authored-model",
+        "observed_source": "system-under-test"
+      },
+      "detects_control_ids": []
+    }
+  ]
+}

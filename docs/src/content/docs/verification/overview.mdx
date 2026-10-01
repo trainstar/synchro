@@ -19,6 +19,28 @@ Release records the exact environment, commands, results, replay information, an
 
 Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
 
+## Published Metadata Scope
+
+Each release publishes metadata with a narrow scope. Each item below states what it covers and what it does not cover.
+
+- `SHA256SUMS` lists the SHA-256 digest of each release file except itself.
+- `release-manifest.json` records the source commit, root Git tree, source tags, workflow runs, resolved support environments, and digests of selected dependency manifest and lock files. These fields identify inputs. They do not make a build reproducible, and a rebuild from the same commit can produce different bytes.
+- `sbom.spdx.json` is Syft 1.33.0 SPDX JSON output for the built release components. Release verification requires a SHA-256 file record for each public payload.
+- The SBOM package list contains only what Syft detects in those files, for example Go modules in the Linux executables. It is not a complete inventory of Rust, Maven, npm, Swift, or CocoaPods dependencies.
+- Each package declares its own dependencies in its POM and Gradle module, `package.json`, `Package.swift`, or podspec.
+- GitHub artifact attestations cover each file that `SHA256SUMS` lists. The Release workflow signs them through GitHub OIDC, and the predicate is the release manifest.
+- Maven files have detached `.asc` OpenPGP signatures. Release verification checks only that each signature is well-formed ASCII armor with a signature packet. It does not verify a signature against a signer key.
+- The npm package has an npm provenance attestation from trusted publishing. Publication requires `npm audit signatures` to report no invalid or missing signature for the exact version.
+- The Kotlin POM and Gradle module declare OkHttp and kotlinx-serialization-json as API dependencies, because public signatures expose `OkHttpClient` and `JsonObject`.
+
+To verify an attestation for one downloaded file, run this command:
+
+```sh
+gh attestation verify <file> --repo trainstar/synchro \
+  --signer-workflow trainstar/synchro/.github/workflows/release.yml \
+  --predicate-type https://trainstar.fit/synchro/attestations/release/v1
+```
+
 ## Evidence Standard
 
 Release-critical proofs use independent expected results, real packaged components for happy paths, meaningful negative controls, and replayable fault or randomized cases. Implementation-derived fixtures and tautological assertions do not establish semantic correctness.
@@ -27,7 +49,17 @@ Every required test must run. Skips, ignored tests, unexplained flakes, and retr
 
 The final support gate derives semantic obligations and packaged checks from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
 
-Each non-excluded support cell requires packaged connect, push, pull, process-kill, and resume checks. The package installation step must use the release artifact under test.
+Each support cell with the `required` policy requires packaged connect, push, pull, process-kill, and resume checks. A `tested` cell, such as the macOS host, runs its test suites but has no packaged-cell obligation. The package installation step must use the release artifact under test.
+
+Each installed client runs against the synthetic training dataset in `conformance/dataset`. The fixture prepares it with `CLIENT_DATASET=1`, or with `synchro-local-postgres prepare --dataset`. The dataset has the table shapes that failed the first 0.3.1 consumer: stored generated columns and `AFTER ROW` triggers that write other registered tables.
+
+Each installed client pushes a program, a workout, a workout exercise, and exercise sets. It then changes one set and deletes another set offline, is killed, and resumes. While the client is dead, the harness inserts two sets in one statement and writes a new program title, program settings, and workout `external_ref` on the server. The cell passes only when these conditions are true:
+
+- PostgreSQL holds the exact authored rows, including the values that server triggers fill and the soft-deleted set.
+- The client reads these values through its public query path: the catalog exercise and its muscle-group array, the program title and JSON settings, an int64 above 2^53, the live sets, and the `workouts.total_volume_kg` rollup.
+- Each value equals a value that the harness authored by hand.
+
+An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.
 
 The Makefile reads the generated packaged summary from `dist/verification/packaged-smoke-summary.json`. Missing summary data blocks the gate.
 

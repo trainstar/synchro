@@ -98,6 +98,8 @@ final class TransportObservationTests: XCTestCase {
         XCTAssertEqual(snapshot.observations.map(\.sequence), [1, 2])
         XCTAssertEqual(snapshot.observations.map(\.operationClass), [.pull, .pull])
         XCTAssertEqual(snapshot.observations.map(\.statusCode), [503, 200])
+        XCTAssertEqual(snapshot.observations.map(\.errorCode), ["temporary_unavailable", nil])
+        XCTAssertEqual(snapshot.observations.map(\.retryable), [true, nil])
         XCTAssertTrue(snapshot.observations.allSatisfy { $0.durationNanoseconds > 0 })
         XCTAssertEqual(
             snapshot.observations.map(\.cursorFingerprints),

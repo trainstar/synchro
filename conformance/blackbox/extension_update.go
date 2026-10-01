@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
+
+// walWorkerRestartObservation is longer than the 5 s WAL worker restart time.
+const walWorkerRestartObservation = 7 * time.Second
 
 // ExtensionUpdateResult contains the facts that an extension update observes.
 type ExtensionUpdateResult struct {
@@ -15,6 +19,7 @@ type ExtensionUpdateResult struct {
 	ReadyBeforeUpdate                 bool
 	ExtensionObjectsStateBeforeUpdate string
 	VersionAfterUpdate                string
+	WorkerStableBeforeUpdate          bool
 }
 
 // ExtensionCatalogObservation contains normalized extension object lines.
@@ -24,10 +29,48 @@ type ExtensionCatalogObservation struct {
 }
 
 // UpdateExtension installs the environment bundle over the update baseline
-// bundle, restarts PostgreSQL, and runs the documented update statement.
+// bundle, restarts PostgreSQL, runs the documented update statement, and then
+// requires capture readiness.
 func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, error) {
+	result, err := h.ApplyExtensionUpdate(ctx)
+	if err != nil {
+		return ExtensionUpdateResult{}, err
+	}
+	if err := h.FinishExtensionUpdate(ctx); err != nil {
+		return ExtensionUpdateResult{}, err
+	}
+	return result, nil
+}
+
+// StartUpdateBaselineAdapter starts the adapter against the update baseline
+// extension, so that a client can create state before the update. The caller
+// stops it with StopUpdateBaselineAdapter before the update, as an operator
+// stops the host before the PostgreSQL restart.
+func (h *Harness) StartUpdateBaselineAdapter(ctx context.Context) error {
 	if h == nil || ctx == nil || !h.sourceReady || h.config.UpdateBaselineExtensionArtifact == "" ||
-		h.attached || h.extensionUpdated || h.adapter != nil {
+		h.config.SkipAdapter || h.attached || h.extensionUpdated || h.adapter != nil || h.closeRequested() {
+		return errors.New("update baseline adapter is unavailable")
+	}
+	return h.startAdapter(ctx)
+}
+
+// StopUpdateBaselineAdapter stops the adapter that StartUpdateBaselineAdapter
+// started.
+func (h *Harness) StopUpdateBaselineAdapter(ctx context.Context) error {
+	if h == nil || ctx == nil || h.config.UpdateBaselineExtensionArtifact == "" ||
+		h.extensionUpdated || h.adapter == nil {
+		return errors.New("update baseline adapter stop is unavailable")
+	}
+	return h.stopAdapter(ctx)
+}
+
+// ApplyExtensionUpdate installs the environment bundle over the update
+// baseline bundle, restarts PostgreSQL, and runs the documented update
+// statement. It does not require capture readiness, so a caller can observe
+// retained predecessor state before FinishExtensionUpdate.
+func (h *Harness) ApplyExtensionUpdate(ctx context.Context) (ExtensionUpdateResult, error) {
+	if h == nil || ctx == nil || !h.sourceReady || h.config.UpdateBaselineExtensionArtifact == "" ||
+		h.attached || h.extensionUpdated || h.adapter != nil || h.closeRequested() {
 		return ExtensionUpdateResult{}, errors.New("isolated extension update is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
@@ -60,6 +103,7 @@ func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, e
 		return ExtensionUpdateResult{}, errors.New("extension objects health before update is unavailable")
 	}
 	result.ExtensionObjectsStateBeforeUpdate = objectsState.String
+	result.WorkerStableBeforeUpdate = walWorkerStableBeforeUpdate(ctx, database, h.config.StartupTimeout)
 	if _, err := database.ExecContext(ctx, "ALTER EXTENSION synchro_pg UPDATE"); err != nil {
 		return ExtensionUpdateResult{}, fmt.Errorf("update synchro_pg extension failed: %w", err)
 	}
@@ -67,19 +111,77 @@ func (h *Harness) UpdateExtension(ctx context.Context) (ExtensionUpdateResult, e
 	if result.VersionAfterUpdate, err = readExtensionVersion(ctx, database); err != nil {
 		return ExtensionUpdateResult{}, err
 	}
+	return result, nil
+}
+
+// FinishExtensionUpdate waits for the WAL worker and capture readiness after
+// ApplyExtensionUpdate, then starts the adapter.
+func (h *Harness) FinishExtensionUpdate(ctx context.Context) error {
+	if h == nil || ctx == nil || !h.sourceReady || !h.extensionUpdated ||
+		h.extensionUpdateCompleted || h.adapter != nil || h.closeRequested() {
+		return errors.New("isolated extension update completion is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.New("isolated extension update completion context expired")
+	}
 	if err := h.waitForWorker(ctx); err != nil {
-		return ExtensionUpdateResult{}, err
+		return err
 	}
 	if err := h.verifyCaptureReadiness(ctx); err != nil {
-		return ExtensionUpdateResult{}, err
+		return err
 	}
 	if !h.config.SkipAdapter {
 		if err := h.startAdapter(ctx); err != nil {
-			return ExtensionUpdateResult{}, err
+			return err
 		}
 	}
 	h.extensionUpdateCompleted = true
-	return result, nil
+	return nil
+}
+
+// closeRequested reports whether Close has started. Close does not clear the
+// update state, so each update phase must check it before it does work.
+func (h *Harness) closeRequested() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	return h.closeStarted
+}
+
+// walWorkerStableBeforeUpdate reports whether one WAL worker backend keeps
+// its process identity for longer than the worker restart time.
+func walWorkerStableBeforeUpdate(ctx context.Context, database *sql.DB, timeout time.Duration) bool {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var recordedPID int64
+	if err := waitUntil(deadline, func(attemptContext context.Context) (bool, error) {
+		count, pid, err := readWALWorkerBackend(attemptContext, database)
+		if err != nil {
+			return false, nil
+		}
+		recordedPID = pid
+		return count == 1, nil
+	}); err != nil {
+		return false
+	}
+	timer := time.NewTimer(walWorkerRestartObservation)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-timer.C:
+	}
+	count, pid, err := readWALWorkerBackend(ctx, database)
+	return err == nil && count == 1 && pid == recordedPID
+}
+
+func readWALWorkerBackend(ctx context.Context, database *sql.DB) (int64, int64, error) {
+	var count, pid int64
+	err := database.QueryRowContext(ctx, `
+		SELECT count(*), COALESCE(max(pid), 0)
+		FROM pg_catalog.pg_stat_activity
+		WHERE backend_type = 'synchro WAL consumer'
+		  AND datname = current_database()`).Scan(&count, &pid)
+	return count, pid, err
 }
 
 func readExtensionVersion(ctx context.Context, database *sql.DB) (string, error) {

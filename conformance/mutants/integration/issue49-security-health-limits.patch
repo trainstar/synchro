@@ -1,7 +1,28 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+@@ -2135,7 +2135,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1171
++-- synchro-pg/src/health.rs:1174
+ -- synchro_pg::health::synchro_health_detail
+ CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
+@@ -2347,7 +2347,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1164
++-- synchro-pg/src/health.rs:1167
+ -- synchro_pg::health::synchro_readiness
+ CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -887,13 +887,16 @@ pub(crate) fn load_readiness_status_with_configuration(
+@@ -964,13 +964,16 @@
          status.set("worker", HealthCheck::failed("worker_not_configured"));
      }
      if configuration.max_heartbeat_age_seconds <= 0 {
@@ -19,18 +40,5 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
 +        // Mutant: invalid finite limits are accepted as healthy.
 +        status.set("wal_time_lag", HealthCheck::ok());
      }
- 
-     let Some(worker_login) = configuration.worker_login.as_deref() else {
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-@@ -2051,3 +2051,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1098
-+-- synchro-pg/src/health.rs:1101
- -- synchro_pg::health::synchro_health_detail
-@@ -2263,3 +2263,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1091
-+-- synchro-pg/src/health.rs:1094
- -- synchro_pg::health::synchro_readiness
+     if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+         return status;

@@ -44,11 +44,14 @@ Configure `release-signing` without required reviewers.
 Store only `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` in that environment.
 
 Configure the protected `release` environment with one required approval.
-Store only `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` there.
+Store only `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, and `NPM_DIST_TAG_TOKEN` there.
 Restrict `release` and `release-signing` deployments to the exact `master` branch.
 
 Configure npm trusted publishing for `.github/workflows/release.yml` and the `release` environment.
 Do not configure an npm publication token.
+`NPM_DIST_TAG_TOKEN` is the promotion credential for `npm dist-tag add` only. It is not an npm publication credential.
+Trusted publishing publishes the bytes, but it cannot move `latest`.
+Without this secret, the workflow stops before any tag or registry write for a new npm version.
 
 The `publish` job is the only job that uses the protected `release` environment.
 Do not configure approval rules on `release-signing`.
@@ -60,8 +63,8 @@ Do not continue when a required control, credential, or runtime is unavailable.
 
 ## Prepare A Release
 
-1. Select the release version as `X.Y.Z`.
-2. Create or select exactly one GitHub milestone named `vX.Y.Z`.
+1. Select the release version as `X.Y.Z`, or as `X.Y.Z-rc.N` for a release candidate.
+2. Create or select exactly one GitHub milestone named `vX.Y.Z`. A release candidate uses the milestone of its release.
 3. Assign every release issue to that milestone.
 4. Create `extensions/synchro-pg/sql/synchro_pg--<current>--X.Y.Z.sql`, where `<current>` is the version in `VERSION`.
 5. Run `make set-version VERSION=X.Y.Z`.
@@ -71,14 +74,16 @@ Do not continue when a required control, credential, or runtime is unavailable.
 9. Keep only the `Synchro` and `SynchroReactNative` changes in that `Podfile.lock`.
 10. Run `make version-check`.
 11. Confirm the support matrix in `conformance/support-matrix.json`.
-12. Merge the preparation changes into `dev` through a pull request.
-13. Confirm Candidate CI passed for the exact `dev` commit.
+12. Move the `Unreleased` entries of `CHANGELOG.md` into the version section. Use "At release preparation" in "Release Notes".
+13. Merge the preparation changes into `dev` through a pull request.
 14. Promote `dev` into `master` through a checked pull request with a merge commit.
 15. Record the exact merged `master` SHA.
 16. Confirm Candidate CI passed for that exact `master` commit.
-17. Confirm that exactly one `vX.Y.Z` milestone exists.
-18. Dispatch Release from the `master` head.
-19. Merge `master` back into `dev` through a pull request with a merge commit.
+17. Dispatch Release from the `master` head.
+18. Merge `master` back into `dev` through a pull request with a merge commit.
+
+The Release workflow rejects a `master` commit without a successful Candidate run.
+It also rejects a version without exactly one matching milestone.
 
 The update script contains the reviewed statements that change the `<current>` extension objects into the `X.Y.Z` extension objects.
 The script ends with this statement:
@@ -92,6 +97,13 @@ WHERE singleton;
 
 The statement records the build of the new library.
 Without it, readiness and the adapter report stale extension objects after the update.
+
+A released update script is immutable. Never edit an update script whose target version has a release tag.
+`make check-released-update-scripts` compares each such script with its content at that tag. Source quality runs it on every pull request and push.
+The gate takes the released targets from `update-baseline.json` and `update-origins.json` in `extensions/synchro-pg`.
+It fails when the tag of a released target is missing, or when a released origin has no update script.
+Only the target equal to `VERSION` can lack a release tag.
+Before step 4 adds the next update script, add the released `<current>` version and its archive digest to `update-origins.json`.
 
 Candidate CI runs `TestRealExtensionUpdateFromBaseline`.
 The test updates the pinned baseline through the update chain.
@@ -123,6 +135,81 @@ Set `ORIGINAL_RUN_ID` to the decimal ID of the original Release run that owns th
 `resume_run_id` must identify that run.
 It does not authorize a different candidate, version, source SHA, or artifact set.
 Recovery requires the original candidate's successful `master` CI evidence.
+
+## Release Notes
+
+`CHANGELOG.md` is the sole source of release notes.
+It uses the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) format.
+Write each entry for application developers and operators, not for repository maintainers.
+
+### During development
+
+1. Keep one `## [Unreleased]` section at the top of `CHANGELOG.md`.
+2. Add an entry under `Unreleased` in each pull request that changes observable behavior.
+3. Put the entry under `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security`.
+
+A pull request that changes only tests, CI, or internal structure needs no entry.
+
+### Entry rules
+
+- State the observable behavior. Do not copy pull request titles, merges, or commit messages.
+- Start each breaking entry with `Breaking:`, and link the upgrade procedure.
+- Put a deprecation in a release before the release that removes the item.
+- Link the issue of each entry.
+- Use absolute links. The release body cannot resolve a repository-relative link.
+- Omit an empty subsection.
+
+### At release preparation
+
+1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` or `## [X.Y.Z-rc.N] - YYYY-MM-DD`. Use the preparation date.
+2. Add a new empty `## [Unreleased]` section above it.
+3. Update the comparison links at the end of the file:
+   - `[X.Y.Z]: https://github.com/trainstar/synchro/compare/v<previous>...vX.Y.Z`
+   - `[Unreleased]: https://github.com/trainstar/synchro/compare/vX.Y.Z...HEAD`
+4. Review every entry against the merged issues of the release milestone.
+
+A release candidate section lists the changes since the previous published version.
+The `X.Y.Z` section lists every change since the previous release, including the changes of its candidates.
+Consumers that skip the candidates then see the complete change set.
+Do not edit the section of a published version.
+
+### Workflow enforcement
+
+The Release workflow requires exactly one dated section for `VERSION`.
+The candidate job fails before the build when that section is missing or empty.
+The publish job uses that section from the candidate commit as the GitHub release body.
+
+## Release Candidate
+
+Use a release candidate when a consumer application must validate a release before other consumers receive it.
+The consumer application installs the candidate and runs its real flows.
+Only an accepted candidate becomes a release.
+A candidate goes through the same `dev` to `master` promotion and gates as a release.
+
+A release candidate has the version `X.Y.Z-rc.N`, where `N` starts at 1.
+The Release workflow publishes it to the same registries as a release, with these differences:
+
+- npm receives the candidate under the `next` dist-tag. The workflow never moves `latest` to a candidate.
+- GitHub marks the candidate release as a prerelease. GitHub never selects a prerelease as the latest release.
+- npm, SwiftPM, CocoaPods, and Go order `X.Y.Z-rc.N` before `X.Y.Z`. Their version ranges skip a prerelease.
+- Go `@latest` selects the newest release when one exists.
+- Maven Central has no prerelease channel. A dynamic Gradle version can resolve a candidate, so consumers use exact Maven versions.
+- The extension version is `X.Y.Z-rc.N`. The extension update chain goes through each published candidate to `X.Y.Z`.
+
+Use this procedure:
+
+1. Prepare `X.Y.Z-rc.1` with the procedure in "Prepare A Release".
+2. If `VERSION` is the unpublished `X.Y.Z`, rename its install SQL and its update script to `X.Y.Z-rc.1` instead of step 4.
+3. Release the candidate with the routine actions. The workflow completes without npm `latest` or GitHub latest.
+4. Install the exact candidate version in the consumer application.
+5. Run the real consumer flows against the candidate server artifacts.
+6. If the consumer finds a defect, correct it and release `X.Y.Z-rc.<N+1>`. Never reuse a published candidate version.
+7. When the consumer accepts `X.Y.Z-rc.N`, prepare `X.Y.Z` from the accepted source.
+8. Release `X.Y.Z` with the routine actions. The workflow moves npm `latest` and marks GitHub latest.
+
+A published candidate is a released update origin. Add it to `update-origins.json` before the next update script.
+The update script from the accepted candidate to `X.Y.Z` contains only the build fingerprint statement when the source has no other change.
+The release builds new distributions with the release version. Every Package and Public gate runs again for those distributions.
 
 ## Support And Compatibility
 
@@ -172,25 +259,34 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on all seven required support cells. |
+| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on every required support cell. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
 
-Candidate CI runs the platform suites one time for each source tree.
-A push reuses the passed Candidate of a parent commit that has the identical tree.
-Only a `dev` or `master` push run with a successful `candidate` job qualifies.
-A promotion or back-merge therefore reuses the `dev` result without a second suite run.
-A hotfix changes the tree and runs every platform suite.
-Source quality, CodeQL, and the dependency scan run on every push.
+Each required gate is one Make target with a declared test selection.
+A required target rejects a changed selector such as `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
+`PARTIAL=1` permits a selector for diagnosis. A `PARTIAL=1` result is not gate evidence.
+The structured result parser rejects failed, skipped, and zero-test results.
+Device gates require exactly one `KOTLIN_ANDROID_SERIAL` and pass it to Gradle as `ANDROID_SERIAL`.
+`SYNCHRO_MAVEN_REPO` selects one Maven repository for Kotlin SDK publication and every React Native Android build.
+It is repository configuration, not a test selector.
+
+The `source quality` job runs on every pull request and every `master` push.
+It runs contract, documentation, conformance, release-tooling, lint, and unit gates.
+CI does not run on a `dev` push.
+The candidate jobs run only on a `master` push.
+They run the server, Swift, Kotlin, React Native, and source-consumer gates.
+Source quality, CodeQL, and the dependency scan also run on each `master` push.
 These jobs are shorter, and security results depend on current advisory data.
 
-Each React Native Candidate job runs its smoke suite and all 14 authored journeys.
+Each React Native Candidate job runs its smoke suite and every authored journey.
 Each journey uses a fresh local PostgreSQL instance.
 The corpus rejects missing scenario runners before execution.
 
 Release builds distributions once. Package checks and publication use the identical sealed payloads.
+Artifact digests identify the sealed bytes, not the source. Builds are not reproducible, so no gate compares a rebuilt artifact with a sealed digest.
 
 Maven bundles contain only version-specific artifacts, signatures, and checksums.
 Maven Central owns repository-level version metadata.
@@ -226,19 +322,19 @@ The manifest records candidate environment resolution in `release-manifest.json`
 
 1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
-3. Run clean package installation and lifecycle checks.
-4. Complete every Package-gate cell.
-5. Wait for the protected `release` environment approval.
-6. Recheck the approved candidate and sealed identity.
-7. Attest the sealed files with the exact sealed release manifest.
-8. Verify the Central credentials and the npm trusted publisher for each unpublished registry.
-9. Create immutable `v<version>` and `api/go/v<version>` tags.
-10. Publish GitHub assets without marking them latest.
-11. Verify source and asset access.
-12. Publish Maven and verify public consumption.
-13. Publish npm directly under `latest` through trusted OIDC.
-14. Verify the exact public npm bytes, provenance, and clean React Native builds.
-15. Mark GitHub latest after all public checks pass.
+3. Run the clean package installation and lifecycle check on every required support cell.
+4. Wait for the protected `release` environment approval.
+5. Recheck the approved candidate and sealed identity.
+6. Attest the sealed files with the exact sealed release manifest.
+7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry. A release candidate does not need `NPM_DIST_TAG_TOKEN`.
+8. Create immutable `v<version>` and `api/go/v<version>` tags.
+9. Publish GitHub assets without marking them latest. The release body is the `CHANGELOG.md` section of the version. Mark a release candidate as a GitHub prerelease.
+10. Verify source and asset access.
+11. Publish Maven and verify public consumption.
+12. Publish npm through trusted OIDC under the `candidate` dist-tag, or under `next` for a release candidate.
+13. Verify the explicit npm version, exact public bytes, provenance, and clean React Native builds.
+14. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`. A release candidate skips this step.
+15. Mark GitHub latest after all public checks pass. A release candidate skips this step.
 
 ## Success Evidence
 
@@ -246,9 +342,11 @@ Record repository, source SHA, workflow run and attempt, commands, resolved envi
 
 Reject missing jobs, skipped work, failed work, stale results, incomplete records, and unexplained retry-only passes.
 
-Correctness checks currently enforce contract, integration, scenario, fault, zero-skip, seeded-stateful, and package-smoke behavior.
+Correctness checks currently enforce contract, integration, scenario, fault, declared-selection, zero-skip, seeded-stateful, and package-smoke behavior.
 
 Synchro has no numeric performance guarantee. Performance budgets remain deferred.
+`make characterize-dataset` records complete-work samples for a seeded dataset without a performance verdict.
+The R1 definition now derives its Linux host identity from `/etc/machine-id`. The tracked R1 baseline was recorded under an earlier definition, so a comparison with it is unavailable. `make test-r1-benchmark` rejects that definition mismatch.
 
 ## Failure And Recovery
 
@@ -256,11 +354,14 @@ Synchro has no numeric performance guarantee. Performance budgets remain deferre
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
 | Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
-| Registry credential check fails | Correct the `release` environment Central secrets or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
+| Registry credential check fails | Correct the `release` environment Central secrets, `NPM_DIST_TAG_TOKEN`, or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
 | GitHub published and a registry is missing | Keep non-latest status and publish the original payload. |
 | Registry outcome is unknown | Query the recorded operation before retry. |
+| npm is `published-candidate` | Resume. Verify the published bytes and provenance, then move `latest`. Do not publish again. |
+| npm is `published-prerelease` | Resume. Verify the published candidate bytes and provenance. Do not move `latest`. |
+| Release candidate has a defect | Correct it and release the next candidate `X.Y.Z-rc.<N+1>`. |
 | Published bytes match | Skip upload and repeat incomplete public checks only. |
 | Bytes, tag, source, or version differ | Stop and record the conflict. |
 | Original artifacts or the sealed candidate receipt expired | Stop. Never rebuild an existing release version. |

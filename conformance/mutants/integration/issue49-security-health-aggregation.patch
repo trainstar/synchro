@@ -1,7 +1,28 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+@@ -2135,7 +2135,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1171
++-- synchro-pg/src/health.rs:1172
+ -- synchro_pg::health::synchro_health_detail
+ CREATE  FUNCTION "synchro_health_detail"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
+@@ -2347,7 +2347,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/health.rs:1164
++-- synchro-pg/src/health.rs:1165
+ -- synchro_pg::health::synchro_readiness
+ CREATE  FUNCTION "synchro_readiness"() RETURNS jsonb /* pgrx::datum::json::JsonB */
+ STRICT
 diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
 --- a/extensions/synchro-pg/src/health.rs
 +++ b/extensions/synchro-pg/src/health.rs
-@@ -648,7 +648,8 @@ impl ReadinessStatus {
+@@ -725,7 +725,8 @@
      pub(crate) fn ready(&self) -> bool {
          self.checks
              .values()
@@ -11,16 +32,3 @@ diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/hea
      }
  
      pub(crate) fn detail(&self) -> serde_json::Value {
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-@@ -2051,3 +2051,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1098
-+-- synchro-pg/src/health.rs:1099
- -- synchro_pg::health::synchro_health_detail
-@@ -2263,3 +2263,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/health.rs:1091
-+-- synchro-pg/src/health.rs:1092
- -- synchro_pg::health::synchro_readiness

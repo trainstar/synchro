@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	nativeControllerRequestTimeout       = 30 * time.Second
-	nativeControllerWaitTimeout          = 30 * time.Second
+	nativeControllerRequestTimeout = 30 * time.Second
+	// Under a host load average of 40 to 60 on 24 CPUs, the WAL worker kept
+	// running without error but materialized a push more than 30 s late.
+	nativeControllerWaitTimeout          = 90 * time.Second
 	nativeControllerPollInterval         = 25 * time.Millisecond
 	nativeStagedSharedAuthoredScope      = "scope-b"
 	nativeStagedSharedRuntimeScope       = "cf:dedup"
@@ -37,10 +39,9 @@ const (
 
 // NativeControllerConfig configures one generic native server controller.
 type NativeControllerConfig struct {
-	Harness     *Harness
-	HTTPClient  *http.Client
-	Now         func() time.Time
-	WaitTimeout time.Duration
+	Harness    *Harness
+	HTTPClient *http.Client
+	Now        func() time.Time
 }
 
 // NativeController applies authored server operations to one real black-box harness.
@@ -167,24 +168,26 @@ type nativeCaptureDependencyBinding struct {
 }
 
 type nativeTransactionBinding struct {
-	AuthoredStream       string
-	AuthoredCommitLSN    string
-	AuthoredEndLSN       string
-	AuthoredUserID       string
-	AuthoredClientID     string
-	AuthoredBatchID      string
-	AuthoredMutationIDs  []string
-	Events               []nativeEventBinding
-	RuntimeStream        string
-	RuntimeCommitLSN     string
-	RuntimeEndLSN        string
-	RuntimeRegistry      int64
-	RuntimeBatchID       string
-	RuntimeMutationIDs   []string
-	RuntimeEventOrdinals []uint64
-	SourceXID            uint64
-	Materialized         bool
-	ApplicationPush      bool
+	AuthoredStream      string
+	AuthoredCommitLSN   string
+	AuthoredEndLSN      string
+	AuthoredUserID      string
+	AuthoredClientID    string
+	AuthoredBatchID     string
+	AuthoredMutationIDs []string
+	Events              []nativeEventBinding
+	RuntimeStream       string
+	RuntimeCommitLSN    string
+	RuntimeEndLSN       string
+	RuntimeRegistry     int64
+	RuntimeBatchID      string
+	RuntimeMutationIDs  []string
+	// RuntimeAcceptedEvents records which authored events the server accepted.
+	RuntimeAcceptedEvents []bool
+	RuntimeEventOrdinals  []uint64
+	SourceXID             uint64
+	Materialized          bool
+	ApplicationPush       bool
 	// AuthoredMutationsDigest identifies the authored content of the accepted
 	// push. A replay carrying the same content must reproduce the sealed
 	// request byte for byte, so it replays the stored canonical request.
@@ -378,12 +381,6 @@ func NewNativeController(config NativeControllerConfig) (*NativeController, erro
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	if config.WaitTimeout == 0 {
-		config.WaitTimeout = nativeControllerWaitTimeout
-	}
-	if config.WaitTimeout <= 0 {
-		return nil, errors.New("native controller wait timeout is invalid")
-	}
 	client := config.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: nativeControllerRequestTimeout}
@@ -392,7 +389,7 @@ func NewNativeController(config NativeControllerConfig) (*NativeController, erro
 		harness:        config.Harness,
 		httpClient:     client,
 		now:            config.Now,
-		waitTimeout:    config.WaitTimeout,
+		waitTimeout:    nativeControllerWaitTimeout,
 		transactions:   make(map[string]*nativeTransactionBinding),
 		records:        make(map[string]*nativeRecordBinding),
 		rebuildCursors: make(map[string]string),
@@ -1801,9 +1798,6 @@ func (c *NativeController) setClientAssignments(operation scenarios.Operation) (
 	if err := jsonstrict.Decode(operation.Payload, &payload); err != nil || !validNativeIdentity(payload.UserID) || !validNativeIdentity(payload.ClientID) {
 		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment payload is invalid")
 	}
-	if len(payload.Assignments) == 0 {
-		return NativeStepObservation{}, false, nil, errors.New("native controller client assignment is empty")
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
@@ -1897,8 +1891,19 @@ func (c *NativeController) publishSchema(ctx context.Context, operation scenario
 	installation := c.installation
 	queueTransition := false
 	if installation != nil && len(payload.Tables) == 1 {
-		if table, found := installation.tables[payload.Tables[0].TableID]; found {
-			queueTransition = table.RuntimeName == "cf_schema_queue"
+		if table, found := installation.tables[payload.Tables[0].TableID]; found && table.RuntimeName == "cf_schema_queue" {
+			// The queue fixture path replaces or drops a field. An add-only
+			// compatible transition uses the synced-table path, which adds a
+			// nullable column as a Class 2 change requires.
+			retained := make(map[string]struct{}, len(payload.Tables[0].Fields))
+			for _, field := range payload.Tables[0].Fields {
+				retained[field.FieldID] = struct{}{}
+			}
+			for authoredField := range table.FieldNames {
+				if _, kept := retained[authoredField]; !kept {
+					queueTransition = true
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -2246,11 +2251,9 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 		}
 	}()
 	if len(transaction.Events) == 0 {
-		sourceXID, err := sourceTransaction.EmitCommitMarker(ctx)
-		if err != nil {
+		if err := sourceTransaction.EmitCommitMarker(ctx); err != nil {
 			return NativeStepObservation{}, err
 		}
-		transaction.SourceXID = sourceXID
 	}
 	for _, event := range transaction.Events {
 		statement, arguments, err := nativeSourceStatement(event, installation)
@@ -2266,6 +2269,14 @@ func (c *NativeController) commitSourceTransaction(ctx context.Context, operatio
 			return NativeStepObservation{}, errors.New("native source event did not affect exactly one authoritative row")
 		}
 	}
+	// Two authored transactions can write the same row with the same
+	// operation. The source transaction ID binds each one to its own WAL
+	// transaction.
+	sourceXID, err := sourceTransaction.XID(ctx)
+	if err != nil {
+		return NativeStepObservation{}, err
+	}
+	transaction.SourceXID = sourceXID
 	if err := sourceTransaction.Commit(); err != nil {
 		return NativeStepObservation{}, err
 	}
@@ -3155,40 +3166,35 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	}
 	c.mu.Unlock()
 
+	// An accepted application push commits in the adapter. Its durable write
+	// fences name its mutations, so it binds through them. A controller
+	// source commit binds through its source transaction ID.
+	resolve := c.resolveRuntimeTransaction
+	if transaction.ApplicationPush {
+		resolve = c.resolveMaterializedApplicationPush
+	}
 	walDeadline, cancelWAL := context.WithTimeout(ctx, c.waitTimeout)
 	var resolveErr error
 	for {
-		resolveErr = c.resolveRuntimeTransaction(walDeadline, transaction)
+		resolveErr = resolve(walDeadline, transaction)
 		if resolveErr == nil {
 			break
 		}
 		if err := waitNativePoll(walDeadline); err != nil {
 			cancelWAL()
-			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", resolveErr)
+			return NativeStepObservation{}, fmt.Errorf("native source transaction did not become WAL-materialized: %w", c.describeWALBindingFailure(resolveErr))
 		}
 	}
 	cancelWAL()
-	if transaction.ApplicationPush {
-		applicationDeadline, cancelApplication := context.WithTimeout(ctx, c.waitTimeout)
-		defer cancelApplication()
-		for {
-			resolveErr = c.resolveApplicationPushRecords(applicationDeadline, transaction)
-			if resolveErr == nil {
-				break
-			}
-			if err := waitNativePoll(applicationDeadline); err != nil {
-				return NativeStepObservation{}, fmt.Errorf("native application push records did not resolve: %w", resolveErr)
-			}
-		}
-	}
 	if err := c.validateRuntimeTransactionOrder(ctx, transaction); err != nil {
 		return NativeStepObservation{}, err
 	}
 	c.mu.Lock()
 	transaction.Materialized = true
 	if transaction.ApplicationPush {
-		for _, event := range transaction.Events {
-			if event.Dependency != nil {
+		// A rejected mutation left its row unchanged, so its binding stays.
+		for index, event := range transaction.Events {
+			if !transaction.RuntimeAcceptedEvents[index] || event.Dependency != nil {
 				continue
 			}
 			recordKey := nativeRecordKey(event.Table.AuthoredID, nativeCanonicalRecordKeyValue(event))
@@ -3209,83 +3215,38 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 	return nativeSuccess(), nil
 }
 
+// awaitApplicationPushRecords resolves the runtime identities of an
+// application push. WAL materializes an accepted row asynchronously, so a
+// single read can occur before the row exists.
+func (c *NativeController) awaitApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
+	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
+	defer cancel()
+	for {
+		resolveErr := c.resolveApplicationPushRecords(deadline, transaction)
+		if resolveErr == nil {
+			return nil
+		}
+		if err := waitNativePoll(deadline); err != nil {
+			return fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+		}
+	}
+}
+
+// resolveApplicationPushRecords binds an application push to the current
+// captured rows. Capture and push replay read the live server state, so they
+// need the current rows. A historical materialization binds through
+// resolveMaterializedApplicationPush.
 func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	type pushIdentity struct {
-		mutationID string
-		batchID    string
-		ordinal    int
-		tableID    string
-		primaryKey json.RawMessage
-		operation  string
-		accepted   bool
+	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+		return err
 	}
-	// The server records a rejected mutation with its identity and its
-	// rejection code. Only an accepted mutation materializes a row, so read
-	// the identities first and validate materialization for accepted
-	// mutations alone.
-	rows, err := database.QueryContext(ctx, `
-		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value, operation,
-		       rejection_code IS NULL
-		FROM synchro.sync_push_mutations
-		WHERE user_id = $1 AND client_id = $2
-		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
-	if err != nil {
-		return errors.New("read native application push identities failed")
-	}
-	defer rows.Close()
-	byBatch := make(map[string][]pushIdentity)
-	for rows.Next() {
-		var value pushIdentity
-		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.operation, &value.accepted); err != nil {
-			return errors.New("scan native application push identity failed")
-		}
-		byBatch[value.batchID] = append(byBatch[value.batchID], value)
-	}
-	if err := rows.Err(); err != nil {
-		return errors.New("read native application push identities failed")
-	}
-	var runtimeBatchID string
-	var runtimeMutationIDs []string
-	var acceptedEvents []bool
-	for batchID, values := range byBatch {
-		if len(values) != len(transaction.Events) {
-			continue
-		}
-		matches := true
-		mutations := make([]string, len(values))
-		accepted := make([]bool, len(values))
-		for index, value := range values {
-			event := transaction.Events[index]
-			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
-			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || value.operation != event.Operation || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
-				matches = false
-				break
-			}
-			mutations[index] = value.mutationID
-			accepted[index] = value.accepted
-		}
-		if !matches {
-			continue
-		}
-		if runtimeBatchID != "" {
-			return errors.New("native application push identity binding is ambiguous")
-		}
-		runtimeBatchID = batchID
-		runtimeMutationIDs = mutations
-		acceptedEvents = accepted
-	}
-	if runtimeBatchID == "" {
-		return errors.New("native application push identity binding is absent")
-	}
-	transaction.RuntimeBatchID = runtimeBatchID
-	transaction.RuntimeMutationIDs = runtimeMutationIDs
 	for index := range transaction.Events {
-		if index >= len(acceptedEvents) || !acceptedEvents[index] {
+		if !transaction.RuntimeAcceptedEvents[index] {
 			continue
 		}
 		event := &transaction.Events[index]
@@ -3319,15 +3280,112 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		event.After.Version = version
 		event.After.Checksum = checksum
 	}
-	// Record bindings are registered when a source transaction materializes. A
-	// scenario that accepts a push without materializing still needs them, or a
-	// primary-key alias for the pushed row has no runtime binding.
+	c.bindApplicationPushRecords(transaction)
+	return nil
+}
+
+// resolveApplicationPushIdentities binds an application push to its runtime
+// batch and mutation identities in the push ledger.
+func (c *NativeController) resolveApplicationPushIdentities(ctx context.Context, database *sql.DB, transaction *nativeTransactionBinding) error {
+	type pushIdentity struct {
+		mutationID string
+		batchID    string
+		ordinal    int
+		tableID    string
+		primaryKey json.RawMessage
+		operation  string
+		accepted   bool
+	}
+	// The server records a rejected mutation with its identity and its
+	// rejection code. Only an accepted mutation materializes a row, so read
+	// the identities first and validate materialization for accepted
+	// mutations alone.
+	rows, err := database.QueryContext(ctx, `
+		SELECT mutation_id::text, first_batch_id::text, request_ordinal, table_id, primary_key_value, operation,
+		       rejection_code IS NULL
+		FROM synchro.sync_push_mutations
+		WHERE user_id = $1 AND client_id = $2
+		ORDER BY first_batch_id, request_ordinal`, transaction.AuthoredUserID, transaction.AuthoredClientID)
+	if err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	defer rows.Close()
+	// A batch that another transaction already bound cannot bind this one.
+	// Two single-row updates of one row otherwise have the same shape. Some
+	// callers hold c.mu, so this reads the bindings as the record update below
+	// does.
+	boundBatches := make(map[string]struct{}, len(c.transactions))
+	for _, other := range c.transactions {
+		if other != transaction && other.RuntimeBatchID != "" {
+			boundBatches[other.RuntimeBatchID] = struct{}{}
+		}
+	}
+	byBatch := make(map[string][]pushIdentity)
+	for rows.Next() {
+		var value pushIdentity
+		if err := rows.Scan(&value.mutationID, &value.batchID, &value.ordinal, &value.tableID, &value.primaryKey, &value.operation, &value.accepted); err != nil {
+			return errors.New("scan native application push identity failed")
+		}
+		byBatch[value.batchID] = append(byBatch[value.batchID], value)
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read native application push identities failed")
+	}
+	var runtimeBatchID string
+	var runtimeMutationIDs []string
+	var acceptedEvents []bool
+	for batchID, values := range byBatch {
+		if _, bound := boundBatches[batchID]; bound || len(values) != len(transaction.Events) {
+			continue
+		}
+		matches := true
+		mutations := make([]string, len(values))
+		accepted := make([]bool, len(values))
+		for index, value := range values {
+			event := transaction.Events[index]
+			runtimePrimary, marshalErr := json.Marshal(event.RuntimeRecordID)
+			if marshalErr != nil || value.ordinal != index+1 || value.tableID != event.Table.RuntimeID || value.operation != event.Operation || !nativeJSONEqual(value.primaryKey, runtimePrimary) {
+				matches = false
+				break
+			}
+			mutations[index] = value.mutationID
+			accepted[index] = value.accepted
+		}
+		if !matches {
+			continue
+		}
+		if runtimeBatchID != "" {
+			return errors.New("native application push identity binding is ambiguous")
+		}
+		runtimeBatchID = batchID
+		runtimeMutationIDs = mutations
+		acceptedEvents = accepted
+	}
+	if runtimeBatchID == "" {
+		return errors.New("native application push identity binding is absent")
+	}
+	transaction.RuntimeBatchID = runtimeBatchID
+	transaction.RuntimeMutationIDs = runtimeMutationIDs
+	transaction.RuntimeAcceptedEvents = acceptedEvents
+	return nil
+}
+
+// bindApplicationPushRecords registers the rows of the accepted mutations.
+// Record bindings are registered when a source transaction materializes. A
+// scenario that accepts a push without materializing still needs them, or a
+// primary-key alias for the pushed row has no runtime binding.
+func (c *NativeController) bindApplicationPushRecords(transaction *nativeTransactionBinding) {
 	for index, event := range transaction.Events {
-		if index >= len(acceptedEvents) || !acceptedEvents[index] || event.Dependency != nil || event.After == nil {
+		if !transaction.RuntimeAcceptedEvents[index] || event.Dependency != nil || event.After == nil {
 			continue
 		}
 		recordKey := nativeRecordKey(event.Table.AuthoredID, event.After.CanonicalWireJSON)
-		if _, bound := c.records[recordKey]; bound {
+		if record, bound := c.records[recordKey]; bound {
+			// The accepted write replaced the source row that the image models,
+			// unless a later source change already replaced that image.
+			if event.Before != nil && reflect.DeepEqual(record.Image, *event.Before) {
+				record.Image = *event.After
+			}
 			continue
 		}
 		c.records[recordKey] = &nativeRecordBinding{
@@ -3338,6 +3396,146 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 			AuthoredScopes:  append([]string(nil), event.AuthoredScopes...),
 		}
 	}
+}
+
+// resolveMaterializedApplicationPush binds an accepted application push to
+// the WAL events of its own write fences. Two pushes can write the same row
+// with the same values, so a row identity and its captured values cannot
+// tell them apart. Each accepted mutation has a fence chain on its row: the
+// first fence is the authored operation, and a same-row trigger can add later
+// update fences. The accepted outcome carries the version of the last fence.
+// A later write can replace the captured row, so the push binds only through
+// its sealed outcome and its fence chain, never through the current row.
+func (c *NativeController) resolveMaterializedApplicationPush(ctx context.Context, transaction *nativeTransactionBinding) error {
+	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+		return err
+	}
+	type runtimeIdentity struct {
+		stream   string
+		commit   string
+		end      string
+		registry int64
+	}
+	var first *runtimeIdentity
+	var previous int64 = -1
+	ordinals := make([]uint64, 0, len(transaction.Events))
+	for index, event := range transaction.Events {
+		if !transaction.RuntimeAcceptedEvents[index] {
+			continue
+		}
+		rows, err := database.QueryContext(ctx, `
+			SELECT event.stream_generation, event.commit_lsn::text, wal.end_lsn::text,
+			       wal.registry_generation, event.event_ordinal, fence.operation, fence.row_version::text,
+			       COALESCE(outcome.body ->> 'server_version', ''),
+			       COALESCE(outcome.body #>> '{row_checksum,digest}', ''),
+			       outcome.body -> 'server_row'
+			FROM synchro.sync_write_fences fence
+			JOIN synchro.sync_push_mutations mutation
+			  ON mutation.user_id = fence.user_id
+			 AND mutation.client_id = fence.client_id
+			 AND mutation.mutation_id::text = fence.mutation_id
+			CROSS JOIN LATERAL (
+				SELECT convert_from(mutation.sealed_canonical_response, 'UTF8')::jsonb AS body
+			) outcome
+			JOIN synchro.sync_wal_events event ON event.fence_id = fence.fence_id
+			JOIN synchro.sync_wal_transactions wal
+			  ON wal.stream_generation = event.stream_generation
+			 AND wal.commit_lsn = event.commit_lsn
+			WHERE fence.mutation_id = $1 AND fence.user_id = $2 AND fence.client_id = $3
+			  AND fence.registration_kind = 'synced' AND fence.coverage = 'materialized'
+			  AND event.physical_relation = $4
+			  AND (fence.old_record_id = $5 OR fence.new_record_id = $5)
+			ORDER BY fence.dml_ordinal`,
+			transaction.RuntimeMutationIDs[index], transaction.AuthoredUserID, transaction.AuthoredClientID,
+			event.Table.RuntimeName, event.RuntimeRecordID,
+		)
+		if err != nil {
+			return fmt.Errorf("read native application push fences: %w", err)
+		}
+		var chainVersion, outcomeVersion, outcomeChecksum string
+		var outcomeRow []byte
+		chainLength := 0
+		for rows.Next() {
+			var identity runtimeIdentity
+			var ordinal int64
+			var operation, version string
+			if err := rows.Scan(&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal, &operation, &version, &outcomeVersion, &outcomeChecksum, &outcomeRow); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan native application push fence: %w", err)
+			}
+			// The server accepts the authored operation first, then only
+			// same-row updates from triggers (push.rs load_current_fence_version).
+			if (chainLength == 0 && operation != event.PhysicalOperation) || (chainLength > 0 && operation != "update") {
+				rows.Close()
+				return fmt.Errorf("native application push fence chain of mutation %s does not start with its %s", transaction.RuntimeMutationIDs[index], event.PhysicalOperation)
+			}
+			if first == nil {
+				first = &identity
+			} else if identity != *first {
+				rows.Close()
+				return errors.New("native accepted application push spans more than one runtime WAL transaction")
+			}
+			if ordinal <= previous {
+				rows.Close()
+				return errors.New("native accepted application push order does not match runtime WAL order")
+			}
+			previous = ordinal
+			ordinals = append(ordinals, uint64(ordinal))
+			chainVersion = version
+			chainLength++
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("read native application push fences: %w", err)
+		}
+		rows.Close()
+		if chainLength == 0 {
+			return &nativeWALBindingError{
+				detail:   fmt.Sprintf("native application push fence is not materialized: mutation %s relation %s operation %s identity %s", transaction.RuntimeMutationIDs[index], event.Relation, event.PhysicalOperation, event.RuntimeRecordID),
+				relation: event.Table.RuntimeName,
+			}
+		}
+		if chainVersion != outcomeVersion {
+			return fmt.Errorf("native application push fence chain of mutation %s ends at version %s, not the accepted version %q", transaction.RuntimeMutationIDs[index], chainVersion, outcomeVersion)
+		}
+		// The sealed outcome row is the row that this push wrote.
+		image := event.After
+		if event.Operation == "delete" {
+			if event.Before == nil || event.After != nil {
+				return errors.New("native application push delete binding is invalid")
+			}
+			image = event.Before
+		}
+		if len(outcomeRow) != 0 && string(outcomeRow) != "null" {
+			record := &nativeRecordBinding{Table: event.Table, RuntimeRecordID: event.RuntimeRecordID, Image: *image}
+			if err := validateNativeRuntimeRow(record, outcomeRow); err != nil {
+				return err
+			}
+		} else if event.Operation != "delete" {
+			return fmt.Errorf("native application push outcome of mutation %s has no row", transaction.RuntimeMutationIDs[index])
+		}
+		if event.After != nil {
+			if len(outcomeChecksum) != 64 {
+				return fmt.Errorf("native application push outcome of mutation %s has no row checksum", transaction.RuntimeMutationIDs[index])
+			}
+			event.After.Version = chainVersion
+			event.After.Checksum = outcomeChecksum
+		}
+	}
+	if first == nil {
+		return errors.New("native application push has no accepted mutation to materialize")
+	}
+	c.bindApplicationPushRecords(transaction)
+	transaction.RuntimeStream = first.stream
+	transaction.RuntimeCommitLSN = first.commit
+	transaction.RuntimeEndLSN = first.end
+	transaction.RuntimeRegistry = first.registry
+	transaction.RuntimeEventOrdinals = ordinals
 	return nil
 }
 
@@ -3361,6 +3559,10 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 	if len(binding.Events) == 0 {
 		return resolveNativeEmptyRuntimeTransaction(ctx, database, binding)
 	}
+	if binding.SourceXID == 0 {
+		return errors.New("native source transaction has no source transaction ID")
+	}
+	sourceXID := fmt.Sprintf("%d", binding.SourceXID)
 	type runtimeIdentity struct {
 		stream   string
 		commit   string
@@ -3390,8 +3592,9 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND event.operation = $2
 				  AND (fence.new_capture_key = $3::jsonb OR fence.old_capture_key = $3::jsonb)
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey).Scan(
+				LIMIT 1`, event.Dependency.RuntimeName, event.PhysicalOperation, captureKey, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		} else {
@@ -3406,8 +3609,9 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				WHERE event.physical_relation = $1
 				  AND COALESCE(fence.new_record_id, fence.old_record_id) = $2
 				  AND event.operation = $3
+				  AND transaction.source_xid = $4::xid
 				ORDER BY event.commit_lsn DESC
-				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation).Scan(
+				LIMIT 1`, event.Table.RuntimeName, event.RuntimeRecordID, event.PhysicalOperation, sourceXID).Scan(
 				&identity.stream, &identity.commit, &identity.end, &identity.registry, &ordinal,
 			)
 		}
@@ -3420,7 +3624,11 @@ func (c *NativeController) resolveRuntimeTransaction(ctx context.Context, bindin
 				}
 				identifier = nativeCaptureDependencyKey(*image)
 			}
-			return fmt.Errorf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s; emitted %s", event.Relation, event.PhysicalOperation, identifier, describeNativeRelationEvents(ctx, database, event.Table.RuntimeName, event.Dependency))
+			return &nativeWALBindingError{
+				detail:     fmt.Sprintf("native runtime WAL event binding is unavailable: relation %s operation %s identity %s", event.Relation, event.PhysicalOperation, identifier),
+				relation:   event.Table.RuntimeName,
+				dependency: event.Dependency,
+			}
 		}
 		identity.ordinal = uint64(ordinal)
 		identities = append(identities, identity)
@@ -3485,7 +3693,8 @@ func (c *NativeController) validateRuntimeTransactionOrder(ctx context.Context, 
 		if !authoredValid || !runtimeValid {
 			return errors.New("native WAL commit position is invalid")
 		}
-		if authoredOrder != 0 && runtimeOrder != 0 && authoredOrder != runtimeOrder {
+		// Distinct authored transactions are distinct runtime transactions.
+		if authoredOrder != runtimeOrder || runtimeOrder == 0 {
 			return errors.New("authored WAL commit order does not match runtime commit order")
 		}
 	}
@@ -3577,7 +3786,7 @@ func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Cont
 	}
 	c.mu.Unlock()
 	for _, transaction := range pending {
-		if err := c.resolveApplicationPushRecords(ctx, transaction); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, transaction); err != nil {
 			return fmt.Errorf("resolve pending native application push records: %w", err)
 		}
 	}
@@ -3688,11 +3897,13 @@ func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *na
 		if !binding.Materialized {
 			continue
 		}
+		// A push binds only its accepted fence chains, and a same-row trigger
+		// adds events, so the resolved runtime events are the count to keep.
 		var eventCount int64
 		if err := tx.QueryRowContext(ctx, `
 			SELECT event_count FROM synchro.sync_wal_transactions
 			WHERE stream_generation = $1 AND commit_lsn = $2::pg_lsn AND end_lsn = $3::pg_lsn
-			  AND registry_generation = $4`, binding.RuntimeStream, binding.RuntimeCommitLSN, binding.RuntimeEndLSN, binding.RuntimeRegistry).Scan(&eventCount); err != nil || eventCount != int64(len(binding.Events)) {
+			  AND registry_generation = $4`, binding.RuntimeStream, binding.RuntimeCommitLSN, binding.RuntimeEndLSN, binding.RuntimeRegistry).Scan(&eventCount); err != nil || eventCount != int64(len(binding.RuntimeEventOrdinals)) {
 			return errors.New("native runtime WAL transaction no longer matches its authored binding")
 		}
 		ordinals := make([]uint64, len(binding.Events))
@@ -4285,6 +4496,33 @@ func waitNativePoll(ctx context.Context) error {
 	}
 }
 
+// nativeWALBindingError names one authored event that has no runtime WAL
+// event yet. The wait polls it quickly and describes the relation only after
+// the wait budget ends, because the description samples the worker for
+// several seconds.
+type nativeWALBindingError struct {
+	detail     string
+	relation   string
+	dependency *nativeCaptureDependencyBinding
+}
+
+func (err *nativeWALBindingError) Error() string { return err.detail }
+
+func (c *NativeController) describeWALBindingFailure(err error) error {
+	var binding *nativeWALBindingError
+	if !errors.As(err, &binding) {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, openErr := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
+	if openErr != nil {
+		return fmt.Errorf("%s; emitted unavailable", binding.detail)
+	}
+	defer database.Close()
+	return fmt.Errorf("%s; emitted %s", binding.detail, describeNativeRelationEvents(ctx, database, binding.relation, binding.dependency))
+}
+
 // describeNativeRelationEvents summarizes the WAL events recorded for one
 // physical relation. A binding failure reports only that its own identity did
 // not resolve, which cannot distinguish an absent event from a fence that the
@@ -4462,7 +4700,7 @@ func (c *NativeController) rewriteNativePushIdentities(ctx context.Context, requ
 		// Only a materialized source transaction resolves these records today. A
 		// scenario that replays an accepted push without materializing needs the
 		// same resolution, so resolve it here.
-		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, binding); err != nil {
 			return fmt.Errorf("resolve native application push identities: %w", err)
 		}
 	}
@@ -4550,7 +4788,7 @@ func (c *NativeController) sealedNativePushReplay(ctx context.Context, operation
 		return nil, nil
 	}
 	if binding.RuntimeBatchID == "" {
-		if err := c.resolveApplicationPushRecords(ctx, binding); err != nil {
+		if err := c.awaitApplicationPushRecords(ctx, binding); err != nil {
 			return nil, fmt.Errorf("resolve native application push identities: %w", err)
 		}
 	}

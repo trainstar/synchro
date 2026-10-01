@@ -159,3 +159,29 @@ export async function assertUserIsolation(recordID: string): Promise<void> {
     throw new Error(`user 2 can see user 1 customer ${recordID}`);
   }
 }
+
+export async function assertCustomersOnServer(expected: Record<string, string>): Promise<void> {
+  const recordIDs = Object.keys(expected);
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  let names: Record<string, unknown> = {};
+  while (Date.now() < deadline) {
+    const clientID = `detox-atomic-check-${randomUUID()}`;
+    const connected = await connect(USER1_JWT, clientID);
+    const fields = customerFields(connected);
+    const records = await rebuildScopes(USER1_JWT, clientID, connected);
+    names = {};
+    for (const record of records) {
+      const recordID = record.pk?.[fields.idFieldID];
+      if (record.table === fields.tableID && recordIDs.includes(recordID)) {
+        names[recordID] = record.row?.[fields.nameFieldID];
+      }
+    }
+    if (recordIDs.every((recordID) => names[recordID] === expected[recordID])) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  throw new Error(
+    `server customers do not match the atomic group: expected ${JSON.stringify(expected)} observed ${JSON.stringify(names)}`
+  );
+}

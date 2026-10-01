@@ -29,6 +29,7 @@ var closedOperationFields = map[string]operationFields{
 	"model/expire-client-generation":                {required: []string{"user_id", "client_id"}},
 	"model/install-current-contract":                {required: []string{"installation", "initial_schema", "initial_registry", "stream", "empty_scopes", "clients", "write_policies", "configured_limits"}},
 	"model/publish-schema":                          {required: []string{"schema", "body", "transition_class", "compatibility_floor", "tables", "affected_scopes"}},
+	"model/set-assignment-function":                 {required: []string{"function", "max_scopes", "evaluations"}},
 	"model/set-client-assignments":                  {required: []string{"user_id", "client_id", "assignments"}},
 	"model/stage-registry-membership-generation":    {required: []string{"registry_generation", "membership_generation", "batch_size", "activation_boundary", "affected_scopes", "scope_rules", "dependency_impacts"}},
 	"process/acknowledge-contiguous-prefix":         {required: []string{"stream_generation"}},
@@ -109,6 +110,9 @@ var closedPayloadShapes = map[string]*payloadShape{
 	}),
 	"model/install-current-contract": installContractShape(),
 	"model/publish-schema":           publishSchemaShape,
+	"model/set-assignment-function": shapeWith(closedOperationFields["model/set-assignment-function"], map[string]payloadChild{
+		"evaluations": arrayChild(shape(required("user_id", "scopes"))),
+	}),
 	"model/set-client-assignments": shapeWith(closedOperationFields["model/set-client-assignments"], map[string]payloadChild{
 		"assignments": arrayChild(shape(required("scope_id"))),
 	}),
@@ -122,7 +126,7 @@ var closedPayloadShapes = map[string]*payloadShape{
 		"scopes": arrayChild(shape(required("scope_id", "cursor_source"))),
 	}),
 	"push/submit": shapeWith(closedOperationFields["push/submit"], map[string]payloadChild{
-		"request": objectChild(shapeWith(required("client_id", "client_generation", "batch_id", "schema", "mutations"), map[string]payloadChild{
+		"request": objectChild(shapeWith(operationFields{required: []string{"client_id", "client_generation", "batch_id", "schema", "mutations"}, optional: []string{"atomic"}}, map[string]payloadChild{
 			"schema": objectChild(schemaReferenceShape),
 			"mutations": arrayChild(shapeWith(operationFields{required: []string{"mutation_id", "table", "pk", "authored_schema", "op", "client_version"}, optional: []string{"base_version", "columns"}}, map[string]payloadChild{
 				"pk":              dynamicObjectChild(),
@@ -133,14 +137,6 @@ var closedPayloadShapes = map[string]*payloadShape{
 	}),
 	"rebuild/request-page": shapeWith(closedOperationFields["rebuild/request-page"], map[string]payloadChild{"schema": objectChild(schemaReferenceShape)}),
 }
-
-// OperationClass identifies the package that executes one closed scenario operation.
-type OperationClass string
-
-const (
-	OperationClassReference        OperationClass = "reference"
-	OperationClassModelRunnerMacro OperationClass = "model_runner_macro"
-)
 
 type operationFields struct {
 	required []string
@@ -156,6 +152,25 @@ var forbiddenSetupMembers = map[string]struct{}{
 }
 
 // OperationKey returns the stable closed key for one operation.
+// AcknowledgementOf returns the acknowledgement of the stream prefix that one
+// materialize operation completes. The WAL worker acknowledges after it
+// materializes, so a check that compares server state across a later window
+// waits for this acknowledgement first. Otherwise the asynchronous
+// acknowledgement lands inside the window.
+func AcknowledgementOf(materialize Operation) (Operation, error) {
+	var payload struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if OperationKey(materialize) != "process/materialize-source-transaction" || json.Unmarshal(materialize.Payload, &payload) != nil || payload.StreamGeneration == "" {
+		return Operation{}, errors.New("materialize operation has no stream generation")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return Operation{}, errors.New("encode acknowledgement stream generation failed")
+	}
+	return Operation{ContractOperation: "process", Name: "acknowledge-contiguous-prefix", Payload: encoded}, nil
+}
+
 func OperationKey(operation Operation) string {
 	return operation.ContractOperation + "/" + operation.Name
 }
@@ -168,17 +183,6 @@ func OperationKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// LookupOperationClass returns the execution class for one closed operation key.
-func LookupOperationClass(key string) (OperationClass, bool) {
-	if _, found := closedOperationFields[key]; !found {
-		return "", false
-	}
-	if key == "workload/prepare" {
-		return OperationClassModelRunnerMacro, true
-	}
-	return OperationClassReference, true
 }
 
 // ValidateOperation validates an operation name and its closed payload shape.

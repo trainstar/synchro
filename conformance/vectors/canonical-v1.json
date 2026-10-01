@@ -2,6 +2,48 @@
   "vector_set_id": "VSET-CANONICAL-001",
   "vectors": [
     {
+      "vector_id": "VEC-BATCH-ATOMIC-001",
+      "kind": "batch_fingerprint",
+      "valid": true,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":true,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-delete\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": "73796e6368726f3a76333a707573682d62617463682d66696e6765727072696e743a7631005b2261746f6d69632d62617463682d7631222c22757365722d63616e6f6e6963616c222c22636c69656e742d63616e6f6e6963616c222c2237222c2230303030303030302d303030302d343030302d383030302d303030303030303030303130222c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c5b5b226d75746174696f6e2d7631222c2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c2274626c5f7265636f726473222c5b22666c645f6964222c226d75742d696e73657274225d2c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c22696e73657274222c5b305d2c22323032342d30322d32395431323a33343a35362e3132333435365a222c5b312c5b5b22666c645f626f6f6c222c747275655d2c5b22666c645f74657874222c227a225d5d5d5d2c5b226d75746174696f6e2d7631222c2230303030303030302d303030302d343030302d383030302d303030303030303030303033222c2274626c5f7265636f726473222c5b22666c645f6964222c226d75742d64656c657465225d2c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c2264656c657465222c5b312c227365727665722d76657273696f6e2d303032225d2c22323032342d30322d32395431323a33343a35382e3132333435365a222c5b305d5d5d5d",
+        "expected_bytes_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138",
+        "expected_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138"
+      }
+    },
+    {
+      "vector_id": "VEC-BATCH-ATOMIC-DUPLICATE-ROW-001",
+      "kind": "batch_fingerprint",
+      "valid": false,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":true,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut\\u002dinsert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": null,
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
+      "vector_id": "VEC-BATCH-ATOMIC-FALSE-001",
+      "kind": "batch_fingerprint",
+      "valid": false,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "batch_json": "{\"client_id\":\"client-canonical\",\"client_generation\":7,\"batch_id\":\"00000000-0000-4000-8000-000000000010\",\"request_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"atomic\":false,\"mutations\":[{\"mutation_id\":\"00000000-0000-4000-8000-000000000001\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-insert\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[{\"field_id\":\"fld_text\",\"value\":\"z\"},{\"field_id\":\"fld_bool\",\"value\":true}]},{\"mutation_id\":\"00000000-0000-4000-8000-000000000003\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"mut-delete\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"delete\",\"base_version\":\"server-version-002\",\"client_version\":\"2024-02-29T12:34:58.123456Z\"}]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": null,
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
       "vector_id": "VEC-BATCH-DUPLICATE-MUTATION-001",
       "kind": "batch_fingerprint",
       "valid": false,
@@ -343,6 +385,21 @@
       }
     },
     {
+      "vector_id": "VEC-MUTATION-INSERT-EMPTY-COLUMNS-001",
+      "kind": "mutation_fingerprint",
+      "valid": true,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "client_id": "client-canonical",
+        "mutation_json": "{\"mutation_id\":\"00000000-0000-4000-8000-000000000011\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"key-only\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"insert\",\"client_version\":\"2024-02-29T12:34:56.123456Z\",\"columns\":[]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": "73796e6368726f3a76333a707573682d6d75746174696f6e2d66696e6765727072696e743a7631005b226d75746174696f6e2d73636f70652d7631222c22757365722d63616e6f6e6963616c222c22636c69656e742d63616e6f6e6963616c222c5b226d75746174696f6e2d7631222c2230303030303030302d303030302d343030302d383030302d303030303030303030303131222c2274626c5f7265636f726473222c5b22666c645f6964222c226b65792d6f6e6c79225d2c5b2231222c2261393732383062373136666530663861393535336261376333623331623030646430336637633761616366306666303161373033643733313832663364663331225d2c22696e73657274222c5b305d2c22323032342d30322d32395431323a33343a35362e3132333435365a222c5b312c5b5d5d5d5d",
+        "expected_bytes_sha256": "3a703ad93a07144d7ab91ce785f2b969522dd678d4c7ad06be2daf54be96ecd6",
+        "expected_sha256": "3a703ad93a07144d7ab91ce785f2b969522dd678d4c7ad06be2daf54be96ecd6"
+      }
+    },
+    {
       "vector_id": "VEC-MUTATION-INSERT-SORTED-COLUMNS-001",
       "kind": "mutation_fingerprint",
       "valid": true,
@@ -478,6 +535,21 @@
       }
     },
     {
+      "vector_id": "VEC-MUTATION-UPDATE-EMPTY-COLUMNS-001",
+      "kind": "mutation_fingerprint",
+      "valid": false,
+      "input": {
+        "authenticated_user_id": "user-canonical",
+        "client_id": "client-canonical",
+        "mutation_json": "{\"mutation_id\":\"00000000-0000-4000-8000-000000000012\",\"table_id\":\"tbl_records\",\"pk\":{\"field_id\":\"fld_id\",\"value\":\"key-only\"},\"authored_schema\":{\"version\":1,\"hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\"},\"operation\":\"update\",\"base_version\":\"server-version-012\",\"client_version\":\"2024-02-29T12:34:57.123456Z\",\"columns\":[]}"
+      },
+      "expected": {
+        "canonical_bytes_hex": null,
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
       "vector_id": "VEC-ROW-DIGEST-DUPLICATE-FIELD-001",
       "kind": "row_digest",
       "valid": false,
@@ -576,6 +648,21 @@
       "expected": {
         "canonical_bytes_hex": null,
         "expected_bytes_sha256": null,
+        "expected_sha256": null
+      }
+    },
+    {
+      "vector_id": "VEC-ROW-IDENTITY-EMPTY-TEXT-001",
+      "kind": "row_identity",
+      "valid": true,
+      "input": {
+        "manifest_json": "{\"schema_version\":1,\"schema_hash\":\"a97280b716fe0f8a9553ba7c3b31b00dd03f7c7aacf0ff01a703d73182f3df31\",\"parent_schema\":null,\"transition_class\":\"initial\",\"compatibility_floor\":1,\"tables\":[{\"table_id\":\"tbl_af\",\"relation_id\":\"rel_af\",\"name\":\"collision_second\",\"composition\":\"single_scope\",\"primary_key_field_id\":\"ld_bc\",\"lifecycle\":{\"created_at_field_id\":null,\"updated_at_field_id\":null,\"deleted_at_field_id\":null},\"fields\":[{\"field_id\":\"ld_bc\",\"name\":\"id\",\"type\":\"string\",\"nullable\":false,\"writable\":false}],\"indexes\":[]},{\"table_id\":\"tbl_records\",\"relation_id\":\"rel_records\",\"name\":\"records\",\"composition\":\"single_scope\",\"primary_key_field_id\":\"fld_id\",\"lifecycle\":{\"created_at_field_id\":null,\"updated_at_field_id\":null,\"deleted_at_field_id\":null},\"fields\":[{\"field_id\":\"fld_time\",\"name\":\"time_value\",\"type\":\"time\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_text\",\"name\":\"text_value\",\"type\":\"string\",\"nullable\":true,\"writable\":true},{\"field_id\":\"fld_json\",\"name\":\"json_value\",\"type\":\"json\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_int\",\"name\":\"int_value\",\"type\":\"int\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_id\",\"name\":\"id\",\"type\":\"string\",\"nullable\":false,\"writable\":false},{\"field_id\":\"fld_i64\",\"name\":\"int64_value\",\"type\":\"int64\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_float\",\"name\":\"float_value\",\"type\":\"float\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_dec\",\"name\":\"decimal_value\",\"type\":\"decimal\",\"nullable\":false,\"writable\":true,\"precision\":6,\"scale\":2},{\"field_id\":\"fld_dt\",\"name\":\"datetime_value\",\"type\":\"datetime\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_date\",\"name\":\"date_value\",\"type\":\"date\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_bytes\",\"name\":\"bytes_value\",\"type\":\"bytes\",\"nullable\":false,\"writable\":true},{\"field_id\":\"fld_bool\",\"name\":\"bool_value\",\"type\":\"boolean\",\"nullable\":false,\"writable\":true}],\"indexes\":[]},{\"table_id\":\"tbl_numbers\",\"relation_id\":\"rel_numbers\",\"name\":\"numbers\",\"composition\":\"single_scope\",\"primary_key_field_id\":\"fld_number_id\",\"lifecycle\":{\"created_at_field_id\":null,\"updated_at_field_id\":null,\"deleted_at_field_id\":null},\"fields\":[{\"field_id\":\"fld_number_id\",\"name\":\"id\",\"type\":\"int\",\"nullable\":false,\"writable\":false}],\"indexes\":[]},{\"table_id\":\"tbl_a\",\"relation_id\":\"rel_a\",\"name\":\"collision_first\",\"composition\":\"single_scope\",\"primary_key_field_id\":\"fld_bc\",\"lifecycle\":{\"created_at_field_id\":null,\"updated_at_field_id\":null,\"deleted_at_field_id\":null},\"fields\":[{\"field_id\":\"fld_bc\",\"name\":\"id\",\"type\":\"string\",\"nullable\":false,\"writable\":false}],\"indexes\":[]},{\"table_id\":\"tbl_longs\",\"relation_id\":\"rel_longs\",\"name\":\"longs\",\"composition\":\"single_scope\",\"primary_key_field_id\":\"fld_long_id\",\"lifecycle\":{\"created_at_field_id\":null,\"updated_at_field_id\":null,\"deleted_at_field_id\":null},\"fields\":[{\"field_id\":\"fld_long_id\",\"name\":\"id\",\"type\":\"int64\",\"nullable\":false,\"writable\":false}],\"indexes\":[]}]}",
+        "table_id": "tbl_records",
+        "pk_json": "\"\""
+      },
+      "expected": {
+        "canonical_bytes_hex": "73796e6368726f3a76333a726f772d6964656e746974793a763100000000000000000b74626c5f7265636f7264730000000000000006666c645f696401010000000000000000",
+        "expected_bytes_sha256": "f09e0965a2f8ee52267f7061b3bd6a9b240da9a4f6305e9879e20e5de93ac747",
         "expected_sha256": null
       }
     },
@@ -2039,8 +2126,23 @@
   ],
   "aggregate": {
     "algorithm": "sha-256",
-    "vector_count": 123,
+    "vector_count": 129,
     "vector_hashes": [
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-001",
+        "expected_bytes_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138",
+        "expected_sha256": "bea49446ab486b915a7de076a42515543b07705d81765885d4f3585c586d5138"
+      },
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-DUPLICATE-ROW-001",
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
+      {
+        "vector_id": "VEC-BATCH-ATOMIC-FALSE-001",
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
       {
         "vector_id": "VEC-BATCH-DUPLICATE-MUTATION-001",
         "expected_bytes_sha256": null,
@@ -2162,6 +2264,11 @@
         "expected_sha256": "fa3fb1c07e5aa05f807fc33d99b326e50dfeaebb8dde4f03ac5db3fec459a1ac"
       },
       {
+        "vector_id": "VEC-MUTATION-INSERT-EMPTY-COLUMNS-001",
+        "expected_bytes_sha256": "3a703ad93a07144d7ab91ce785f2b969522dd678d4c7ad06be2daf54be96ecd6",
+        "expected_sha256": "3a703ad93a07144d7ab91ce785f2b969522dd678d4c7ad06be2daf54be96ecd6"
+      },
+      {
         "vector_id": "VEC-MUTATION-INSERT-SORTED-COLUMNS-001",
         "expected_bytes_sha256": "5e64cd7af65472b28abef715d63e345cdbf6e370e8372ba6db6079199f448a24",
         "expected_sha256": "5e64cd7af65472b28abef715d63e345cdbf6e370e8372ba6db6079199f448a24"
@@ -2207,6 +2314,11 @@
         "expected_sha256": "82a28de4720e95be9f285b663378faa088f421218fdd3bf81ee7649ffc4d35a6"
       },
       {
+        "vector_id": "VEC-MUTATION-UPDATE-EMPTY-COLUMNS-001",
+        "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
+      {
         "vector_id": "VEC-ROW-DIGEST-DUPLICATE-FIELD-001",
         "expected_bytes_sha256": null,
         "expected_sha256": null
@@ -2234,6 +2346,11 @@
       {
         "vector_id": "VEC-ROW-DIGEST-UNKNOWN-FIELD-001",
         "expected_bytes_sha256": null,
+        "expected_sha256": null
+      },
+      {
+        "vector_id": "VEC-ROW-IDENTITY-EMPTY-TEXT-001",
+        "expected_bytes_sha256": "f09e0965a2f8ee52267f7061b3bd6a9b240da9a4f6305e9879e20e5de93ac747",
         "expected_sha256": null
       },
       {
@@ -2657,6 +2774,6 @@
         "expected_sha256": null
       }
     ],
-    "sha256": "68a7c888c317ad64dde088e89873db8079d5fc7ba0f89ab4ec6b575ec1c01cb5"
+    "sha256": "35081d3964f5b16c5a8039c4982d12c0800df78fe655ed02432c54135d18db05"
   }
 }

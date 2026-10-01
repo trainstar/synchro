@@ -107,7 +107,7 @@ func TestNewRetentionReconnectCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	defer upstream.Close()
 
 	coordinator, err := NewRetentionReconnectCoordinator(RetentionReconnectCoordinatorConfig{
-		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadRetentionReconnectAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create retention-reconnect coordinator: %v", err)
@@ -185,18 +185,74 @@ func TestRetentionReconnectSealedRetriesRetainExactBytes(t *testing.T) {
 }
 
 func TestRetentionReconnectQueueAllowsInspectableRejection(t *testing.T) {
-	coordinator := &RetentionReconnectCoordinator{
+	coordinator := retentionReconnectQueueCoordinator(t)
+	capture := retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)
+	if err := coordinator.validateQueue(capture); err != nil {
+		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
+	}
+}
+
+// The renewed queue can change delivery status only. Every authored field of
+// the retained mutation must survive generation renewal.
+func TestRetentionReconnectQueuePreservesAuthoredIntentAcrossRenewal(t *testing.T) {
+	coordinator := retentionReconnectQueueCoordinator(t)
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+		t.Fatalf("validate initial retention-reconnect queue: %v", err)
+	}
+	if err := coordinator.validateQueue(retentionReconnectQueueCapture(`"pending"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000000Z"`)); err != nil {
+		t.Fatalf("renewed status change was rejected: %v", err)
+	}
+	for name, capture := range map[string]finalCapture{
+		"authored value": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"changed"`, `"1970-01-01T00:00:00.000000Z"`),
+		"client version": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"queued"`, `"1970-01-01T00:00:00.000001Z"`),
+	} {
+		if err := coordinator.validateQueue(capture); err == nil {
+			t.Fatalf("renewal accepted a changed retained %s", name)
+		}
+	}
+	for name, capture := range map[string]finalCapture{
+		"authored value": retentionReconnectQueueCapture(`"sealed"`, "runtime-value", `"other"`, `"1970-01-01T00:00:00.000000Z"`),
+		// The value is preserved but held by another valid field.
+		"field identity": retentionReconnectQueueCapture(`"sealed"`, "runtime-other", `"queued"`, `"1970-01-01T00:00:00.000000Z"`),
+	} {
+		if err := retentionReconnectQueueCoordinator(t).validateQueue(capture); err == nil {
+			t.Fatalf("initial queue accepted a retained mutation with a wrong %s", name)
+		}
+	}
+}
+
+func retentionReconnectQueueCoordinator(t *testing.T) *RetentionReconnectCoordinator {
+	t.Helper()
+	scenario := loadRetentionReconnectAuthoredScenario(t)
+	steps := make(map[scenarios.StepID]scenarios.Step, len(scenario.Steps))
+	for _, step := range scenario.Steps {
+		steps[step.ID] = step
+	}
+	// Without a controller, a runtime binding with distinct names stands in for
+	// the controller's bound write and field IDs.
+	authored := steps[retentionReconnectStepOrder[0]].Operation
+	bound := authored
+	bound.Payload = json.RawMessage(`{"table_id":"runtime_rows","pk":{"id":"runtime-record"},"columns":[{"field_id":"value","value":"queued"}]}`)
+	intent, err := retentionReconnectAuthoredIntent(scenario.Model.Setup[0], authored, bound, func(_, field string) (string, error) { return "runtime-" + field, nil })
+	if err != nil {
+		t.Fatalf("bind retention-reconnect authored intent: %v", err)
+	}
+	return &RetentionReconnectCoordinator{
+		config:            RetentionReconnectCoordinatorConfig{Scenario: scenario},
+		steps:             steps,
+		authoredIntent:    intent,
 		sealedGeneration:  1,
 		sealedBatchID:     "batch-runtime",
 		sealedMutationIDs: []string{"mutation-runtime"},
 	}
-	capture := finalCapture{
+}
+
+func retentionReconnectQueueCapture(status, fieldID, value, clientVersion string) finalCapture {
+	return finalCapture{
 		ClientState: json.RawMessage(`{"schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"provenanceMaintenanceWorkCursor":"cursor","mutationLedgerCount":1}`),
-		Pending:     json.RawMessage(`[{"mutationID":"mutation-runtime","status":"sealed"}]`),
-		Rejected:    json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
-	}
-	if err := coordinator.validateQueue(capture); err != nil {
-		t.Fatalf("validate retention-reconnect queue with an inspectable rejection: %v", err)
+		Pending: json.RawMessage(`[{"mutationID":"mutation-runtime","tableName":"runtime_rows","recordID":"runtime-record","operation":"insert","status":` + status +
+			`,"clientVersion":` + clientVersion + `,"authoredFields":[{"fieldID":"` + fieldID + `","logicalType":"string","value":` + value + `}]}]`),
+		Rejected: json.RawMessage(`[{"mutationID":"mutation-runtime","status":"rejected_terminal","code":"policy_rejected"}]`),
 	}
 }
 
@@ -430,7 +486,7 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 		},
 	}, SequenceCheckpoint: 2}
 	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, resumedIdentityCursor, &trace)); err != nil {
-		t.Fatalf("validate floor-equal retention resume: %v", err)
+		t.Fatalf("validate compacted-scope retention resume: %v", err)
 	}
 	changed := retentionReconnectFloorCapture(t, "changed-cursor", identityCursor, nil)
 	changed.Status = restarted.Status
@@ -441,6 +497,11 @@ func TestRetentionReconnectFloorResumeRequiresDurableFloorCursor(t *testing.T) {
 	changed.Status = restarted.Status
 	if err := coordinator.validateRestartCapture(changed); err == nil {
 		t.Fatal("durable restart accepted a changed identity cursor")
+	}
+	changed = restarted
+	changed.Pending = json.RawMessage(`[{"mutationID":"lost-after-restart"}]`)
+	if err := coordinator.validateRestartCapture(changed); err == nil {
+		t.Fatal("durable restart accepted a changed retained queue")
 	}
 	trace.Observations[1].CursorFingerprints = []string{hashFingerprint(floorCursor)}
 	if err := coordinator.validateFloorResumeCapture(retentionReconnectFloorCapture(t, resumedCursor, resumedIdentityCursor, &trace)); err == nil {
@@ -471,6 +532,8 @@ func retentionReconnectFloorCapture(t *testing.T, cursor, identityCursor string,
 	}
 	return finalCapture{
 		ClientState: state,
+		Pending:     json.RawMessage(`[]`),
+		Rejected:    json.RawMessage(`[]`),
 		Status:      json.RawMessage(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`),
 		Trace:       traceRaw,
 	}

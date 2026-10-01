@@ -134,10 +134,15 @@ final class SynchroDatabase: @unchecked Sendable {
     }
 
     func writeTransaction<T>(_ block: (GRDB.Database) throws -> T) throws -> T {
-        let result = try dbPool.write { db in
-            try block(db)
+        let (result, changedRows) = try dbPool.write { db in
+            let changesBefore = db.totalChangesCount
+            let result = try block(db)
+            return (result, db.totalChangesCount != changesBefore)
         }
-        notifyDatabaseChange()
+        // A notification restarts the push debounce. A write that changed no rows must not delay the push.
+        if changedRows {
+            notifyDatabaseChange()
+        }
         return result
     }
 
@@ -195,6 +200,15 @@ final class SynchroDatabase: @unchecked Sendable {
         _ block: (ApplicationTransaction) throws -> T
     ) throws -> T {
         let result = try applicationDatabase.write(block)
+        notifyDatabaseChange()
+        return result
+    }
+
+    func applicationAtomicWriteTransaction<T>(
+        validate: (GRDB.Database, String) throws -> Void,
+        _ block: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        let result = try applicationDatabase.atomicWrite(validate: validate, block)
         notifyDatabaseChange()
         return result
     }
@@ -643,6 +657,7 @@ final class SynchroDatabase: @unchecked Sendable {
                     normalized_mutation_id TEXT,
                     sealed_batch_id TEXT,
                     sealed_ordinal INTEGER,
+                    atomic_group_id TEXT,
                     accepted_json TEXT,
                     rejected_json TEXT,
                     created_at TEXT NOT NULL,
@@ -913,7 +928,30 @@ final class SynchroDatabase: @unchecked Sendable {
             try Self.regenerateCaptureTriggers(db)
         }
         // Earlier capture triggers use exceeds_push_limit mutations as same-row dependencies.
+        // Their UPDATE capture also requires a context, which ordinary UPDATE statements no longer install. Issue #219.
         migrator.registerMigration("synchro_v17_push_limit_capture_dependency") { db in
+            try Self.regenerateCaptureTriggers(db)
+        }
+        migrator.registerMigration("synchro_v18_atomic_groups") { db in
+            if try db.tableExists("_synchro_pending_changes") {
+                let columns = Set(try db.columns(in: "_synchro_pending_changes").map(\.name))
+                if !columns.contains("atomic_group_id") {
+                    try db.execute(sql: "ALTER TABLE _synchro_pending_changes ADD COLUMN atomic_group_id TEXT")
+                }
+                // Capture-order selection follows normalized_mutation_id lineage.
+                if columns.contains("normalized_mutation_id") {
+                    try db.execute(sql: """
+                        CREATE INDEX IF NOT EXISTS idx_synchro_pending_changes_normalized
+                        ON _synchro_pending_changes (normalized_mutation_id)
+                        """)
+                }
+            }
+            try Self.regenerateCaptureTriggers(db)
+        }
+        // Earlier INSERT capture aborts a key-only insert. It now captures empty columns. D-01.
+        // It runs last, so its triggers include the atomic group column, and a database
+        // that already applied the atomic group migration also gets them.
+        migrator.registerMigration("synchro_v18_key_only_insert_capture") { db in
             try Self.regenerateCaptureTriggers(db)
         }
         try migrator.migrate(dbPool)

@@ -490,7 +490,7 @@ func validateKotlinPendingCycleBeginTransport(observations []TransportObservatio
 		return err
 	}
 	connect := observations[0]
-	if connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable == nil || *connect.Retryable {
+	if connect.StatusCode != 200 || connect.ErrorCode != nil || connect.Retryable != nil {
 		return errors.New("Kotlin Android pending-cycle setup connect did not succeed")
 	}
 	return nil
@@ -505,15 +505,12 @@ func validateKotlinPendingCycleTransport(observations []TransportObservation, ex
 		if observation.OperationClass != expectedClasses[index] {
 			return fmt.Errorf("Kotlin Android pending-cycle transport operation class %q at position %d, want %q", observation.OperationClass, index, expectedClasses[index])
 		}
-		if observation.Retryable == nil {
-			return fmt.Errorf("Kotlin Android pending-cycle %s transport retryability is absent", observation.OperationClass)
-		}
 	}
 	return nil
 }
 
 func validateKotlinPendingCycleStepWire(scenario scenarios.Scenario, stepID, operationClass string, step StepObservation, observed TransportObservation) error {
-	if step.Disposition != "success" || step.Wire == nil || step.Wire.HTTPStatus != observed.StatusCode || observed.Retryable == nil || step.Wire.Retryable != *observed.Retryable || !equalKotlinOptionalStrings(step.Wire.ErrorCode, observed.ErrorCode) {
+	if step.Disposition != "success" || step.Wire == nil || step.Wire.HTTPStatus != observed.StatusCode || step.Wire.Retryable != wireRetryable(observed) || !equalKotlinOptionalStrings(step.Wire.ErrorCode, observed.ErrorCode) {
 		return fmt.Errorf("Kotlin Android pending-cycle %s step result does not match transport", stepID)
 	}
 	if observed.OperationClass != operationClass {
@@ -543,6 +540,11 @@ func validateKotlinPendingCycleCleanupCall(call SynchronizationResult) error {
 }
 
 func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbox.NativeController, platform *Platform, client Client, step scenarios.PendingCycleNativeCRUDStep, name string) (Result, error) {
+	// The Swift consumer uses the same bound. Without it, a call that never
+	// pushes waits until the suite timeout and reports no cause.
+	deadline, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ctx = deadline
 	state, err := platform.clientFor(client)
 	if err != nil {
 		return Result{}, fmt.Errorf("access Kotlin Android pending-cycle %s transport: %w", name, err)
@@ -552,10 +554,17 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if err != nil {
 		return Result{}, fmt.Errorf("run Kotlin Android pending-cycle %s push: %w", name, err)
 	}
+	if call.Completion == "error" {
+		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s start failed: completion %q", name, call.Completion)
+	}
 	observation, err := kotlinScenarioWire(call, "push")
 	if err != nil {
 		if err := waitForTransportObservation(ctx, state, checkpoint, "push"); err != nil {
-			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push: %w", name, err)
+			classes := make([]string, 0, len(call.transportObservations))
+			for _, observed := range call.transportObservations {
+				classes = append(classes, fmt.Sprintf("%s:%d", observed.OperationClass, observed.StatusCode))
+			}
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle %s push after call completion %q with transport %v: %w", name, call.Completion, classes, err)
 		}
 		observations, err := state.session.ObservationsAfter(checkpoint)
 		if err != nil {
@@ -563,7 +572,7 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 		}
 		found := false
 		for _, candidate := range observations {
-			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable != nil && !*candidate.Retryable {
+			if candidate.OperationClass == "push" && candidate.StatusCode == 200 && candidate.Retryable == nil {
 				observation = candidate
 				found = true
 				break
@@ -573,7 +582,7 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 			return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s recovery did not produce a successful push", name)
 		}
 	}
-	if observation.StatusCode != 200 || observation.Retryable == nil || *observation.Retryable {
+	if observation.StatusCode != 200 || observation.Retryable != nil {
 		return Result{}, fmt.Errorf("Kotlin Android pending-cycle %s push did not complete successfully", name)
 	}
 	if err := controller.BindApplicationPush(step.ApplicationPush); err != nil {
@@ -582,11 +591,63 @@ func runKotlinPendingCycleGeneratedPush(ctx context.Context, controller *blackbo
 	if result, processErr := controller.ProcessStep(ctx, nil, step.Materialize); processErr != nil || result.Disposition != "success" {
 		return Result{}, fmt.Errorf("materialize Kotlin Android pending-cycle %s: %w", name, kotlinResultError(processErr, result.Disposition))
 	}
-	snapshot, err := platform.scenarioSnapshot(ctx, client)
+	// The start call returns while the managed loop can still finish its run.
+	// A rebuild after the push can receive capture_pending until the push is
+	// materialized, and it retries after its backoff. Inspect the client when
+	// the run has settled.
+	snapshot, err := awaitKotlinPendingCycleReady(ctx, platform, client, state, observation.Sequence)
 	if err != nil {
 		return Result{}, fmt.Errorf("capture Kotlin Android pending-cycle synchronized %s: %w", name, err)
 	}
 	return snapshot, nil
+}
+
+// A start that resumes a future backoff deadline returns before its cycle runs.
+// The push is then observed while the rebuild and pull of the cycle still run.
+func awaitKotlinPendingCycleReady(ctx context.Context, platform *Platform, client Client, state *platformClient, pushSequence uint64) (Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for {
+		// Read transport first, so ready is sampled after that response arrived.
+		if _, err := state.session.Execute(ctx, Request{Operation: "transport-snapshot"}); err != nil {
+			return Result{}, fmt.Errorf("poll Kotlin Android pending-cycle transport: %w", err)
+		}
+		observations, err := state.session.ObservationsAfter(pushSequence)
+		if err != nil {
+			return Result{}, err
+		}
+		snapshot, err := platform.scenarioSnapshot(ctx, client)
+		if err != nil {
+			return Result{}, err
+		}
+		if snapshot.Status == nil || *snapshot.Status == "error" || *snapshot.Status == "stopped" {
+			return Result{}, errors.New("Kotlin Android pending-cycle synchronization is unavailable")
+		}
+		scopes, err := androidCursorScopeStates(snapshot.ScopeStates)
+		if err != nil {
+			return Result{}, err
+		}
+		cursorsInstalled := len(scopes) != 0
+		for _, scope := range scopes {
+			cursorsInstalled = cursorsInstalled && scope.Cursor != nil
+		}
+		// Ready also occurs between push and pull, so require the terminal pull
+		// and every scope cursor.
+		if *snapshot.Status == "ready" && snapshot.Failure == nil && cursorsInstalled && len(observations) > 0 {
+			last := observations[len(observations)-1]
+			if last.OperationClass == "pull" && last.StatusCode == 200 && last.Retryable == nil && last.PullResponseFacts != nil && !last.PullResponseFacts.HasMore {
+				if snapshot.PendingChangeCount == nil || *snapshot.PendingChangeCount != 0 {
+					return Result{}, errors.New("Kotlin Android pending-cycle synchronization retained pending mutations")
+				}
+				return snapshot, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return Result{}, fmt.Errorf("wait for Kotlin Android pending-cycle ready state: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func kotlinPendingCycleServerVersion(target scenarios.PendingCycleNativeTarget, snapshot Result) (string, error) {

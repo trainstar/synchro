@@ -270,7 +270,7 @@ class HttpClient(
                 cursorFingerprintsComplete = cursorFingerprintsComplete,
                 requestFacts = requestFacts,
                 responseBody = if (observedStatusCode == 200) responseBody else null,
-                errorCode = observedErrorCode(observedStatusCode, responseBody),
+                reportedError = observedError(observedStatusCode, responseBody),
             )
             observationRecorded = true
             val rebuildCursorOverride = config.transportObservationCollector?.pauseIfArmed(operationClass)
@@ -408,13 +408,14 @@ class HttpClient(
         cursorFingerprintsComplete: Boolean?,
         requestFacts: TransportRequestFacts?,
         responseBody: String? = null,
-        errorCode: String? = null,
+        reportedError: ErrorBody? = null,
     ) {
         val duration = (System.nanoTime() - attemptStarted).coerceAtLeast(1)
         config.transportObservationCollector?.record(
             operationClass = operationClass,
             statusCode = statusCode,
-            errorCode = errorCode,
+            errorCode = reportedError?.code?.let { json.encodeToString(it).removeSurrounding("\"") },
+            retryable = reportedError?.retryable,
             durationNanoseconds = duration,
             cursorFingerprints = if (operationClass == TransportOperationClass.PULL) {
                 cursorFingerprints ?: emptyList()
@@ -562,9 +563,9 @@ class HttpClient(
         }
     }
 
-    private fun observedErrorCode(statusCode: Int, responseBody: String?): String? {
+    private fun observedError(statusCode: Int, responseBody: String?): ErrorBody? {
         if (statusCode in 200..299 || responseBody == null) return null
-        return decodeProtocolError(responseBody)?.code?.let { json.encodeToString(it).removeSurrounding("\"") }
+        return decodeProtocolError(responseBody)
     }
 
     private fun decodeProtocolError(body: String): ErrorBody? = try {
@@ -663,7 +664,9 @@ private suspend fun OkHttpClient.suspendEnqueue(request: Request): Response {
 
             override fun onResponse(call: Call, response: Response) {
                 if (continuation.isActive) {
-                    continuation.resume(response)
+                    // The caller can be canceled after this resume and before it runs. It then
+                    // never reads the response, so cancellation closes it and releases the exchange.
+                    continuation.resume(response) { response.close() }
                 } else {
                     response.close()
                 }

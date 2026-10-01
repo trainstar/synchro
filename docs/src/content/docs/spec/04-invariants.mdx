@@ -18,6 +18,7 @@ This catalog defines the observable conditions that every conforming Synchro pro
 [ADR 003]: /synchro/architecture/decisions/003-pull-cursor-and-rebuild/
 [ADR 004]: /synchro/architecture/decisions/004-membership-schema-and-retention/
 [ADR 005]: /synchro/architecture/decisions/005-integrity-authorization-and-seeds/
+[Client Contract]: /synchro/spec/02-client-contract/
 
 For every release, every level-three invariant heading in this document maps to
 exactly one requirement record, and every requirement maps through exactly one
@@ -41,11 +42,23 @@ Clients MUST preserve each non-null server-issued cursor byte-for-byte and MUST 
 
 ### Opaque Server Version Invariant
 
-`server_version` MUST be a nonempty server-generated equality token. Clients and adapters MUST NOT parse, sort, increment, timestamp-compare, or generate it. Any such operation, or any server version derived from client data, is a violation of the version rules in [ADR 001] and [ADR 002].
+`server_version` MUST be a server-generated equality token of 1 through 64 octets. Each octet MUST be printable ASCII from `0x20` through `0x7E` other than `"` and `\`, so its canonical JSON string is its length plus 2 octets. Clients and adapters MUST NOT parse, sort, increment, timestamp-compare, or generate it. A client MAY use the length bound only to compute a worst-case request size. Any such operation, a token outside the bound, or any server version derived from client data, is a violation of the version rules in [ADR 001] and [ADR 002].
 
 ### Scope Assignment Authority
 
-Only the server MUST determine the authoritative scope set for an authenticated client. A client-authored scope instance or replication predicate MUST be rejected, and accepting one is a violation of the assignment rules in [ADR 003] and [ADR 004].
+Only the server MUST determine the authoritative scope set for an authenticated client. The set is the union of the default user scope, registered shared scopes, explicit grants, and registered assignment function results. A client-authored scope instance or replication predicate MUST be rejected, and accepting one is a violation of the assignment rules in [ADR 003] and [ADR 004].
+
+### Pull-Time Scope Reconciliation
+
+Connect and pull MUST compute the authoritative scope set with the same rule. Pull MUST reconcile that set after every request validation passes and before it builds `scope_updates`. A changed set MUST advance `scope_set_version` by exactly one and MUST appear in `scope_updates` of that response. An unchanged set and a failed pull MUST write no assignment state. Rebuild MUST NOT reconcile assignment. A stale set in a successful pull, any other version step, or an assignment write from a failed pull is a violation of Scope assignment in [ADR 004].
+
+### Empty Scope Set Pull
+
+A native client MUST send pull in each normal sync cycle, also when it knows no scope. That pull carries an empty `scopes` map. The client MUST apply each scope that the response adds, rebuild it, and materialize its rows in the same cycle. A cycle that skips pull because the local scope set is empty is a violation of Sync ordering in the [Client Contract].
+
+### Registered Scope Assignment Function
+
+At most one registered assignment function MUST contribute scopes, and registration MUST reject a function that breaks a rule in Scope assignment in [ADR 004]. Each evaluation MUST confirm the registered definition hash. It MUST reject a null result, an empty result, a `user:` result, and more distinct results than `max_scopes`. A rejected evaluation MUST fail the complete connect or pull with `500 sync_integrity_failure` and no assignment change. Treating a failure as an empty set, truncating results, or evaluating a changed definition is a violation.
 
 ### Scope Set Version Monotonicity
 
@@ -113,6 +126,14 @@ A first push execution MUST commit its batch response, every mutation outcome, e
 
 An HTTP 200 first execution MUST place every requested mutation exactly once in `accepted` or `rejected`, preserve request-relative order within each array, and use only the statuses and required fields defined by [ADR 002]. An omitted, duplicated, cross-listed, or retryable per-mutation outcome is a violation of Complete outcome partition.
 
+### Atomic Mutation Group
+
+A first execution of a push request with `atomic: true` MUST commit the source writes of every mutation or of none. The server MUST stop at the first outcome that is not `applied` and roll back every source write, version transition, and write fence of the group. The failing mutation MUST keep its status and code, and a failing conflict MUST carry committed state read after the rollback. Every other mutation MUST receive `rejected_terminal` with `atomic_batch_rejected`. A partial group commit, a conflict row from rolled-back state, an accepted-write epoch advance after rollback, or `atomic_batch_rejected` in a non-atomic response is a violation of Atomic mutation groups in [ADR 002].
+
+### Push Unit Constraint Boundary
+
+A push unit is one mutation of a non-atomic request or the complete group of an atomic request. Before the first unit, the server MUST fail the complete call with SQLSTATE `25000` when a relation with a deferrable trigger has a pending trigger event in the calling transaction, and it MUST NOT fire that event. Each unit MUST start with every deferrable constraint deferred and MUST check every deferrable constraint before the unit ends. A failed check at a unit end MUST roll back only that unit and produce `rejected_terminal` with `validation_failed`. In an atomic request, the last mutation of the group carries that outcome. The last mutation of a unit MUST own each synced write that the unit-end check causes. Each accepted outcome MUST report its row state after the unit-end check. A check at transaction commit, a caller event fired in the call, or a constraint mode that depends on the unit position is a violation of Push unit constraint checks in [ADR 002].
+
 ### Mutation Outcome Schema Binding
 
 Every mutation outcome MUST carry the exact immutable `outcome_schema` used for classification and row checksum encoding. First execution uses the current request schema; exact and cross-batch replay preserve the original stored binding. A client MUST verify historical rows under that manifest and MUST NOT apply an unsafe historical row as current-schema state. Missing, rewritten, unavailable, or checksum-inconsistent binding, or loss of later local intent during historical reconciliation, is a violation of Exact replay and Complete outcome partition in [ADR 002].
@@ -120,6 +141,10 @@ Every mutation outcome MUST carry the exact immutable `outcome_schema` used for 
 ### Atomic Version Compare And Swap
 
 Update and delete MUST lock the row and row-version identity, verify byte-for-byte `base_version` equality, and perform the source transition and version-fence transition atomically; insert MUST atomically reserve an absent row identity. An unlocked check followed by a write, a write after a failed comparison, or two successful reservations is a violation of Opaque server versions and atomic compare-and-swap in [ADR 002].
+
+The first lock of the authoritative source row MUST use the row lock mode that PostgreSQL takes for the source statement before its `BEFORE` row triggers run. A hard delete MUST lock the row `FOR UPDATE`. An update or a soft delete MUST lock the row `FOR UPDATE` when its updated column set contains a key column of the partition that holds the row. Otherwise it MUST lock the row `FOR NO KEY UPDATE`. A key column is a key attribute of a live unique index that has no predicate and no expressions. The updated column set contains each assigned column and each generated column that PostgreSQL computes again for the statement. The server MUST compute the mode for each update and each soft delete from the relation cache entry that the statement uses. It MUST compute the mode after it holds `ROW EXCLUSIVE` on each relation from the registered relation to the row partition, and after it accepts invalidation messages. An insert, a reread after an insert that applied no row, and a reread after an atomic group rollback MUST lock the row `FOR NO KEY UPDATE`.
+
+A stronger lock blocks each foreign key check of a child row until the push ends. A weaker lock makes the statement upgrade the lock while it holds the weaker lock, which can cause a deadlock. As in a native statement, a `BEFORE` trigger that changes a key column can make PostgreSQL take the stronger lock at the write. An index that a concurrent build or drop changes after the mode computation can also change the lock at the write. A deadlock returns SQLSTATE `40P01`, and the push fails with a retryable error.
 
 ### Concurrent Update Delete Conservation
 
@@ -145,6 +170,10 @@ Schema or application reconciliation MUST give changed intent a new mutation UUI
 
 Before transmission, a same-row insert, update, and delete chain without a legal server precondition MUST be normalized or blocked exactly as defined by [ADR 002]. Every original local action MUST remain linked and inspectable, no dependent mutation may be sent with a fabricated base version, and an insert followed by delete before sealing MUST create no transient server row.
 
+### Atomic Group Capture And Selection
+
+Every mutation captured inside one atomic write transaction MUST carry that transaction's atomic group identity, and no other mutation MAY carry it. The client MUST reject and roll back a group that fails a commit-time rule in Atomic write groups in the [Client Contract]. The client MUST send a group only as one complete sealed batch with `atomic: true` that contains no other mutation. When one unsent group member becomes `blocked_by_predecessor`, every unsent member of that group MUST become blocked. A split group, a mixed batch, or a committed invalid group is a violation.
+
 ## Server Change Capture Invariants
 
 ### No Silent Server Change Loss
@@ -165,7 +194,7 @@ One committed source transaction MUST be one atomic replay unit with stable tran
 
 ### Contiguous WAL Acknowledgement
 
-The logical slot MUST advance only after materialization commits and only to the `end_lsn` of the largest contiguous prefix of completely durable source transactions. Acknowledging an event, batch maximum, later noncontiguous transaction, or incomplete transaction is a violation of Slot acknowledgement in [ADR 001].
+The logical slot MUST advance only after materialization commits and only to a durable processed boundary before which every source transaction is completely durable. Acknowledging an event, batch maximum, later noncontiguous transaction, incomplete transaction, or a position after an unprocessed source transaction is a violation of Slot acknowledgement in [ADR 001].
 
 ### Blocking Poison Quarantine
 
@@ -177,7 +206,7 @@ A stream reset MUST use a permanent candidate logical slot created through the r
 
 ### Commit Ordered Registry Activation
 
-Each source transaction MUST use exactly the latest validated registry generation whose activation precedes it in commit order, and all events in that transaction MUST use that generation. Activation by notification alone or switching generation within a transaction is a violation of Registry activation and relation drift in [ADR 001].
+Each source row event MUST use exactly the latest validated registry generation whose activation precedes that event in source order. An activation precedes an event when an earlier source transaction commits it, or when its activation message precedes the event in the same source transaction. Activation by notification alone, or a generation switch at any position other than an activation message, is a violation of Registry activation and relation drift in [ADR 001].
 
 ### Qualified Registered Relation Identity
 
@@ -185,7 +214,7 @@ Every registry, catalog, publication, decoder, hydration, and scope-function loo
 
 ### Registered Key And Replica Identity
 
-An active registered relation MUST have exactly one non-null declared primary-key column of portable type `string`, `int`, or `int64`, with `REPLICA IDENTITY DEFAULT` backed by that key. The primary key MUST NOT be deferrable, because PostgreSQL uses only an immediate key as the replica identity. The key column type MUST be one of the built-in key types in Primary key and replica identity contract in [ADR 004], because every component identifies a row by the text form of its key. Synced mutation validation and the source trigger MUST reject any update that changes the key value before fence or row effects. The capture fence MUST also reject a key change with SQLSTATE `23514`, including a key change by a later `BEFORE UPDATE` trigger and a partition row move. Accepting any other key shape, key type, or replica identity, continuing capture after drift, or capturing a key-value update as one event is a violation of Primary key and replica identity contract in [ADR 004].
+An active registered relation MUST have exactly one non-null declared primary-key column of portable type `string`, `int`, or `int64`, with `REPLICA IDENTITY DEFAULT` backed by that key. The primary key MUST NOT be deferrable, because PostgreSQL uses only an immediate key as the replica identity. A registration with push policy `enabled` MUST NOT use a database-generated key. The key column type MUST be one of the built-in key types in Primary key and replica identity contract in [ADR 004], because every component identifies a row by the text form of its key. Synced mutation validation and the source trigger MUST reject any update that changes the key value before fence or row effects. The capture fence MUST also reject a key change with SQLSTATE `23514`, including a key change by a later `BEFORE UPDATE` trigger and a partition row move. Accepting any other key shape, key type, or replica identity, continuing capture after drift, or capturing a key-value update as one event is a violation of Primary key and replica identity contract in [ADR 004].
 
 ### Capture Readiness
 
@@ -197,7 +226,7 @@ Every actual registered source row operation MUST emit exactly one row-level `AF
 
 ### Reset Baseline Fence Coverage
 
-During reset, every accepted fence visible in the imported candidate-slot snapshot MUST have immutable verified baseline coverage and complete projected row/version state, while every later fence MUST reconcile through candidate-slot WAL. Activation MUST wait until every accepted fence through the barrier has exactly one of those coverage modes. Clearing a fence by LSN guess, fabricating an event, omitting a pre-boundary accepted write, or leaving a covered fence permanently pending is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
+During reset, every accepted fence visible in the imported candidate-slot snapshot MUST have immutable verified baseline coverage and complete projected row/version state, while every later fence MUST reconcile through candidate-slot WAL. Activation MUST wait until every accepted fence through the barrier has exactly one of those coverage modes. The projected row/version state is the final state in that snapshot. It is separate from historical coverage. For a row with a pending fence in that snapshot, the final source-owned version MUST come from a covered fence of that row. If the snapshot does not contain a row and its source version is live, the baseline has no row or version for that row. The reset MUST NOT invent an event or tombstone for such a row. A deletion version in that snapshot MUST remain staged, including a version that a soft-delete update sets. Clearing a fence by LSN guess, fabricating an event, omitting a pre-boundary accepted write, or leaving a covered fence permanently pending is a violation of Causally Bound Projection Baseline And Stream Reset in [ADR 001].
 
 ## Scope And Membership Invariants
 
@@ -211,7 +240,7 @@ Membership and impact functions MUST satisfy the exact registered signatures and
 
 ### Dependency Driven Membership Propagation
 
-Every declared external dependency change MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
+Every declared dependency change, including a same-relation sibling dependency, MUST be captured through a synced or capture-only dependency registration, use its captured old and new image to identify every affected source row, and evaluate membership against the final commit-ordered projected state of that source transaction. Missing an affected row, reading later live state, or treating impact failure as no impact is a violation of Function restrictions in [ADR 004].
 
 ### Membership Generation Invalidation
 
@@ -489,7 +518,7 @@ Logs, metrics labels, traces, readiness output, and quarantine text MUST NOT con
 
 ### Pgrx Installation Authority
 
-pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
+pgrx annotations and `extension_sql!` declarations in the Rust extension source MUST be the sole authored source for extension DDL, grants, revokes, comments, and membership, except for the reviewed update scripts `synchro_pg--<from>--<to>.sql` in `extensions/synchro-pg/sql`. Shipping hand-maintained parallel SQL or generated SQL that does not regenerate byte-for-byte is a violation of Installation and migration baseline in [ADR 005].
 
 ### Extension Migration Baseline
 

@@ -178,11 +178,15 @@ The operation presence matrix is fixed:
 
 | Operation | `base_version` | `columns` | `client_version` |
 | --- | --- | --- | --- |
-| `insert` | absent | nonempty authored writable fields | required |
+| `insert` | absent | authored writable fields, possibly empty | required |
 | `update` | required opaque token | nonempty authored writable patch | required |
 | `delete` | required opaque token | absent | required |
 
-The client rejects an empty patch, an unknown operation, a missing required
+An insert that authors no writable field is a key-only create with empty
+`columns`. The client captures it only when the insert has its own capture
+context, because an insert without that context has unknown authored fields.
+
+The client rejects an empty update patch, an unknown operation, a missing required
 value, a present forbidden value, or a duplicate mutation ID within one batch
 before sending it. The server remains authoritative for schema, policy, value,
 and row state validation.
@@ -220,6 +224,11 @@ chain into a new linked wire mutation:
 - insert plus delete becomes no server mutation;
 - update plus updates becomes one update from the original known server base;
 - update plus delete becomes one delete from that original base.
+
+A normalized mutation takes the durable local order of its first source.
+Thus normalization does not move a mutation after a later capture of another
+row. For example, a parent insert stays before a child insert that the
+application captured after it.
 
 Original records become durable inspectable `superseded_before_send` or
 `cancelled_before_send` outcomes linked to the normalized mutation or
@@ -290,15 +299,33 @@ The client measures the batch envelope with the protocol maximum for
 generation renewal or schema reconciliation also stays within the limits.
 
 The client selects pending mutations in durable local order. It stops before
-the first mutation that causes the batch to exceed a request limit. That
+the first mutation that causes a nonempty batch to exceed a request limit. That
 mutation starts the next batch.
 
-The client does not seal or send a mutation that exceeds a mutation limit. The
+The client does not seal or send a mutation that exceeds a mutation limit. It
+also does not seal or send a mutation that exceeds a request limit alone in an
+empty batch with the reserved envelope. The
 mutation gets the durable local state `exceeds_push_limit`. It keeps its
 authored content and stays inspectable. Its same-row dependents become
 `blocked_by_predecessor`. The client then continues with the next pending
 mutations. `exceeds_push_limit` is not a push operation and is not a server
 outcome.
+
+The client applies these checks only when it seals a new batch. A loaded
+sealed batch keeps its exact stored bytes and is sent before any new batch.
+A client release without these checks could seal a batch above a request or
+mutation limit. The server rejects each send of that batch with
+`400 invalid_request`, because the client does not change sealed bytes. This
+release defines no recovery for such a batch.
+
+If the reserved envelope of a new batch alone exceeds a request limit, the
+client seals no new batch. It records a nonretryable `invalid_request` blocking
+failure with the recovery action `none`. The failed seal transaction preserves
+each pending mutation's state, authored content, and dependencies. It does not
+undo queue normalization that committed before sealing. This local configuration failure has no
+HTTP status and is not a server outcome. It does not change, discard, or block
+the replay of an existing sealed batch. A client with no pending mutation seals
+no new batch and records no failure.
 
 ### Exact replay
 
@@ -321,6 +348,89 @@ HTTP 429 and 503 responses contain no mutation outcomes. The client retains the
 sealed batch unchanged and retries it after the prescribed delay. A request
 level `schema_mismatch` also retains the sealed batch unchanged. A new batch
 identity is required for a reconciled request schema.
+
+## Atomic write groups
+
+`atomicWriteTransaction` runs an application write transaction whose synced
+mutations the server applies all together or not at all.
+
+| Surface | API |
+| --- | --- |
+| Swift | `func atomicWriteTransaction<T>(_ block: (ApplicationTransaction) throws -> T) throws -> T` on `SynchroClient` |
+| Kotlin | `fun <T> atomicWriteTransaction(block: (ApplicationTransaction) -> T): T` on `SynchroClient` |
+| React Native | `atomicWriteTransaction<T>(fn)` on `SynchroClient`, backed by the TurboModule method `beginAtomicWriteTransaction(): Promise<string>` |
+
+The API opens the transaction through the same path as `writeTransaction`, so
+nesting behavior is identical to `writeTransaction`.
+
+The client captures a group with these rules:
+
+- At transaction start, the client writes a new lowercase UUID to
+  `_synchro_meta` with key `atomic_group_id`.
+- Each capture trigger copies that value into the nullable `atomic_group_id`
+  column of `_synchro_pending_changes`.
+- Before commit, the client deletes the `_synchro_meta` key. A rollback
+  removes it.
+- A group that captures no rows commits as an ordinary empty write.
+
+Before commit, the client validates the group with these rules in this order.
+A failure throws a typed error and rolls back the local transaction.
+
+1. No `delete` entry for a row is followed by a later entry for the same row
+   in the group. The failure reason is `deleteFollowedByWrite`.
+2. The client runs chain normalization on the group rows only. A chain merges
+   only entries with an equal `atomic_group_id`, and NULL equals NULL.
+3. The normalized group has at most 1000 entries. The failure reason is
+   `tooManyMutations`.
+4. Each normalized mutation is within the mutation limits of "Push limits at sealing":
+   at most 65,536 octets in the canonical normalized mutation form, and at
+   most 256 authored columns. The failure reason is `mutationTooLarge`.
+   Without this rule, one member could get `exceeds_push_limit` alone when
+   the client seals the batch.
+5. The worst-case request body and its RFC 8785 form are each at most
+   1,048,576 octets. The failure reason is `requestTooLarge`.
+
+The worst-case request uses these values:
+
+| Member | Value used for measurement |
+| --- | --- |
+| `client_id` | The real client ID |
+| `client_generation` | `9007199254740991` |
+| `batch_id` | A 36-octet UUID |
+| `schema.version` | `9007199254740991` |
+| `schema.hash` | A 64-octet lowercase hexadecimal string |
+| `atomic` | `true` |
+| `base_version`, when known | The real value |
+| `base_version`, when unknown | A 64-octet placeholder string |
+
+The typed error is `SynchroError.atomicGroupInvalid(reason:
+AtomicGroupInvalidReason)` in Swift and `SynchroError.AtomicGroupInvalid(reason:
+AtomicGroupInvalidReason)` in Kotlin. In React Native, the rejected promise has
+code `atomic_group_invalid`. `AtomicGroupInvalidReason` has exactly the four
+reasons named above.
+
+The batch selector applies these rules:
+
+- It reads eligible entries in local order.
+- If the first eligible entry has no group, the batch is the leading run of
+  eligible entries with no group, up to the batch size. The run stops at the
+  first grouped entry.
+- If the first eligible entry has a group, the batch is the complete
+  normalized group with `atomic: true`. The selector selects it only if every
+  member is unsealed, has no unresolved dependency, and is an insert or has a
+  base version. Otherwise it selects no batch, and the group waits.
+- An atomic batch ignores the configured batch size.
+- When the blocking rule marks one unsent group member
+  `blocked_by_predecessor`, the same local transaction marks every unsent
+  member of that group `blocked_by_predecessor`.
+- The sealed request includes `atomic`, so each retry sends identical content.
+
+A failed group uses the ordinary outcome paths. The client adds no revert path.
+An `atomic_batch_rejected` outcome follows the terminal path, so the local row
+stays and `inspectRejectedMutations` reports the mutation. A failing conflict
+follows the conflict path. It applies `server_row` and reapplies later local
+intent. After a failed group with a conflict, local state therefore holds the
+server row for the conflicting member and local values for every other member.
 
 ## Exact-ID reconciliation
 
@@ -347,14 +457,15 @@ affected assigned scope for current-schema rebuild.
 
 ### Accepted outcomes
 
-For an accepted insert or update, the outcome contains the complete canonical
-`server_row`, matching `row_checksum`, and new opaque `server_version`. For an
-accepted delete, the outcome contains the new opaque version and either the
-authoritative source tombstone with its matching checksum or no row and no
-checksum for a fence-only delete.
+An accepted outcome contains the new opaque `server_version` and reports the
+row state after its push unit. If the row exists after the unit, the outcome
+contains the complete canonical `server_row` or source tombstone and the
+matching `row_checksum`. If the row does not exist after the unit, the outcome
+contains no row and no checksum. This absence applies to every operation. A
+fence-only delete is one example. A later write in the same unit, such as a
+cascade delete in an atomic group, can also remove an inserted or updated row.
 
-The client verifies any row checksum, applies the canonical row or deletion
-state, stores the returned opaque server version, records the accepted outcome,
+The client verifies any row checksum, applies the canonical row or absence, stores the returned opaque server version, records the accepted outcome,
 and removes the mutation from the sendable queue in one local transaction. A
 completed mutation is not applied again when its exact replay response is
 received.
@@ -374,7 +485,14 @@ authoritative row state and returns `conflict` with one of the server-defined
 codes, including `version_conflict`, `row_already_exists`, `row_deleted`, or
 `row_not_found` as applicable. A terminal semantic rejection uses
 `rejected_terminal` and a terminal code such as `policy_rejected`,
-`validation_failed`, `table_not_synced`, or `schema_incompatible`.
+`validation_failed`, `table_not_synced`, `schema_incompatible`, or
+`atomic_batch_rejected`.
+
+A terminal rejection has no row and no server version. It does not describe
+absence or deletion. This rule also applies to `policy_rejected` when source
+row security hides a live row or denies a write. The client does not
+remove the local row or replace its stored server version because of a
+terminal rejection.
 
 When an outcome includes a canonical row or tombstone, matching checksum, and
 server version, the client verifies and applies that state in the same
@@ -527,6 +645,10 @@ The client applies the server's assignment delta atomically with the returned
 The client never invents an assignment, advances `scope_set_version` from a
 local observation, or uses a removed scope's cursor for another scope.
 
+Pull reconciles assignment, so a client that knows no scope still pulls in
+each normal sync cycle. This pull has an empty `scopes` map. A new assignment
+then arrives in that response without a reconnect.
+
 `scope_set_version` advances only from an authoritative assignment response
 that changes the assigned scope set. The client rejects a future value,
 preserves the current value when the assignment set is unchanged, and commits
@@ -543,7 +665,8 @@ The normal native sync loop is:
 3. Push every eligible sealed batch in durable queue order.
 4. Reconcile each successful push response by exact mutation ID.
 5. Rebuild scopes with no usable cursor or an explicit rebuild requirement.
-6. Pull incremental changes for assigned scopes.
+6. Pull incremental changes for assigned scopes. Send this pull also when no
+   scope is assigned. Its `scopes` map is then empty.
 7. Apply changes, assignment updates, checksums, and cursors atomically.
 8. Rebuild scopes listed by pull, then continue incremental pull.
 9. Publish final typed status and events.
@@ -925,17 +1048,36 @@ semantics:
 - `query(sql, parameters)` for local reads
 - `execute(sql, parameters)` for local writes
 - `transaction(...)` for application-local transactions
+- `atomicWriteTransaction(...)` for an application transaction whose synced
+  mutations the server applies all together or not at all
 - `startSync()` to arm the client-owned lifecycle
 - `stopSync()` to stop network work without clearing durable state
 - `syncNow()` to request an immediate cycle through the native scheduler
 - `getSyncStatus()` for the current typed state and bounded diagnostics
 - `observeSyncStatus(...)` for typed state changes
 - `observeSyncEvents(...)` for typed sync events
-- `inspectPendingMutations()` for durable unresolved queue records
-- `inspectRetainedMutations()` for all durable queue records, which include
+- `inspectRetainedMutationRecords()` for all durable queue records, which include
   local terminal states such as `exceeds_push_limit`
-- `inspectRejectedMutations()` for durable terminal outcomes and authored data
+- `inspectRejectedMutationRecords()` for durable terminal outcomes and authored data
 - an explicit policy operation to clear retained rejected records
+
+The deprecated `inspectPendingMutations()`, `inspectRetainedMutations()`, and
+`inspectRejectedMutations()` keep their published signatures and behavior. They
+return current records only, and they fail when a legacy record is present.
+
+Each retained record is either a current record or a legacy record.
+A current record has its table ID, primary-key binding, authored schema, and
+authored field values. A legacy record comes from a queue that existed before the
+mutation ledger. It has only the fields that the old queue stored. Its binding
+fields and authored values are absent, and the SDK does not fill them with
+placeholder values. A record with only some bindings fails inspection.
+
+Each rejected record is also either a current record or a legacy record. A
+current rejected record has its exact mutation JSON and rejection JSON. A legacy
+rejected record comes from a rejection table that existed before the mutation
+ledger. It has only the fields that the old table stored. Its mutation JSON and
+rejection JSON are absent. A record with only one of the two JSON values fails
+inspection.
 
 An application transaction callback must return before the application calls a
 sync lifecycle method. A client rejects this call before it acquires a lifecycle

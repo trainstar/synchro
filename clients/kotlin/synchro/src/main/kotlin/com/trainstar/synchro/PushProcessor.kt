@@ -141,14 +141,15 @@ internal class PushProcessor(
             syncedTables,
         )?.let { return@writeTransaction it }
 
+        blockDependentsOfBlockedPredecessors(db)
         normalizeUnsealedChains(db)
         val batchID = UUID.randomUUID().toString()
-        val selection = selectWithinPushLimits(
+        val leadingRun = selectWithinPushLimits(
             db,
             batchSize,
-            PushLimits.reservedEnvelope(json, clientID, batchID, schemaHash),
+            PushLimits.reservedEnvelope(json, clientID, batchID, schemaHash, atomic = false),
         )
-        if (selection.isEmpty()) return@writeTransaction null
+        val selection = leadingRun.ifEmpty { selectAtomicGroup(db) ?: return@writeTransaction null }
         val candidates = selection.map { it.first }
         val mutations = selection.map { it.second }
         validateNewMutations(db, mutations, SchemaRef(schemaVersion, schemaHash), syncedTables)
@@ -158,6 +159,7 @@ internal class PushProcessor(
             batchID = batchID,
             schema = SchemaRef(schemaVersion, schemaHash),
             mutations = mutations,
+            atomic = leadingRun.isEmpty().takeIf { it },
         )
         request.validate()
         val requestJSON = json.encodeToString(request)
@@ -319,6 +321,7 @@ internal class PushProcessor(
                 normalizedMutationID = null,
                 sealedBatchID = request.batchID,
                 sealedOrdinal = ordinal,
+                atomicGroupID = null,
                 values = mutation.columns?.map { (fieldID, value) ->
                     ledgerValueFromJson(fieldID, table?.columns?.singleOrNull { it.fieldID == fieldID }?.logicalType ?: "json", value)
                 }.orEmpty(),
@@ -511,6 +514,7 @@ internal class PushProcessor(
                 batchID = UUID.randomUUID().toString(),
                 schema = installed,
                 mutations = oldRequest.mutations,
+                atomic = oldRequest.atomic,
             )
             try {
                 successor.validate()
@@ -573,23 +577,52 @@ internal class PushProcessor(
             .use { it.moveToFirst() }
     }
 
-    private fun eligibleForSealing(db: SQLiteDatabase, limit: Int): List<PendingChange> {
-        val selected = mutableListOf<String>()
-        db.rawQuery(
+    private fun eligibleForSealing(db: SQLiteDatabase, limit: Int): List<PendingChange> =
+        inCaptureOrder(
+            db,
             """
-            SELECT mutation_id
-            FROM _synchro_pending_changes candidate
-            WHERE candidate.lifecycle_state = 'captured'
+            candidate.lifecycle_state = 'captured'
               AND (candidate.operation = 'insert' OR candidate.base_version IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM _synchro_pending_changes predecessor
                   WHERE predecessor.mutation_id = candidate.depends_on_mutation_id
                     AND predecessor.lifecycle_state <> 'accepted'
               )
-            ORDER BY candidate.local_order
+            """.trimIndent(),
+            emptyArray(),
+            limit,
+        )
+
+    /**
+     * A normalized mutation takes the local order of its first transitive
+     * source. Thus normalization does not move a mutation after later
+     * captures, and a group member never waits for a mutation after it.
+     */
+    private fun inCaptureOrder(
+        db: SQLiteDatabase,
+        condition: String,
+        args: Array<String>,
+        limit: Int,
+    ): List<PendingChange> {
+        val selected = mutableListOf<String>()
+        db.rawQuery(
+            """
+            WITH RECURSIVE lineage(candidate_id, local_order, mutation_id) AS (
+                SELECT candidate.mutation_id, candidate.local_order, candidate.mutation_id
+                FROM _synchro_pending_changes candidate
+                WHERE $condition
+                UNION ALL
+                SELECT lineage.candidate_id, source.local_order, source.mutation_id
+                FROM lineage
+                JOIN _synchro_pending_changes source ON source.normalized_mutation_id = lineage.mutation_id
+            )
+            SELECT candidate_id
+            FROM lineage
+            GROUP BY candidate_id
+            ORDER BY MIN(local_order)
             LIMIT ?
             """.trimIndent(),
-            arrayOf(limit.toString()),
+            args + limit.toString(),
         ).use { cursor -> while (cursor.moveToNext()) selected += cursor.getString(0) }
         return selected.map { id ->
             changeTracker.changeByID(db, id)
@@ -598,9 +631,38 @@ internal class PushProcessor(
     }
 
     /**
-     * Selects the next eligible mutations in local order that one request can hold.
+     * Selects the complete normalized group of the first eligible mutation.
+     * The group waits while one member is not sendable, because the server
+     * must receive every member in one request.
+     */
+    private fun selectAtomicGroup(db: SQLiteDatabase): List<Pair<PendingChange, Mutation>>? {
+        val groupID = eligibleForSealing(db, 1).singleOrNull()?.atomicGroupID ?: return null
+        val members = atomicGroupMembers(db, groupID)
+        val sendable = members.all { member ->
+            member.lifecycleState == "captured" &&
+                (member.operation == "insert" || member.baseUpdatedAt != null) &&
+                member.dependsOnMutationID?.let { changeTracker.changeByID(db, it) }
+                    ?.let { it.lifecycleState != "accepted" } != true
+        }
+        return if (sendable) members.map { it to buildMutation(db, it) } else null
+    }
+
+    private fun atomicGroupMembers(db: SQLiteDatabase, groupID: String): List<PendingChange> =
+        inCaptureOrder(
+            db,
+            """
+            candidate.atomic_group_id = ?
+              AND candidate.lifecycle_state NOT IN ('superseded_before_send', 'cancelled_before_send')
+            """.trimIndent(),
+            arrayOf(groupID),
+            limit = -1,
+        )
+
+    /**
+     * Selects the leading eligible mutations without a group that one request can hold.
      * A mutation that is larger than a per-mutation limit gets the push limit state.
-     * The result is empty only when there is no eligible mutation.
+     * A mutation that an empty request with the reserved envelope cannot hold gets it too.
+     * The result is empty only when there is no eligible mutation or a group is first.
      */
     private fun selectWithinPushLimits(
         db: SQLiteDatabase,
@@ -608,8 +670,22 @@ internal class PushProcessor(
         envelope: PushLimits.RequestSize,
     ): List<Pair<PendingChange, Mutation>> {
         while (true) {
-            val candidates = eligibleForSealing(db, batchSize)
+            val candidates = eligibleForSealing(db, batchSize).takeWhile { it.atomicGroupID == null }
             if (candidates.isEmpty()) return emptyList()
+            // An envelope above a request limit is a configuration failure, not an
+            // oversized action. The exception rolls back this transaction, so every
+            // action keeps its state.
+            if (!envelope.withinLimit) {
+                throw SynchroError.BlockingFailure(
+                    SyncFailure(
+                        operation = SyncOperationKind.PUSHING,
+                        code = SyncFailureCode.INVALID_REQUEST,
+                        retryable = false,
+                        message = "The push request envelope exceeds the request limit.",
+                        recoveryAction = SyncRecoveryAction.NONE,
+                    ),
+                )
+            }
             val selection = mutableListOf<Pair<PendingChange, Mutation>>()
             var size = envelope
             for (candidate in candidates) {
@@ -619,17 +695,73 @@ internal class PushProcessor(
                 } catch (_: IllegalArgumentException) {
                     throw SynchroError.InvalidResponse("stored mutation has an invalid portable value")
                 }
-                if (!mutationSize.withinLimits) {
+                val next = size.adding(mutationSize)
+                if (!mutationSize.withinLimits || (selection.isEmpty() && !next.withinLimit)) {
                     markExceedsPushLimit(db, candidate.mutationID)
                     continue
                 }
-                val next = size.adding(mutationSize)
-                if (selection.isNotEmpty() && !next.withinLimit) break
+                if (!next.withinLimit) break
                 selection += candidate to mutation
                 size = next
             }
             if (selection.isNotEmpty()) return selection
         }
+    }
+
+    /** Starts a group in the current transaction. A call inside a group returns null and joins that group. */
+    internal fun beginAtomicGroup(db: SQLiteDatabase): String? {
+        val active = db.rawQuery("SELECT 1 FROM _synchro_meta WHERE key = 'atomic_group_id'", null)
+            .use { it.moveToFirst() }
+        if (active) return null
+        val groupID = UUID.randomUUID().toString()
+        db.execSQL("INSERT INTO _synchro_meta (key, value) VALUES ('atomic_group_id', ?)", arrayOf(groupID))
+        return groupID
+    }
+
+    /**
+     * Validates a group before commit. The request measure is a worst case,
+     * so the sealed atomic request fits without a new measure.
+     */
+    internal fun completeAtomicGroup(db: SQLiteDatabase, clientID: String, groupID: String) {
+        val deleteFollowedByWrite = db.rawQuery(
+            """
+            SELECT 1
+            FROM _synchro_pending_changes deleted
+            JOIN _synchro_pending_changes later
+              ON later.atomic_group_id = deleted.atomic_group_id
+             AND later.table_id = deleted.table_id
+             AND later.pk_field_id = deleted.pk_field_id
+             AND later.pk_logical_type = deleted.pk_logical_type
+             AND later.record_id = deleted.record_id
+             AND later.local_order > deleted.local_order
+            WHERE deleted.atomic_group_id = ? AND deleted.operation = 'delete'
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(groupID),
+        ).use { it.moveToFirst() }
+        if (deleteFollowedByWrite) {
+            throw SynchroError.AtomicGroupInvalid(AtomicGroupInvalidReason.DELETE_FOLLOWED_BY_WRITE)
+        }
+        normalizeUnsealedChains(db, groupID)
+        val members = atomicGroupMembers(db, groupID)
+        if (members.size > MAX_ATOMIC_GROUP_MUTATIONS) {
+            throw SynchroError.AtomicGroupInvalid(AtomicGroupInvalidReason.TOO_MANY_MUTATIONS)
+        }
+        val sizes = members.map { member ->
+            val mutation = buildMutation(db, member)
+            PushLimits.mutation(
+                json,
+                if (mutation.op == Operation.INSERT) mutation else mutation.copy(baseVersion = mutation.baseVersion ?: UNKNOWN_BASE_VERSION),
+            )
+        }
+        if (sizes.any { !it.withinLimits }) {
+            throw SynchroError.AtomicGroupInvalid(AtomicGroupInvalidReason.MUTATION_TOO_LARGE)
+        }
+        val envelope = PushLimits.reservedEnvelope(json, clientID, UUID.randomUUID().toString(), RESERVED_SCHEMA_HASH, atomic = true)
+        if (!sizes.fold(envelope) { request, mutation -> request.adding(mutation) }.withinLimit) {
+            throw SynchroError.AtomicGroupInvalid(AtomicGroupInvalidReason.REQUEST_TOO_LARGE)
+        }
+        db.execSQL("DELETE FROM _synchro_meta WHERE key = 'atomic_group_id'")
     }
 
     private fun markExceedsPushLimit(db: SQLiteDatabase, mutationID: String) {
@@ -646,8 +778,15 @@ internal class PushProcessor(
         blockUnsealedDependents(db, mutationID)
     }
 
-    /** Normalization creates a new immutable record and never edits a source intent. */
-    private fun normalizeUnsealedChains(db: SQLiteDatabase) {
+    /**
+     * Normalization creates a new immutable record and never edits a source intent.
+     * Only the trailing run of a same-row chain merges. A run is a maximal sequence
+     * with an equal atomic group, and no group equals no group. A merged record
+     * gets the next local order, so an earlier run would move after a later capture.
+     * A cancellation creates no record, so an insert and delete in any run cancel.
+     * With [atomicGroupID], only the trailing run of that group is normalized.
+     */
+    private fun normalizeUnsealedChains(db: SQLiteDatabase, atomicGroupID: String? = null) {
         data class LogicalRow(
             val tableID: String,
             val pkFieldID: String,
@@ -659,11 +798,11 @@ internal class PushProcessor(
             """
             SELECT table_id, pk_field_id, pk_logical_type, record_id
             FROM _synchro_pending_changes
-            WHERE lifecycle_state = 'captured'
+            WHERE lifecycle_state = 'captured' ${if (atomicGroupID == null) "" else "AND atomic_group_id = ?"}
             GROUP BY table_id, pk_field_id, pk_logical_type, record_id
             HAVING COUNT(*) > 1
             """.trimIndent(),
-            null,
+            listOfNotNull(atomicGroupID).toTypedArray(),
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 rows += LogicalRow(cursor.getString(0), cursor.getString(1), cursor.getString(2), cursor.getString(3))
@@ -678,33 +817,39 @@ internal class PushProcessor(
                 row.pkLogicalType,
                 row.recordID,
             )
-            if (chain.size < 2) return@forEach
-            if (chain.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size != 1) {
+            // An earlier row can block this whole chain through a delete, a group, or a dependency.
+            if (chain.isEmpty()) return@forEach
+            val runs = mutableListOf<List<PendingChange>>()
+            var runStart = 0
+            for (index in 1..chain.size) {
+                if (index == chain.size || chain[index].atomicGroupID != chain[runStart].atomicGroupID) {
+                    runs += chain.subList(runStart, index)
+                    runStart = index
+                }
+            }
+            runs.forEachIndexed { runIndex, run ->
+                val trailing = runIndex == runs.lastIndex
+                val selected = atomicGroupID == null || (trailing && run.first().atomicGroupID == atomicGroupID)
                 // A newer authored schema cannot be folded into its predecessor.
                 // The predecessor stays sendable and the successor stays dependent.
-                return@forEach
-            }
-            val first = chain.first()
-            val deleteIndex = chain.indexOfFirst { it.operation == "delete" }
-            if (first.operation == "delete") {
-                blockAfterDelete(db, chain.drop(1))
-                return@forEach
-            }
-            if (deleteIndex >= 0) {
-                val sources = chain.take(deleteIndex + 1)
-                val suffix = chain.drop(deleteIndex + 1)
-                if (first.operation == "insert") {
-                    cancelBeforeSend(db, sources)
-                } else {
-                    normalizeChain(db, sources, "delete", emptyList())
+                val oneSchema = run.map { SchemaRef(it.authoredSchemaVersion, it.authoredSchemaHash) }.toSet().size == 1
+                if (!selected || run.size < 2 || !oneSchema) return@forEachIndexed
+                val runDeleteIndex = run.indexOfFirst { it.operation == "delete" }
+                // A merged delete gets the next local order. Thus it merges only when no capture follows it.
+                when {
+                    run.first().operation == "insert" && runDeleteIndex >= 0 ->
+                        cancelBeforeSend(db, run.take(runDeleteIndex + 1))
+                    !trailing -> Unit
+                    runDeleteIndex < 0 && run.first().operation in setOf("insert", "update") ->
+                        normalizeChain(db, run, run.first().operation, mergedValues(db, run))
+                    runDeleteIndex < 0 -> throw SynchroError.InvalidResponse("unknown local mutation operation")
+                    runDeleteIndex == run.lastIndex -> normalizeChain(db, run, "delete", emptyList())
                 }
-                blockAfterDelete(db, suffix)
-                return@forEach
             }
-            when (first.operation) {
-                "insert" -> normalizeChain(db, chain, "insert", mergedValues(db, chain))
-                "update" -> normalizeChain(db, chain, "update", mergedValues(db, chain))
-                else -> throw SynchroError.InvalidResponse("unknown local mutation operation")
+            // A delete has no resurrection. Every later capture of the row can never be sent.
+            val deleteIndex = chain.indexOfFirst { it.operation == "delete" }
+            if (atomicGroupID == null && deleteIndex >= 0) {
+                blockAfterDelete(db, chain.drop(deleteIndex + 1))
             }
         }
     }
@@ -717,7 +862,11 @@ internal class PushProcessor(
     ) {
         val first = sources.first()
         val last = sources.last()
-        if ((operation == "update" || operation == "delete") && first.baseUpdatedAt.isNullOrEmpty()) {
+        // A chain after an unsent predecessor keeps that dependency and gets its base on acceptance.
+        val dependency = first.dependsOnMutationID?.takeIf { id ->
+            changeTracker.changeByID(db, id)?.lifecycleState in setOf("captured", "sealed")
+        }
+        if ((operation == "update" || operation == "delete") && first.baseUpdatedAt.isNullOrEmpty() && dependency == null) {
             blockBeforeSend(db, sources)
             return
         }
@@ -736,13 +885,22 @@ internal class PushProcessor(
             clientVersion = last.clientUpdatedAt,
             lifecycleState = "captured",
             sourceKind = "normalized",
-            dependsOnMutationID = null,
+            dependsOnMutationID = dependency,
             normalizedMutationID = null,
             sealedBatchID = null,
             sealedOrdinal = null,
+            atomicGroupID = first.atomicGroupID,
             values = values,
         )
         markSources(db, sources, "superseded_before_send", normalizedID)
+        db.execSQL(
+            """
+            UPDATE _synchro_pending_changes
+            SET depends_on_mutation_id = ?
+            WHERE depends_on_mutation_id = ? AND lifecycle_state = 'captured'
+            """.trimIndent(),
+            arrayOf(normalizedID, last.mutationID),
+        )
     }
 
     private fun cancelBeforeSend(db: SQLiteDatabase, sources: List<PendingChange>) {
@@ -761,6 +919,7 @@ internal class PushProcessor(
                 arrayOf(source.mutationID),
             )
         }
+        blockGroupsOfBlockedMembers(db)
     }
 
     private fun blockAfterDelete(db: SQLiteDatabase, sources: List<PendingChange>) = blockBeforeSend(db, sources)
@@ -841,7 +1000,7 @@ internal class PushProcessor(
             }
             recordID(mutation.pk.getValue(table.primaryKeyFieldID), primaryKey.logicalType)
             when (mutation.op) {
-                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns.isNullOrEmpty()) {
+                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns == null) {
                     throw SynchroError.InvalidResponse("stored insert has an invalid shape")
                 }
                 Operation.UPDATE -> if (mutation.baseVersion.isNullOrEmpty() || mutation.columns.isNullOrEmpty()) {
@@ -912,7 +1071,7 @@ internal class PushProcessor(
             } else {
                 null
             }
-            val hasAuthoritativeAbsence = row == null && source.operation == "delete"
+            val hasAuthoritativeAbsence = row == null
             val canApply = current != null &&
                 (row == null || projection != null) &&
                 patches != null &&
@@ -979,9 +1138,8 @@ internal class PushProcessor(
             } else {
                 null
             }
-            val hasAuthoritativeAbsence = row == null &&
-                outcome.status == MutationStatus.CONFLICT &&
-                outcome.code in setOf(MutationRejectionCode.ROW_DELETED, MutationRejectionCode.ROW_NOT_FOUND)
+            // A conflict gives the authoritative state. No row means true absence or a fence-only delete for every code.
+            val hasAuthoritativeAbsence = row == null && outcome.status == MutationStatus.CONFLICT
             val canApply = current != null &&
                 (row == null || projection != null) &&
                 patches != null &&
@@ -1237,7 +1395,7 @@ internal class PushProcessor(
             val values = when (intent.operation) {
                 "insert", "update" -> {
                     val authored = changeTracker.valuesForMutation(db, intent.mutationID)
-                    if (authored.isEmpty()) return null
+                    if (intent.operation == "update" && authored.isEmpty()) return null
                     authored.map { value ->
                         val column = columnsByID[value.fieldID] ?: return null
                         if (column.logicalType != value.logicalType) return null
@@ -1415,6 +1573,64 @@ internal class PushProcessor(
     }
 
     private fun blockUnsealedDependents(db: SQLiteDatabase, mutationID: String) {
+        blockDescendants(db, mutationID)
+        blockGroupsOfBlockedMembers(db)
+    }
+
+    /** A blocked predecessor can never become accepted, so each captured descendant becomes blocked. */
+    private fun blockDependentsOfBlockedPredecessors(db: SQLiteDatabase) {
+        while (true) {
+            val blockers = mutableListOf<String>()
+            db.rawQuery(
+                """
+                SELECT DISTINCT predecessor.mutation_id
+                FROM _synchro_pending_changes child
+                JOIN _synchro_pending_changes predecessor
+                  ON predecessor.mutation_id = child.depends_on_mutation_id
+                WHERE child.lifecycle_state = 'captured'
+                  AND predecessor.lifecycle_state IN ('blocked_by_predecessor', 'legacy_blocked')
+                """.trimIndent(),
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) blockers += cursor.getString(0) }
+            if (blockers.isEmpty()) return
+            blockers.forEach { mutationID -> blockDescendants(db, mutationID) }
+            blockGroupsOfBlockedMembers(db)
+        }
+    }
+
+    /** The server receives a group only as a whole, so one blocked member blocks each unsent member. */
+    private fun blockGroupsOfBlockedMembers(db: SQLiteDatabase) {
+        while (true) {
+            val members = mutableListOf<String>()
+            db.rawQuery(
+                """
+                SELECT mutation_id
+                FROM _synchro_pending_changes
+                WHERE lifecycle_state = 'captured'
+                  AND atomic_group_id IN (
+                      SELECT atomic_group_id FROM _synchro_pending_changes
+                      WHERE lifecycle_state = 'blocked_by_predecessor' AND atomic_group_id IS NOT NULL
+                  )
+                """.trimIndent(),
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) members += cursor.getString(0) }
+            if (members.isEmpty()) return
+            members.forEach { mutationID ->
+                db.execSQL(
+                    """
+                    UPDATE _synchro_pending_changes
+                    SET lifecycle_state = 'blocked_by_predecessor',
+                        updated_at = substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'
+                    WHERE mutation_id = ? AND lifecycle_state = 'captured'
+                    """.trimIndent(),
+                    arrayOf(mutationID),
+                )
+                blockDescendants(db, mutationID)
+            }
+        }
+    }
+
+    private fun blockDescendants(db: SQLiteDatabase, mutationID: String) {
         db.execSQL(
             """
             WITH RECURSIVE descendants(mutation_id) AS (
@@ -1634,6 +1850,7 @@ internal class PushProcessor(
         normalizedMutationID: String?,
         sealedBatchID: String?,
         sealedOrdinal: Int?,
+        atomicGroupID: String?,
         values: List<LedgerValue>,
     ) {
         db.execSQL(
@@ -1642,15 +1859,15 @@ internal class PushProcessor(
                 mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type,
                 operation, authored_schema_version, authored_schema_hash, base_version, client_version,
                 lifecycle_state, source_kind, depends_on_mutation_id, normalized_mutation_id,
-                sealed_batch_id, sealed_ordinal, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                sealed_batch_id, sealed_ordinal, atomic_group_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z',
                 substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
             """.trimIndent(),
             arrayOf(
                 mutationID, tableID, tableName, recordID, pkFieldID, pkLogicalType, operation,
                 authoredSchema.version, authoredSchema.hash, baseVersion, clientVersion, lifecycleState,
-                sourceKind, dependsOnMutationID, normalizedMutationID, sealedBatchID, sealedOrdinal,
+                sourceKind, dependsOnMutationID, normalizedMutationID, sealedBatchID, sealedOrdinal, atomicGroupID,
             ),
         )
         values.forEach { value ->
@@ -1820,5 +2037,13 @@ internal class PushProcessor(
         }
         is JsonArray -> element.map(::fromJsonElement)
         is JsonObject -> element.mapValues { (_, value) -> fromJsonElement(value) }
+    }
+
+    private companion object {
+        const val MAX_ATOMIC_GROUP_MUTATIONS = 1_000
+
+        /** The server version bound is 64 octets, so this reserves the largest unknown base. */
+        val UNKNOWN_BASE_VERSION = "0".repeat(64)
+        val RESERVED_SCHEMA_HASH = "0".repeat(64)
     }
 }

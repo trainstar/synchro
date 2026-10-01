@@ -91,24 +91,6 @@ object SQLiteSchema {
                 )
             """.trimIndent().replace("\n", " ")
         }
-        val intentHasWritable = if (writable.isEmpty()) {
-            "0"
-        } else {
-            val writableColumnNames = writable.joinToString(", ") { column ->
-                "'${SQLiteHelpers.escapeSQLString(column.name)}'"
-            }
-            """
-                EXISTS (
-                    SELECT 1
-                    FROM _synchro_capture_context AS context
-                    JOIN _synchro_capture_fields AS field
-                      ON field.statement_token = context.statement_token
-                    WHERE context.singleton = 1
-                      AND context.table_name = '$safeName'
-                      AND field.column_name IN ($writableColumnNames)
-                )
-            """.trimIndent().replace("\n", " ")
-        }
         val triggers = mutableListOf<String>()
 
         // DROP existing triggers first (for re-creation on schema update)
@@ -140,14 +122,16 @@ object SQLiteSchema {
         )
 
         // Inserts have no server base. They retain every authored writable field.
+        // An insert that authors no writable field is a key-only create with empty columns.
+        // An insert without its own context did not come through the SDK, so its
+        // authored fields are unknown.
         triggers.add("""
             CREATE TRIGGER $quotedTriggerInsert
             AFTER INSERT ON $quoted
             WHEN $lockCheck
             BEGIN
                 $schemaGuard
-                ${if (writable.isEmpty()) "SELECT RAISE(ABORT, 'synced insert has no writable fields');" else ""}
-                ${if (writable.isEmpty()) "" else "SELECT CASE WHEN NOT ($intentHasWritable) THEN RAISE(ABORT, 'synced insert has no authored writable fields') END;"}
+                SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM _synchro_capture_context AS context WHERE context.singleton = 1 AND context.table_name = '$safeName') THEN RAISE(ABORT, 'synced insert has no authored capture context') END;
                 $insertMutation
                 ${writable.joinToString("\n") {
                     valueInsertSQL(
@@ -315,7 +299,7 @@ object SQLiteSchema {
         INSERT INTO _synchro_pending_changes (
             mutation_id, table_id, table_name, record_id, pk_field_id, pk_logical_type,
             operation, authored_schema_version, authored_schema_hash, base_version, client_version,
-            lifecycle_state, source_kind, depends_on_mutation_id, created_at, updated_at
+            lifecycle_state, source_kind, depends_on_mutation_id, atomic_group_id, created_at, updated_at
         )
         VALUES (
             ${SynchroDatabase.SQLITE_UUID}, '$tableID', '$tableName', CAST($recordExpression AS TEXT), '$primaryKeyFieldID', '$primaryKeyType',
@@ -326,6 +310,7 @@ object SQLiteSchema {
             $timestampExpression,
             'captured', 'capture',
             $unresolvedPredecessor,
+            (SELECT value FROM _synchro_meta WHERE key = 'atomic_group_id'),
             $timestampExpression, $timestampExpression
         );
         """.trimIndent()

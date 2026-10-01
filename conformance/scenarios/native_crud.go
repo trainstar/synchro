@@ -178,6 +178,8 @@ type NativeQueuedMutation struct {
 
 // NativeQueueSuccessorRow records unchanged restart durability and one changed successor.
 type NativeQueueSuccessorRow struct {
+	// Target holds the authored initial and changed values for this row.
+	Target              NativeCRUDTarget
 	BeforeRestart       NativeQueuedMutation
 	AfterRestart        NativeQueuedMutation
 	OriginalAfterChange NativeQueuedMutation
@@ -617,12 +619,38 @@ func ValidateNativeQueueSuccessorEvidence(evidence NativeQueueSuccessorEvidence)
 			row.Successor.TableID != row.BeforeRestart.TableID || row.Successor.TableName != row.BeforeRestart.TableName ||
 			row.Successor.RecordID != row.BeforeRestart.RecordID || row.Successor.PrimaryKeyFieldID != row.BeforeRestart.PrimaryKeyFieldID ||
 			row.Successor.PrimaryKeyLogicalType != row.BeforeRestart.PrimaryKeyLogicalType || row.Successor.Operation != "update" ||
-			row.Successor.DependsOnMutationID == nil || *row.Successor.DependsOnMutationID != row.BeforeRestart.MutationID ||
-			nativeQueuedAuthoredIntentEqual(row.BeforeRestart, row.Successor) {
+			row.Successor.DependsOnMutationID == nil || *row.Successor.DependsOnMutationID != row.BeforeRestart.MutationID {
 			return errors.New("native changed intent did not retain a distinct linked successor")
+		}
+		// Identity and linkage cannot show changed content, so the authored
+		// values are compared separately for the same field.
+		fieldID, found := nativeQueuedFieldCarrying(row.BeforeRestart, row.Target.InitialValue)
+		if !found {
+			return errors.New("native queued original intent does not retain the authored initial value")
+		}
+		if value, found := nativeQueuedFieldValue(row.Successor, fieldID); !found || !nativeCRUDJSONEqual(value, row.Target.UpdatedValue) {
+			return errors.New("native queued successor does not retain the authored changed value")
 		}
 	}
 	return nil
+}
+
+func nativeQueuedFieldCarrying(mutation NativeQueuedMutation, value json.RawMessage) (string, bool) {
+	for _, field := range mutation.AuthoredFields {
+		if nativeCRUDJSONEqual(field.Value, value) {
+			return field.FieldID, true
+		}
+	}
+	return "", false
+}
+
+func nativeQueuedFieldValue(mutation NativeQueuedMutation, fieldID string) (json.RawMessage, bool) {
+	for _, field := range mutation.AuthoredFields {
+		if field.FieldID == fieldID {
+			return field.Value, true
+		}
+	}
+	return nil, false
 }
 
 func validateNativeQueuedMutation(mutation NativeQueuedMutation) error {
@@ -768,7 +796,7 @@ func validateNativeCRUDResponse(response NativeCRUDResponse, operation string, m
 			continue
 		}
 		pushes++
-		if observation.StatusCode != 200 || observation.ErrorCode != "" || !observation.RetryablePresent || observation.Retryable || !observation.MutationCountPresent || observation.MutationCount != mutationCount {
+		if observation.StatusCode != 200 || observation.ErrorCode != "" || observation.RetryablePresent || !observation.MutationCountPresent || observation.MutationCount != mutationCount {
 			return fmt.Errorf("native CRUD %s push response is invalid", operation)
 		}
 	}
@@ -801,4 +829,107 @@ func nativeCRUDUUID(parts ...string) string {
 	digest[8] = digest[8]&0x3f | 0x80
 	encoded := hex.EncodeToString(digest[:16])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+// RequireLocalWriteRow checks that exactly one captured application row has the
+// primary key of a runtime local write and holds every value that write
+// authored. The schema-queued-mutation drivers use it for Swift, Kotlin, and
+// React Native.
+func RequireLocalWriteRow(write Operation, rows []map[string]json.RawMessage) error {
+	if OperationKey(write) != "local/write" {
+		return errors.New("local write row check requires a local write")
+	}
+	var payload struct {
+		PK      map[string]json.RawMessage `json:"pk"`
+		Columns []struct {
+			FieldID string          `json:"field_id"`
+			Value   json.RawMessage `json:"value"`
+		} `json:"columns"`
+	}
+	if err := json.Unmarshal(write.Payload, &payload); err != nil || len(payload.PK) != 1 || len(payload.Columns) == 0 {
+		return errors.New("local write row check payload is invalid")
+	}
+	var matched map[string]json.RawMessage
+	for field, key := range payload.PK {
+		for _, row := range rows {
+			if value, found := row[field]; found && jsonValuesEqual(value, key) {
+				if matched != nil {
+					return fmt.Errorf("local write row %s is duplicated", key)
+				}
+				matched = row
+			}
+		}
+		if matched == nil {
+			observed := make([]string, 0, len(rows))
+			for _, row := range rows {
+				observed = append(observed, string(row[field]))
+			}
+			sort.Strings(observed)
+			return fmt.Errorf("local write row %s is absent from %d captured rows with keys %v", key, len(rows), observed)
+		}
+	}
+	for _, column := range payload.Columns {
+		observed, found := matched[column.FieldID]
+		if !found {
+			return fmt.Errorf("local write row has no column %q", column.FieldID)
+		}
+		if !jsonValuesEqual(observed, column.Value) {
+			return fmt.Errorf("local write row column %q is %s, want %s", column.FieldID, observed, column.Value)
+		}
+	}
+	return nil
+}
+
+// LocalWriteKeptBySchema keeps the columns of an authored local write that an
+// authored publish-schema operation still declares for the write table. It
+// fails unless the write keeps some but not all of its columns. A row check of
+// the result then compares a kept field, and the write still changes a removed
+// field. A kept local row passes that check. A server replacement row with a
+// different kept value fails it.
+func LocalWriteKeptBySchema(write, publish Operation) (Operation, error) {
+	var target struct {
+		Tables []struct {
+			TableID string `json:"table_id"`
+			Fields  []struct {
+				FieldID string `json:"field_id"`
+			} `json:"fields"`
+		} `json:"tables"`
+	}
+	var payload map[string]json.RawMessage
+	var columns []map[string]json.RawMessage
+	var tableID string
+	if json.Unmarshal(publish.Payload, &target) != nil || json.Unmarshal(write.Payload, &payload) != nil ||
+		json.Unmarshal(payload["table_id"], &tableID) != nil || json.Unmarshal(payload["columns"], &columns) != nil {
+		return Operation{}, errors.New("local write kept by schema is invalid")
+	}
+	declared := make(map[string]bool)
+	for _, table := range target.Tables {
+		if table.TableID == tableID {
+			for _, field := range table.Fields {
+				declared[field.FieldID] = true
+			}
+		}
+	}
+	kept := make([]map[string]json.RawMessage, 0, len(columns))
+	for _, column := range columns {
+		var fieldID string
+		if json.Unmarshal(column["field_id"], &fieldID) == nil && declared[fieldID] {
+			kept = append(kept, column)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(columns) {
+		return Operation{}, fmt.Errorf("local write keeps %d of %d fields, want some but not all", len(kept), len(columns))
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return Operation{}, err
+	}
+	payload["columns"] = encoded
+	write.Payload, err = json.Marshal(payload)
+	return write, err
+}
+
+func jsonValuesEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
 }

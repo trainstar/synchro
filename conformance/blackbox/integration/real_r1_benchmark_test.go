@@ -91,9 +91,11 @@ type r1BenchmarkResult struct {
 }
 
 type r1BenchmarkEnvironment struct {
-	GOOS                      string `json:"goos"`
-	GOARCH                    string `json:"goarch"`
-	LogicalCPUs               int    `json:"logical_cpu_count"`
+	GOOS        string `json:"goos"`
+	GOARCH      string `json:"goarch"`
+	LogicalCPUs int    `json:"logical_cpu_count"`
+	// On Linux this digest covers /etc/machine-id, a host installation
+	// identity. The field keeps its format v1 name.
 	HardwareFingerprintSHA256 string `json:"hardware_fingerprint_sha256"`
 	AdapterSHA256             string `json:"adapter_sha256"`
 	ExtensionManifestSHA256   string `json:"extension_manifest_sha256"`
@@ -422,9 +424,11 @@ func loadR1HardwareFingerprint() (string, error) {
 		}
 		identity = string(match[1])
 	case "linux":
-		data, err := os.ReadFile("/sys/class/dmi/id/product_uuid")
+		// The machine ID identifies the host installation and is readable
+		// without root, unlike the DMI product UUID.
+		data, err := os.ReadFile("/etc/machine-id")
 		if err != nil {
-			return "", fmt.Errorf("read Linux hardware identity: %w", err)
+			return "", fmt.Errorf("read Linux host identity: %w", err)
 		}
 		identity = strings.TrimSpace(string(data))
 	default:
@@ -833,8 +837,7 @@ func waitForR1WALAcknowledgement(t *testing.T, ctx context.Context, harness *bla
 	for time.Now().Before(deadline) {
 		observation, err := harness.Operator().ObserveWALRecords(ctx, []string{recordID})
 		if err == nil && len(observation.Records) == 1 && observation.WorkerRunning &&
-			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
-			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			!observation.BlockingPoison && observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement {
 			return
 		}
 		if err == nil && observation.BlockingPoison {
@@ -869,8 +872,7 @@ func waitForR1WALRecordAdvance(t *testing.T, ctx context.Context, harness *black
 	for time.Now().Before(deadline) {
 		observation, err := harness.Operator().ObserveWALRecords(ctx, []string{recordID})
 		if err == nil && len(observation.Records) == priorCount+1 && observation.WorkerRunning &&
-			!observation.BlockingPoison && observation.ContiguousAcknowledged &&
-			observation.AcknowledgementMatchesObservedEnd && observation.SlotMatchesObservedEnd {
+			!observation.BlockingPoison && observation.ContiguousAcknowledged && observation.SlotMatchesAcknowledgement {
 			return
 		}
 		if err == nil && len(observation.Records) > priorCount+1 {
@@ -909,8 +911,7 @@ func requireR1WALUpdateTransaction(
 			t.Fatalf("observe R1 WAL transaction: %v", err)
 		}
 		if len(observation.Records) != len(recordIDs)*expectedHistory || !observation.WorkerRunning ||
-			observation.BlockingPoison || !observation.ContiguousAcknowledged ||
-			!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd {
+			observation.BlockingPoison || !observation.ContiguousAcknowledged || !observation.SlotMatchesAcknowledgement {
 			t.Fatal("R1 WAL transaction observation is incomplete")
 		}
 		latestCommitLSN := observation.Records[len(observation.Records)-1].CommitLSN
@@ -978,8 +979,7 @@ func requireR1OneRowTransactions(
 			observation.BlockingPoison || !observation.ContiguousAcknowledged {
 			t.Fatal("R1 one-row transaction observation is incomplete")
 		}
-		if end == r1BenchmarkAckRows+1 &&
-			(!observation.AcknowledgementMatchesObservedEnd || !observation.SlotMatchesObservedEnd) {
+		if end == r1BenchmarkAckRows+1 && !observation.SlotMatchesAcknowledgement {
 			t.Fatal("R1 final one-row transaction is not durably acknowledged")
 		}
 		latestByRecord := make(map[string]string, len(recordIDs))

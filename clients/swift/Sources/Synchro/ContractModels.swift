@@ -87,6 +87,7 @@ public enum MutationRejectionCode: String, Codable, Sendable {
     case policyRejected = "policy_rejected"
     case validationFailed = "validation_failed"
     case tableNotSynced = "table_not_synced"
+    case atomicBatchRejected = "atomic_batch_rejected"
 }
 
 public enum ProtocolErrorCode: String, Codable, Sendable, Hashable {
@@ -603,6 +604,8 @@ public struct PushRequest: Codable, Sendable, Equatable {
     public var clientGeneration: Int64
     public var batchID: String
     public var schema: SchemaRef
+    /// Is `true` for an atomic batch and absent otherwise. The value `false` is invalid.
+    public var atomic: Bool?
     public var mutations: [Mutation]
 
     enum CodingKeys: String, CodingKey {
@@ -610,6 +613,7 @@ public struct PushRequest: Codable, Sendable, Equatable {
         case clientGeneration = "client_generation"
         case batchID = "batch_id"
         case schema
+        case atomic
         case mutations
     }
 
@@ -619,6 +623,9 @@ public struct PushRequest: Codable, Sendable, Equatable {
               batchID == batchID.lowercased(),
               !mutations.isEmpty else {
             throw ContractViolation.invalidMutationShape("push batch is empty")
+        }
+        guard atomic != false else {
+            throw ContractViolation.invalidMutationShape("push batch atomic member must be true when present")
         }
         try schema.validate()
         let tables = Dictionary(uniqueKeysWithValues: syncedTables.map { ($0.tableID, $0) })
@@ -685,7 +692,8 @@ public struct PushRequest: Codable, Sendable, Equatable {
             }
             switch mutation.op {
             case .insert:
-                guard mutation.baseVersion == nil, !columns.isEmpty else {
+                // An insert can author no fields. An update must author at least one field.
+                guard mutation.baseVersion == nil, mutation.columns != nil else {
                     throw ContractViolation.invalidMutationShape("insert shape is invalid")
                 }
             case .update:
@@ -836,6 +844,28 @@ public struct PushResponse: Codable, Sendable, Equatable {
             for outcome in rejected {
                 try validateOutcome(outcome, request: requested[outcome.mutationID], schema: request.schema)
             }
+            try validateAtomicForm(for: request)
+        }
+    }
+
+    /// Applies the atomic response rule of the wire protocol.
+    ///
+    /// An atomic response is all applied, or it has no accepted outcome and
+    /// exactly one rejected outcome with a code other than `atomic_batch_rejected`.
+    private func validateAtomicForm(for request: PushRequest) throws {
+        let groupRejections = rejected.filter { $0.code == .atomicBatchRejected }
+        guard request.atomic == true else {
+            guard groupRejections.isEmpty else {
+                throw ContractViolation.pushOutcomeMismatch("non-atomic response contains atomic_batch_rejected")
+            }
+            return
+        }
+        guard rejected.isEmpty
+            || (accepted.isEmpty && rejected.count - groupRejections.count == 1) else {
+            throw ContractViolation.pushOutcomeMismatch("atomic response is neither all applied nor one failed group")
+        }
+        guard groupRejections.allSatisfy({ $0.retryable == nil && $0.outcomeSchema == request.schema }) else {
+            throw ContractViolation.pushOutcomeMismatch("atomic_batch_rejected outcome has an invalid shape")
         }
     }
 
@@ -906,19 +936,12 @@ public struct PushResponse: Codable, Sendable, Equatable {
         guard !outcome.serverVersion.isEmpty else {
             throw ContractViolation.pushOutcomeMismatch("accepted outcome has an empty server version")
         }
-        let hasRow = outcome.serverRow != nil
-        let hasChecksum = outcome.rowChecksum != nil
-        switch request.op {
-        case .insert, .update:
-            guard hasRow, hasChecksum else {
-                throw ContractViolation.pushOutcomeMismatch("accepted insert or update lacks its row or checksum")
-            }
-        case .delete:
-            guard hasRow == hasChecksum else {
-                throw ContractViolation.pushOutcomeMismatch("accepted delete row and checksum must be paired")
-            }
-        case .upsert:
+        guard request.op != .upsert else {
             throw ContractViolation.pushOutcomeMismatch("accepted outcome targets an unsupported push operation")
+        }
+        // An accepted outcome without a row states that the row is absent after its push unit.
+        guard (outcome.serverRow != nil) == (outcome.rowChecksum != nil) else {
+            throw ContractViolation.pushOutcomeMismatch("accepted row and checksum must be paired")
         }
     }
 
@@ -933,7 +956,7 @@ public struct PushResponse: Codable, Sendable, Equatable {
             .versionConflict, .rowAlreadyExists, .rowDeleted, .rowNotFound,
         ]
         let terminalCodes: Set<MutationRejectionCode> = [
-            .schemaIncompatible, .policyRejected, .validationFailed, .tableNotSynced,
+            .schemaIncompatible, .policyRejected, .validationFailed, .tableNotSynced, .atomicBatchRejected,
         ]
         switch outcome.status {
         case .conflict:

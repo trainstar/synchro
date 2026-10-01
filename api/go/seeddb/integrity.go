@@ -20,6 +20,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/trainstar/synchro/api/go/internal/jsonnumber"
 )
 
 var (
@@ -32,6 +34,12 @@ var (
 
 const maxSafeJSONInteger = 9007199254740991
 
+// These I-JSON limits match extensions/synchro-core/src/checksum.rs.
+const (
+	maxJSONDepth          = 128
+	maxJSONValuesAndNames = 1_000_000
+)
+
 type sqliteInternalColumnSpec struct {
 	name       string
 	typeName   string
@@ -42,7 +50,6 @@ type sqliteInternalColumnSpec struct {
 
 type sqliteInternalIndexSpec struct {
 	name       string
-	sql        string
 	columns    []string
 	collations []string
 	descending []bool
@@ -108,7 +115,6 @@ func portableSeedInternalTableSpecs() []sqliteInternalTableSpec {
 			indexes: []sqliteInternalIndexSpec{
 				{
 					name:       "idx_synchro_scope_rows_record",
-					sql:        "CREATE INDEX idx_synchro_scope_rows_record ON _synchro_scope_rows (table_name, record_id)",
 					columns:    []string{"table_name", "record_id"},
 					collations: []string{"BINARY", "BINARY"},
 					descending: []bool{false, false},
@@ -177,7 +183,6 @@ func portableSeedInternalTableSpecs() []sqliteInternalTableSpec {
 			indexes: []sqliteInternalIndexSpec{
 				{
 					name:       "idx_synchro_rejected_mutations_record",
-					sql:        "CREATE INDEX idx_synchro_rejected_mutations_record ON _synchro_rejected_mutations (table_name, record_id)",
 					columns:    []string{"table_name", "record_id"},
 					collations: []string{"BINARY", "BINARY"},
 					descending: []bool{false, false},
@@ -328,7 +333,6 @@ func verifySQLiteInternalIndexes(ctx context.Context, db *sql.DB, spec sqliteInt
 		case "c":
 			expected, ok := findSQLiteIndexSpec(spec.indexes, index.name)
 			if !ok || index.partial || index.unique != expected.unique ||
-				!sameSQLiteIndexSQL(ctx, db, index.name, expected.sql) ||
 				!sameSQLiteIndexColumns(ctx, db, index.name, expected) {
 				return fmt.Errorf("sqlite seed table %s index %s does not match the canonical schema", spec.name, index.name)
 			}
@@ -350,22 +354,6 @@ func findSQLiteIndexSpec(specs []sqliteInternalIndexSpec, name string) (sqliteIn
 		}
 	}
 	return sqliteInternalIndexSpec{}, false
-}
-
-func sameSQLiteIndexSQL(ctx context.Context, db *sql.DB, indexName, expected string) bool {
-	var actual string
-	if err := db.QueryRowContext(
-		ctx,
-		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
-		indexName,
-	).Scan(&actual); err != nil {
-		return false
-	}
-	return canonicalSQLiteSQL(actual) == canonicalSQLiteSQL(expected)
-}
-
-func canonicalSQLiteSQL(statement string) string {
-	return strings.ToLower(strings.Join(strings.Fields(statement), " "))
 }
 
 func sameSQLiteIndexColumns(ctx context.Context, db *sql.DB, indexName string, expected sqliteInternalIndexSpec) bool {
@@ -587,7 +575,7 @@ func verifyPortableSeedRecord(
 		if !exists {
 			return "", seedDigestRow{}, errors.New("portable seed row omits a manifest field")
 		}
-		encoded, err := encodeTypedValue(column.LogicalType, value, column.Nullable)
+		encoded, err := encodeTypedValue(column, value)
 		if err != nil {
 			return "", seedDigestRow{}, fmt.Errorf("portable seed row field %s: %w", column.FieldID, err)
 		}
@@ -605,11 +593,13 @@ func verifyPortableSeedRecord(
 	if !exists {
 		return "", seedDigestRow{}, errors.New("portable seed row primary key does not match the manifest")
 	}
-	encodedPK, err := encodeTypedValue(primary.LogicalType, pkValue, false)
+	primaryKey := primary
+	primaryKey.Nullable = false
+	encodedPK, err := encodeTypedValue(primaryKey, pkValue)
 	if err != nil {
 		return "", seedDigestRow{}, fmt.Errorf("portable seed primary key: %w", err)
 	}
-	encodedRowPK, err := encodeTypedValue(primary.LogicalType, primaryValue, false)
+	encodedRowPK, err := encodeTypedValue(primaryKey, primaryValue)
 	if err != nil || !bytes.Equal(encodedPK, encodedRowPK) {
 		return "", seedDigestRow{}, errors.New("portable seed row primary key does not match its row")
 	}
@@ -670,14 +660,17 @@ func verifyScopeDigest(schemaHash, scopeID string, rows []seedDigestRow, expecte
 	return nil
 }
 
-func encodeTypedValue(logicalType string, value any, nullable bool) ([]byte, error) {
+// encodeTypedValue validates one wire value against the complete declared field
+// domain and returns its protocol 3 typed-value encoding.
+func encodeTypedValue(column localSchemaColumn, value any) ([]byte, error) {
+	logicalType := column.LogicalType
 	tag, err := portableTypeTag(logicalType)
 	if err != nil {
 		return nil, err
 	}
 	encoded := []byte{tag}
 	if value == nil {
-		if !nullable {
+		if !column.Nullable {
 			return nil, errors.New("non-null field is null")
 		}
 		return append(encoded, 0), nil
@@ -719,6 +712,9 @@ func encodeTypedValue(logicalType string, value any, nullable bool) ([]byte, err
 		text, ok := value.(string)
 		if !ok || !canonicalDecimal(text) {
 			return nil, errors.New("invalid decimal")
+		}
+		if err := validateDecimalBounds(text, column.Precision, column.Scale); err != nil {
+			return nil, err
 		}
 		return appendBlob(encoded, []byte(text)), nil
 	case "float":
@@ -843,7 +839,8 @@ func canonicalizeRFC8785JSON(raw []byte) ([]byte, error) {
 	}
 	validator := json.NewDecoder(bytes.NewReader(raw))
 	validator.UseNumber()
-	if err := validateJSONValue(validator); err != nil {
+	valuesAndNames := 0
+	if err := validateJSONValue(validator, 0, &valuesAndNames); err != nil {
 		return nil, err
 	}
 	if _, err := validator.Token(); !errors.Is(err, io.EOF) {
@@ -862,13 +859,23 @@ func canonicalizeRFC8785JSON(raw []byte) ([]byte, error) {
 	return canonicalJSON(value)
 }
 
-func validateJSONValue(decoder *json.Decoder) error {
+// validateJSONValue applies the I-JSON limits that the Rust digest encoder
+// enforces: nesting depth, the value and member-name count, and no Unicode
+// noncharacters in strings or member names.
+func validateJSONValue(decoder *json.Decoder, depth int, valuesAndNames *int) error {
+	*valuesAndNames++
+	if *valuesAndNames > maxJSONValuesAndNames {
+		return errors.New("JSON exceeds the value and member name limit")
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return fmt.Errorf("decoding JSON value: %w", err)
 	}
 	switch value := token.(type) {
 	case json.Delim:
+		if (value == '{' || value == '[') && depth >= maxJSONDepth {
+			return errors.New("JSON exceeds the nesting limit")
+		}
 		switch value {
 		case '{':
 			seen := make(map[string]struct{})
@@ -878,14 +885,15 @@ func validateJSONValue(decoder *json.Decoder) error {
 					return fmt.Errorf("decoding JSON member name: %w", err)
 				}
 				key, ok := keyToken.(string)
-				if !ok || !utf8.ValidString(key) {
+				if !ok || !validIJSONString(key) {
 					return errors.New("JSON object has an invalid member name")
 				}
 				if _, exists := seen[key]; exists {
 					return errors.New("JSON object has a duplicate member")
 				}
 				seen[key] = struct{}{}
-				if err := validateJSONValue(decoder); err != nil {
+				*valuesAndNames++
+				if err := validateJSONValue(decoder, depth+1, valuesAndNames); err != nil {
 					return err
 				}
 			}
@@ -896,7 +904,7 @@ func validateJSONValue(decoder *json.Decoder) error {
 			return nil
 		case '[':
 			for decoder.More() {
-				if err := validateJSONValue(decoder); err != nil {
+				if err := validateJSONValue(decoder, depth+1, valuesAndNames); err != nil {
 					return err
 				}
 			}
@@ -912,8 +920,8 @@ func validateJSONValue(decoder *json.Decoder) error {
 		_, err := canonicalJSONNumber(value.String())
 		return err
 	case string:
-		if !utf8.ValidString(value) {
-			return errors.New("JSON string contains invalid UTF-8")
+		if !validIJSONString(value) {
+			return errors.New("JSON string contains invalid UTF-8 or a Unicode noncharacter")
 		}
 		return nil
 	case bool, nil:
@@ -921,6 +929,18 @@ func validateJSONValue(decoder *json.Decoder) error {
 	default:
 		return fmt.Errorf("JSON contains unsupported value %T", token)
 	}
+}
+
+func validIJSONString(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 0xfdd0 && character <= 0xfdef) || character&0xfffe == 0xfffe {
+			return false
+		}
+	}
+	return true
 }
 
 func appendCanonicalJSON(output *[]byte, value any) error {
@@ -1009,21 +1029,14 @@ func canonicalFloatNumber(value string) (string, error) {
 }
 
 func canonicalJSONNumberWithSafeInteger(value string, safeInteger bool) (string, error) {
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || math.IsInf(parsed, 0) || math.IsNaN(parsed) {
-		return "", errors.New("JSON number is outside finite binary64")
+	parsed, encoded, err := jsonnumber.Canonical(value)
+	if err != nil {
+		return "", err
 	}
 	if safeInteger && math.Trunc(parsed) == parsed && math.Abs(parsed) > maxSafeJSONInteger {
 		return "", errors.New("JSON integer is outside the safe range")
 	}
-	if parsed == 0 {
-		return "0", nil
-	}
-	encoded, err := json.Marshal(parsed)
-	if err != nil {
-		return "", fmt.Errorf("canonicalizing JSON number: %w", err)
-	}
-	return string(encoded), nil
+	return encoded, nil
 }
 
 func appendCanonicalJSONString(output *[]byte, value string) {
@@ -1140,6 +1153,21 @@ func canonicalDecimal(value string) bool {
 		return false
 	}
 	return parts[0] != "0" || len(parts) == 2
+}
+
+// validateDecimalBounds applies the declared precision and scale to a
+// canonical decimal, as the Rust digest encoder does.
+func validateDecimalBounds(value string, precision, scale *int) error {
+	if precision == nil || scale == nil || *precision <= 0 || *scale < 0 || *scale > *precision {
+		return errors.New("decimal field has no valid precision and scale")
+	}
+	integer, fraction, _ := strings.Cut(strings.TrimPrefix(value, "-"), ".")
+	integerDigits := len(strings.TrimLeft(integer, "0"))
+	fractionDigits := len(fraction)
+	if integerDigits > *precision-*scale || fractionDigits > *scale || integerDigits+fractionDigits > *precision {
+		return errors.New("decimal exceeds declared precision or scale")
+	}
+	return nil
 }
 
 func validDateTime(value string) bool {

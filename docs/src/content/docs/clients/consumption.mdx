@@ -9,9 +9,9 @@ It uses that guide's `synchro_quickstart` database, `alice` identity,
 
 ## Choose an artifact source
 
-Use local artifacts before Synchro `0.3.2` is published. Use the published commands
+Use local artifacts before Synchro `0.4.0-rc.1` is published. Use the published commands
 only after the matching release artifact is available. Both paths use Synchro
-`0.3.2` and the same client APIs.
+`0.4.0-rc.1` and the same client APIs.
 
 Build local artifacts from this repository:
 
@@ -23,17 +23,17 @@ This creates:
 
 - Apple package files in `dist/local-consumer/apple/Synchro`
 - a Kotlin Maven repository in `dist/local-consumer/maven`
-- `dist/local-consumer/npm/trainstar-synchro-react-native-0.3.2.tgz`
+- `dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.1.tgz`
 
 Do not link raw source directories into another application. The staged
 artifacts are the supported pre-release path.
 
 | Surface | Local artifact | Published artifact after release |
 | --- | --- | --- |
-| Swift | local package path | Git tag `v0.3.2` |
-| CocoaPods | local pod path | Git tag `v0.3.2` |
-| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.3.2` |
-| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.3.2` |
+| Swift | local package path | Git tag `v0.4.0-rc.1` |
+| CocoaPods | local pod path | Git tag `v0.4.0-rc.1` |
+| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.4.0-rc.1` |
+| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.4.0-rc.1` |
 
 ## Prerequisites
 
@@ -54,13 +54,13 @@ endpoint, not a host loopback address.
 
 ## Swift
 
-Add the package to `Package.swift` after Synchro `v0.3.2` is published:
+Add the package to `Package.swift` after Synchro `v0.4.0-rc.1` is published:
 
 ```swift
 dependencies: [
     .package(
         url: "https://github.com/trainstar/synchro.git",
-        exact: "0.3.2"
+        exact: "0.4.0-rc.1"
     )
 ],
 targets: [
@@ -154,7 +154,7 @@ local tutorial adapter. When the application exits, call
 
 ## Kotlin
 
-Add the published artifact after Synchro `0.3.2` is available:
+Add the published artifact after Synchro `0.4.0-rc.1` is available:
 
 ```kotlin
 repositories {
@@ -162,7 +162,7 @@ repositories {
 }
 
 dependencies {
-    implementation("fit.trainstar:synchro:0.3.2")
+    implementation("fit.trainstar:synchro:0.4.0-rc.1")
 }
 ```
 
@@ -237,27 +237,35 @@ Get `accessToken` from the application identity provider. Call `client.close()`
 when the client is no longer needed. Pass `http://10.0.2.2:8091` only for the
 local Android emulator tutorial adapter. Use an HTTPS URL in production.
 
+The Kotlin client delivers `onStatusChange`, `onConflict`, `onSyncEvent`, and
+`initialSyncCompleted` callbacks synchronously from sync work. A callback must
+return before the application calls `start`, `stop`, `retry`, `resetSchema`,
+`syncNow`, or `close`. A synchronous call from a callback throws
+`IllegalStateException` before it cancels work, waits, or closes the database.
+To stop or close from a callback, launch the call on another coroutine and let
+the callback return.
+
 ## React Native
 
-Install the published package after Synchro `0.3.2` is available:
+Install the published package after Synchro `0.4.0-rc.1` is available:
 
 ```sh
-npm install @trainstar/synchro-react-native@0.3.2
+npm install @trainstar/synchro-react-native@0.4.0-rc.1
 ```
 
 For local development, install the staged package:
 
 ```sh
-npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.3.2.tgz
+npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.1.tgz
 ```
 
 ### React Native iOS Podfile requirements
 
 The React Native bridge requires both Synchro and GRDB. Use these exact Git
-dependencies for a published Synchro `0.3.2` integration:
+dependencies for a published Synchro `0.4.0-rc.1` integration:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.3.2'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.1'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
 ```
 

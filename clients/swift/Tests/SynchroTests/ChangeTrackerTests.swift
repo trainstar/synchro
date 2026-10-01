@@ -17,17 +17,16 @@ final class ChangeTrackerTests: XCTestCase {
             tables: [
                 SchemaTable(
                     tableName: "orders",
-                    pushPolicy: "owner_only",
                     updatedAtColumn: "updated_at",
                     deletedAtColumn: "deleted_at",
                     primaryKey: ["id"],
                     columns: [
-                        SchemaColumn(name: "id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: true),
-                        SchemaColumn(name: "ship_address", dbType: "text", logicalType: "string", nullable: true, isPrimaryKey: false),
-                        SchemaColumn(name: "user_id", dbType: "uuid", logicalType: "string", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "created_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "updated_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: false, isPrimaryKey: false),
-                        SchemaColumn(name: "deleted_at", dbType: "timestamp with time zone", logicalType: "datetime", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "id", logicalType: "string", nullable: false, isPrimaryKey: true),
+                        SchemaColumn(name: "ship_address", logicalType: "string", nullable: true, isPrimaryKey: false),
+                        SchemaColumn(name: "user_id", logicalType: "string", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "created_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "updated_at", logicalType: "datetime", nullable: false, isPrimaryKey: false),
+                        SchemaColumn(name: "deleted_at", logicalType: "datetime", nullable: true, isPrimaryKey: false),
                     ]
                 )
             ]
@@ -251,6 +250,30 @@ final class ChangeTrackerTests: XCTestCase {
         XCTAssertTrue(cancelled.allSatisfy { ($0["lifecycle_state"] as String?) == "cancelled_before_send" })
         XCTAssertNotNil(cancelled[0]["normalized_mutation_id"] as String?)
         XCTAssertEqual(cancelled[0]["normalized_mutation_id"] as String?, cancelled[1]["normalized_mutation_id"] as String?)
+    }
+
+    func testDedupCreateThenSoftDeleteCancelsBothAndBlocksALaterUpdate() throws {
+        let (db, tracker, _) = try makeTestEnv()
+
+        _ = try db.execute(
+            "INSERT INTO orders (id, ship_address, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            params: ["w1", "123 Main St", "u1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]
+        )
+        _ = try db.execute("UPDATE orders SET deleted_at = ? WHERE id = ?", params: ["2026-01-01T00:30:00Z", "w1"])
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["after delete", "w1"])
+
+        // The push path seals from one selection pass. The row never reaches
+        // the server, and a delete has no resurrection.
+        XCTAssertEqual(try db.writeTransaction { try tracker.pendingChanges($0, limit: 100) }.count, 0)
+        let states = try db.query(
+            "SELECT operation, lifecycle_state FROM _synchro_pending_changes WHERE table_name = 'orders' ORDER BY local_order",
+            params: nil
+        ).map { "\($0["operation"] as String) \($0["lifecycle_state"] as String)" }
+        XCTAssertEqual(states, [
+            "insert cancelled_before_send",
+            "delete cancelled_before_send",
+            "update blocked_by_predecessor",
+        ])
     }
 
     func testSyncLockPreventsTracking() throws {

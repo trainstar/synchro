@@ -186,7 +186,7 @@ SELECT
                FROM pg_catalog.pg_index primary_index
                JOIN pg_catalog.pg_attribute primary_attribute
                  ON primary_attribute.attrelid = primary_index.indrelid
-                AND primary_attribute.attnum = ANY(primary_index.indkey)
+                AND primary_attribute.attnum = primary_index.indkey[0]
                WHERE primary_index.indrelid = registry.physical_relation_oid
                  AND primary_index.indisprimary
                  AND primary_index.indimmediate
@@ -206,6 +206,36 @@ SELECT
                  AND membership_function.proname::text = registry.membership_function_name::text
                  AND membership_function.prokind = 'f'
            ))
+           OR (registry.registration_kind = 'synced'
+               AND registry.push_policy = 'enabled'
+               AND EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_attribute key_attribute
+                   WHERE key_attribute.attrelid = registry.physical_relation_oid
+                     AND key_attribute.attname::text = registry.pk_column
+                     AND key_attribute.attnum > 0
+                     AND NOT key_attribute.attisdropped
+                     AND (
+                         key_attribute.attidentity = 'a'
+                         OR key_attribute.attgenerated <> ''
+                     )
+               ))
+           OR EXISTS (
+               SELECT 1
+               FROM synchro.sync_registry_fields field
+               JOIN pg_catalog.pg_attribute field_attribute
+                 ON field_attribute.attrelid = registry.physical_relation_oid
+                AND field_attribute.attname = field.physical_column
+                AND field_attribute.attnum > 0
+                AND NOT field_attribute.attisdropped
+               WHERE field.registry_generation = registry.registry_generation
+                 AND field.relation_id = registry.relation_id
+                 AND field.writable
+                 AND (
+                     field_attribute.attidentity = 'a'
+                     OR field_attribute.attgenerated <> ''
+                 )
+           )
     ) AS relation_identity_valid,
     (
         EXISTS (
@@ -227,6 +257,16 @@ SELECT
             FROM configured_publication publication
             JOIN pg_catalog.pg_publication_rel member
               ON member.prpubid = publication.oid
+        )
+        AND NOT EXISTS (
+            SELECT registry.physical_relation_oid
+            FROM active_registry
+            JOIN synchro.sync_registry registry
+              ON registry.registry_generation = active_registry.generation
+            EXCEPT
+            SELECT published.relid
+            FROM configured_publication publication
+            CROSS JOIN LATERAL pg_catalog.pg_get_publication_tables(publication.pubname::text) published
         )
         AND NOT EXISTS (
             SELECT member.prrelid
@@ -387,11 +427,25 @@ SELECT
         JOIN current_database_state database
           ON database.database_oid = worker.database_oid
          AND database.database_name = worker.database_name::text
-        JOIN active_registry ON active_registry.generation = worker.registry_generation
+        -- The heartbeat copies durable progress at the end of a poll cycle.
+        -- Thus the copy can be behind durable progress, but never ahead of it.
         JOIN progress
-          ON progress.registry_generation = worker.registry_generation
-         AND progress.materialized_commit_lsn IS NOT DISTINCT FROM worker.materialized_commit_lsn
-         AND progress.materialized_end_lsn IS NOT DISTINCT FROM worker.materialized_end_lsn
+          ON worker.registry_generation <= progress.registry_generation
+         AND (
+             worker.materialized_commit_lsn IS NULL
+             OR (
+                 progress.materialized_commit_lsn IS NOT NULL
+                 AND worker.materialized_commit_lsn <= progress.materialized_commit_lsn
+             )
+         )
+         AND (
+             worker.materialized_end_lsn IS NULL
+             OR (
+                 progress.materialized_end_lsn IS NOT NULL
+                 AND worker.materialized_end_lsn <= progress.materialized_end_lsn
+             )
+         )
+        JOIN active_registry ON active_registry.generation = progress.registry_generation
         JOIN pg_catalog.pg_stat_activity activity
           ON activity.pid = worker.backend_pid
          AND activity.datid = database.database_oid
@@ -419,37 +473,43 @@ SELECT
         JOIN progress
           ON progress.stream_generation = runtime.stream_generation
          AND progress.registry_generation = active_registry.generation
-        WHERE (
-            progress.generation_start_lsn IS NOT NULL
-            AND progress.materialized_commit_lsn IS NULL
-            AND progress.materialized_end_lsn IS NULL
-            AND progress.acknowledged_end_lsn IS NULL
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-            )
-        ) OR (
-             progress.generation_start_lsn IS NOT NULL
-             AND progress.materialized_commit_lsn IS NOT NULL
-            AND progress.materialized_end_lsn IS NOT NULL
-            AND progress.acknowledged_end_lsn = progress.materialized_end_lsn
-            AND EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND transaction.commit_lsn = progress.materialized_commit_lsn
-                  AND transaction.end_lsn = progress.materialized_end_lsn
-                  AND transaction.registry_generation <= progress.registry_generation
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM synchro.sync_wal_transactions transaction
-                WHERE transaction.stream_generation = runtime.stream_generation
-                  AND (
-                      transaction.commit_lsn > progress.materialized_commit_lsn
-                      OR transaction.end_lsn > progress.materialized_end_lsn
-                  )
+        WHERE progress.generation_start_lsn IS NOT NULL
+        AND progress.processed_end_lsn IS NOT NULL
+        -- The worker commits processed_end_lsn before the acknowledgement.
+        AND progress.generation_start_lsn
+            <= COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+        AND COALESCE(progress.acknowledged_end_lsn, progress.generation_start_lsn)
+            <= progress.processed_end_lsn
+        AND (
+            (
+                progress.materialized_commit_lsn IS NULL
+                AND progress.materialized_end_lsn IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                )
+            ) OR (
+                progress.materialized_commit_lsn IS NOT NULL
+                AND progress.materialized_end_lsn IS NOT NULL
+                AND progress.materialized_end_lsn <= progress.processed_end_lsn
+                AND EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND transaction.commit_lsn = progress.materialized_commit_lsn
+                      AND transaction.end_lsn = progress.materialized_end_lsn
+                      AND transaction.registry_generation <= progress.registry_generation
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM synchro.sync_wal_transactions transaction
+                    WHERE transaction.stream_generation = runtime.stream_generation
+                      AND (
+                          transaction.commit_lsn > progress.materialized_commit_lsn
+                          OR transaction.end_lsn > progress.materialized_end_lsn
+                      )
+                )
             )
         )
     ) AS progress_valid,
@@ -457,10 +517,13 @@ SELECT
         WHEN NOT EXISTS (SELECT 1 FROM progress) THEN NULL
         WHEN NOT EXISTS (SELECT 1 FROM runtime_slot) THEN NULL
         ELSE (
-            SELECT slot.confirmed_flush_lsn = COALESCE(
+            -- A slot advance changes shared memory before its acknowledgement commits.
+            -- The live slot can pass the snapshot progress, so no upper bound applies.
+            -- Each worker loop blocks on a slot that differs from the acknowledgement.
+            SELECT COALESCE(
                        progress.acknowledged_end_lsn,
                        progress.generation_start_lsn
-                   )
+                   ) <= slot.confirmed_flush_lsn
                    AND slot.confirmed_flush_lsn <= pg_catalog.pg_current_wal_lsn()
             FROM runtime_slot slot
             CROSS JOIN progress
@@ -667,6 +730,7 @@ impl Default for ReadinessStatus {
             "heartbeat",
             "wal_byte_lag",
             "wal_time_lag",
+            "assignment_function",
         ] {
             checks.insert(name, HealthCheck::unknown("health_query_unavailable"));
         }
@@ -928,6 +992,9 @@ pub(crate) fn load_readiness_status_with_configuration(
     if configuration.max_wal_lag_seconds <= 0 {
         status.set("wal_time_lag", HealthCheck::failed("invalid_limit"));
     }
+    if installed_fingerprint.as_deref() != Some(library_fingerprint) {
+        return status;
+    }
 
     let Some(worker_login) = configuration.worker_login.as_deref() else {
         return status;
@@ -939,9 +1006,11 @@ pub(crate) fn load_readiness_status_with_configuration(
             &configuration,
             login.worker_login_oid.unwrap_or_default(),
         )?;
-        Ok::<_, String>((login, raw))
+        let assignment_current = crate::portable_seed::assignment_function_is_current(client)
+            .map_err(|_| "loading assignment function state failed".to_string())?;
+        Ok::<_, String>((login, raw, assignment_current))
     });
-    let Ok((login, raw)) = loaded else {
+    let Ok((login, raw, assignment_current)) = loaded else {
         return status;
     };
 
@@ -993,6 +1062,10 @@ pub(crate) fn load_readiness_status_with_configuration(
         known_check(raw.replication_slot_valid, "replication_slot_invalid"),
     );
     status.set("poison", known_check(raw.poison_clear, "blocking_poison"));
+    status.set(
+        "assignment_function",
+        known_check(assignment_current, "assignment_function_drifted"),
+    );
     status.set(
         "stream_reset",
         known_check(raw.stream_reset_clear, "stream_reset_incomplete"),

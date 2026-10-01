@@ -279,10 +279,15 @@ func checkCanonicalMutationOutcome(sequence, exchangeSequence uint64, partitionN
 	return append(violations, checkMutationOutcomeReconciliation(sequence, exchangeSequence, partitionName, outcomeIndex, outcome, request)...)
 }
 
+// checkMutationOutcomeReconciliation checks the authoritative row of an applied
+// or conflicting outcome. An applied insert must contain the authored columns.
+// A conflict returns the existing authoritative row, which can differ from the
+// rejected authored values, so only its presence is checked here.
 func checkMutationOutcomeReconciliation(sequence, exchangeSequence uint64, partitionName string, outcomeIndex int, outcome map[string]json.RawMessage, request pushMutation) []Violation {
 	var violations []Violation
 	serverRow, rowErr := decodeRawObject(outcome["server_row"])
-	if rowErr != nil || !rawObjectContains(serverRow, request.columns) {
+	applied := partitionName == "accepted"
+	if rowErr != nil || len(serverRow) == 0 || applied && !rawObjectContains(serverRow, request.columns) {
 		violations = append(violations, mutationOutcomeViolation(sequence, exchangeSequence, RuleMutationOutcomeServerRow, partitionName, outcomeIndex))
 	}
 	serverVersion, versionOK := decodeJSONString(outcome["server_version"])
@@ -306,7 +311,7 @@ func validConflictMutationCode(code string) bool {
 
 func validTerminalMutationCode(code string) bool {
 	switch code {
-	case "schema_incompatible", "table_not_synced", "policy_rejected", "validation_failed":
+	case "schema_incompatible", "table_not_synced", "policy_rejected", "validation_failed", "atomic_batch_rejected":
 		return true
 	default:
 		return false

@@ -302,6 +302,37 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		"ALTER TABLE public.cf_items DROP CONSTRAINT cf_items_pkey",
 		"ALTER TABLE public.cf_items ADD PRIMARY KEY (id) DEFERRABLE",
 	})
+	if _, err := admin.ExecContext(ctx, `
+		CREATE TABLE public.security49_identity_drift (
+			id uuid PRIMARY KEY,
+			counter integer NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+			deleted_at timestamptz
+		);
+		ALTER TABLE public.security49_identity_drift ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY synchro_owner_all ON public.security49_identity_drift
+			AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true);
+		GRANT SELECT, INSERT, UPDATE ON TABLE public.security49_identity_drift TO synchro_owner;
+		GRANT SELECT ON TABLE public.security49_identity_drift TO synchro_worker;
+		CREATE FUNCTION public.security49_identity_drift_membership(p_id uuid)
+		RETURNS SETOF text
+		LANGUAGE SQL STABLE SECURITY INVOKER
+		SET search_path = pg_catalog, synchro
+		BEGIN ATOMIC SELECT 'user:diagnostic-user'::text; END;
+		REVOKE ALL ON FUNCTION public.security49_identity_drift_membership FROM PUBLIC;
+		GRANT EXECUTE ON FUNCTION public.security49_identity_drift_membership
+			TO synchro_owner, synchro_worker;
+		SELECT synchro.synchro_register_table(
+			'public.security49_identity_drift',
+			'public.security49_identity_drift_membership',
+			'single_scope',
+			'id', 'updated_at', 'deleted_at', 'enabled')`); err != nil {
+		t.Fatalf("create registered identity drift fixture: %v", err)
+	}
+	waitForIssue49CanonicalHealth(t, ctx, admin, true)
+	identityDrift := security49HealthDuringTransaction(t, ctx, admin, []string{
+		"ALTER TABLE public.security49_identity_drift ALTER COLUMN counter ADD GENERATED ALWAYS AS IDENTITY",
+	})
 
 	if _, err := admin.ExecContext(ctx, `
 		ALTER TABLE public.cf_items RENAME TO cf_items_registered_oid;
@@ -361,6 +392,9 @@ func TestRealIssue49SecurityRegistryIdentityAndKeys(t *testing.T) {
 		}
 		if deferrableDrift["ready"] != false || issue49HealthChecks(t, deferrableDrift)["relation_identity"] != "failed" {
 			t.Fatalf("deferrable primary-key drift did not fail relation identity: %#v", deferrableDrift)
+		}
+		if identityDrift["ready"] != false || issue49HealthChecks(t, identityDrift)["relation_identity"] != "failed" {
+			t.Fatalf("database-generated writable field drift did not fail relation identity: %#v", identityDrift)
 		}
 		if registeredOID != persistedOID || replacementOID == persistedOID || OIDDrift["ready"] != false ||
 			issue49HealthChecks(t, OIDDrift)["relation_identity"] != "failed" {
@@ -487,8 +521,15 @@ func TestRealIssue49SecurityCaptureHealthFailsClosed(t *testing.T) {
 		{
 			name:      "contiguous progress",
 			wantCheck: "materialization_progress",
-			statements: []string{
-				"UPDATE synchro.sync_wal_progress SET acknowledged_end_lsn = NULL WHERE singleton",
+			// A correct worker never commits an acknowledgement after the slot.
+			// A worker slot advance cannot pass the committed processed end.
+			statements: []string{`
+				UPDATE synchro.sync_wal_progress progress
+				SET processed_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric,
+				    acknowledged_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric
+				FROM synchro.sync_runtime_state runtime
+				JOIN pg_catalog.pg_replication_slots slot ON slot.slot_name = runtime.active_slot_name
+				WHERE progress.singleton AND runtime.singleton`,
 			},
 		},
 		{
@@ -624,8 +665,9 @@ func TestRealIssue49SecurityDatabaseAuthority(t *testing.T) {
 		JOIN pg_catalog.pg_roles owner ON owner.oid = procedure.proowner
 		WHERE namespace.nspname = 'synchro'
 		  AND (owner.rolname <> 'synchro_owner'
-		       OR NOT procedure.prosecdef
-		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro'])`).Scan(&unsafeFunctions); err != nil {
+		       OR (NOT procedure.prosecdef
+		           AND procedure.proname <> 'synchro_assert_projection_reader')
+		       OR NOT COALESCE(procedure.proconfig, '{}'::text[]) @> ARRAY['search_path=pg_catalog, synchro, pg_temp'])`).Scan(&unsafeFunctions); err != nil {
 		t.Fatalf("inspect privileged function definitions: %v", err)
 	}
 
@@ -779,6 +821,59 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 	scopeRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 10)
 	scopeRequest["predicate"] = scopeCanary
 	_, _ = postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", scopeRequest)
+
+	// The extension parsers receive these type errors. A parser detail can quote the submitted value.
+	pullParserCanary := "security210-pull-limit-5c19a2"
+	pullParserRequest := realPullPayload(client, issue49CloneScopes(client.Scopes), 10)
+	pullParserRequest["limit"] = pullParserCanary
+	pullParserStatus, pullParserResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/pull", pullParserRequest)
+	pushParserCanary := "security210-push-generation-7be41d"
+	pushParserRequest := phase4PushPayload(client, "00000000-0000-4000-8a05-000000000004", []map[string]any{
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8a05-000000000005", "00000000-0000-4000-8a05-000000000006", "security210-unused"),
+	})
+	pushParserRequest["client_generation"] = pushParserCanary
+	pushParserStatus, pushParserResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", pushParserRequest)
+
+	// A digest mismatch reaches the handled rebuild warning with the record identity in scope.
+	admin := openIssue49Admin(t, ctx, harness)
+	flipRecordChecksum := func() {
+		t.Helper()
+		if _, err := admin.ExecContext(ctx, `
+			WITH captured AS (
+				UPDATE synchro.sync_captured_rows
+				SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+				WHERE record_id = $1
+				RETURNING record_id
+			)
+			UPDATE synchro.sync_bucket_edges
+			SET checksum = set_byte(checksum, 0, get_byte(checksum, 0) # 1)
+			WHERE record_id IN (SELECT record_id FROM captured)`, recordCanary,
+		); err != nil {
+			t.Fatalf("flip captured row checksum: %v", err)
+		}
+	}
+	flipRecordChecksum()
+	rebuildFailureStatus, rebuildFailureResponse := postSync(t, ctx, harness.AdapterURL(), token, "/sync/rebuild", map[string]any{
+		"client_id":         client.ID,
+		"client_generation": client.Generation,
+		"schema":            client.Schema,
+		"scope":             "user:diagnostic-user",
+		"rebuild_id":        "00000000-0000-4000-8a05-000000000007",
+		"cursor":            nil,
+		"limit":             100,
+	})
+	flipRecordChecksum()
+	recovered, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8a05-000000000008")
+	requireRebuildRecordVersion(t, recovered, table, recordCanary, valueCanary)
+	parserAndRebuildOutputs := make([][]byte, 0, 3)
+	for _, response := range []map[string]any{pullParserResponse, pushParserResponse, rebuildFailureResponse} {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			t.Fatalf("encode diagnostic response: %v", err)
+		}
+		parserAndRebuildOutputs = append(parserAndRebuildOutputs, encoded)
+	}
+
 	readyStatus, readyBody := getIssue49Readiness(t, ctx, harness.AdapterURL())
 	for readyStatus == http.StatusServiceUnavailable && bytes.Equal(readyBody, []byte(`{"ready":false}`)) {
 		select {
@@ -788,7 +883,6 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		}
 		readyStatus, readyBody = getIssue49Readiness(t, ctx, harness.AdapterURL())
 	}
-	admin := openIssue49Admin(t, ctx, harness)
 	health := loadIssue49Health(t, ctx, admin)
 	wALDiagnostic, diagnosticErr := harness.Operator().WALDiagnostics(ctx)
 	if diagnosticErr != nil {
@@ -814,9 +908,11 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		valueCanary,
 		mutationCanary,
 		scopeCanary,
+		pullParserCanary,
+		pushParserCanary,
 		token,
 	}, credentialCanaries...)
-	outputs := [][]byte{
+	outputs := append([][]byte{
 		[]byte(diagnostics),
 		readyBody,
 		healthJSON,
@@ -824,7 +920,7 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		[]byte(quarantine),
 		metricsBody,
 		tracesBody,
-	}
+	}, parserAndRebuildOutputs...)
 	logDisclosure, err := harness.StopAdapterAndObserveLogDisclosure(ctx, canaries)
 	if err != nil {
 		t.Fatalf("observe operational logs: %v", err)
@@ -837,6 +933,9 @@ func TestRealIssue49SecurityOperationalRedaction(t *testing.T) {
 		if status != http.StatusOK || readyStatus != http.StatusOK || !bytes.Equal(readyBody, []byte(`{"ready":true}`)) {
 			t.Fatalf("redaction exercise did not reach healthy operational output: push=%d ready=%d body=%q", status, readyStatus, readyBody)
 		}
+		requireRealProtocolError(t, pullParserStatus, pullParserResponse, http.StatusBadRequest, "invalid_request")
+		requireRealProtocolError(t, pushParserStatus, pushParserResponse, http.StatusBadRequest, "invalid_request")
+		requireRealProtocolError(t, rebuildFailureStatus, rebuildFailureResponse, http.StatusInternalServerError, "sync_integrity_failure")
 		if metricsStatus != http.StatusNotFound || tracesStatus != http.StatusNotFound {
 			t.Fatalf("unconfigured metric or trace output became public: metrics=%d traces=%d", metricsStatus, tracesStatus)
 		}
@@ -1228,6 +1327,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_unregister_shared_scope'),
 		('synchro_operator', 'synchro_grant_user_scope'),
 		('synchro_operator', 'synchro_revoke_user_scope'),
+		('synchro_operator', 'synchro_register_assignment_function'),
+		('synchro_operator', 'synchro_unregister_assignment_function'),
 		('synchro_operator', 'synchro_backfill_bucket_edges'),
 		('synchro_operator', 'synchro_compact'),
 		('synchro_operator', 'synchro_inject_client_retention_expiry'),
@@ -1253,6 +1354,8 @@ const security49UnexpectedFunctionAuthoritySQL = `
 		('synchro_operator', 'synchro_abort_projection_bootstrap'),
 		('synchro_operator', 'synchro_complete_projection_bootstrap_cleanup'),
 		('synchro_operator', 'synchro_projection_bootstrap_slot_drop_state'),
+		('synchro_operator', 'synchro_assert_projection_reader'),
+		('synchro_worker', 'synchro_assert_projection_reader'),
 		('synchro_worker', 'synchro_projection_bootstrap_active_stream'),
 		('synchro_worker', 'synchro_projection_bootstrap_main_boundary'),
 		('synchro_worker', 'synchro_projection_bootstrap_slot_absent'),

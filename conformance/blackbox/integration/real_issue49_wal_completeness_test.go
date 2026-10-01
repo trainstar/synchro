@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,7 +159,14 @@ func TestRealIssue49CaptureReadinessRequiresEveryCheck(t *testing.T) {
 		},
 		{
 			check: "materialization_progress",
-			sql:   "UPDATE synchro.sync_wal_progress SET acknowledged_end_lsn = NULL WHERE singleton",
+			// A correct worker never commits an acknowledgement after the slot.
+			// A worker slot advance cannot pass the committed processed end.
+			sql: `UPDATE synchro.sync_wal_progress progress
+			SET processed_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric,
+			    acknowledged_end_lsn = GREATEST(progress.processed_end_lsn, slot.confirmed_flush_lsn) + 1::numeric
+			FROM synchro.sync_runtime_state runtime
+			JOIN pg_catalog.pg_replication_slots slot ON slot.slot_name = runtime.active_slot_name
+			WHERE progress.singleton AND runtime.singleton`,
 		},
 		{
 			check: "worker",
@@ -357,7 +365,7 @@ func TestRealIssue49FenceCorrelatesCaptureKeys(t *testing.T) {
 func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	harness, _ := provisionRealProofHarness(t, ctx)
+	harness, token := provisionRealProofHarness(t, ctx)
 	admin := openIssue49Admin(t, ctx, harness)
 
 	syncedUpdateID := "00000000-0000-4000-8e05-000000000001"
@@ -371,12 +379,29 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 	accessUpdateID := "00000000-0000-4000-8e05-000000000021"
 	accessDeleteID := "00000000-0000-4000-8e05-000000000022"
 	accessInsertID := "00000000-0000-4000-8e05-000000000023"
+	// One snapshot holds only the final row state. These repeated histories
+	// prove that every earlier fence stays covered. Issue #198.
+	historyInsertUpdateID := "00000000-0000-4000-8e05-000000000031"
+	historyUpdateUpdateID := "00000000-0000-4000-8e05-000000000032"
+	historyInsertDeleteID := "00000000-0000-4000-8e05-000000000033"
+	accessHistoryInsertUpdateID := "00000000-0000-4000-8e05-000000000041"
+	accessHistoryInsertDeleteID := "00000000-0000-4000-8e05-000000000042"
+	accessHistoryUpdateUpdateID := "00000000-0000-4000-8e05-000000000043"
+	truncatedID := "00000000-0000-4000-8e05-000000000051"
+	// The poison transaction changes these rows and then truncates them. The
+	// snapshot has no row, but the fences stay pending. Issue #198.
+	truncUpdatedID := "00000000-0000-4000-8e05-000000000052"
+	truncInsertedID := "00000000-0000-4000-8e05-000000000053"
+	truncSoftDeletedID := "00000000-0000-4000-8e05-000000000054"
+	truncHardDeletedID := "00000000-0000-4000-8e05-000000000055"
+	truncIDs := []string{truncatedID, truncUpdatedID, truncInsertedID, truncSoftDeletedID, truncHardDeletedID}
+	witnessID := "00000000-0000-4000-8e05-000000000061"
 
 	setup, err := harness.Source().BeginTx(ctx)
 	if err != nil {
 		t.Fatalf("begin reset operation setup: %v", err)
 	}
-	for _, recordID := range []string{syncedUpdateID, syncedDeleteID} {
+	for _, recordID := range []string{syncedUpdateID, syncedDeleteID, historyUpdateUpdateID} {
 		if _, err := setup.ExecContext(
 			ctx,
 			"INSERT INTO cf_global_items (id, value) VALUES ($1, 'issue49-reset-operation-base')",
@@ -396,7 +421,7 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 			t.Fatalf("insert reset capture document: %v", err)
 		}
 	}
-	for index, accessID := range []string{accessUpdateID, accessDeleteID} {
+	for index, accessID := range []string{accessUpdateID, accessDeleteID, accessHistoryUpdateUpdateID} {
 		if _, err := setup.ExecContext(
 			ctx,
 			"INSERT INTO cf_document_access (id, document_id, owner_id) VALUES ($1, $2, 'diagnostic-user')",
@@ -407,19 +432,114 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 			t.Fatalf("insert reset capture operation base: %v", err)
 		}
 	}
+	for _, recordID := range []string{truncatedID, truncUpdatedID, truncSoftDeletedID, truncHardDeletedID} {
+		if _, err := setup.ExecContext(
+			ctx,
+			"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'issue49-reset-truncated')",
+			recordID,
+		); err != nil {
+			_ = setup.Rollback()
+			t.Fatalf("insert reset truncated item: %v", err)
+		}
+	}
 	if err := setup.Commit(); err != nil {
 		t.Fatalf("commit reset operation setup: %v", err)
 	}
-	waitForRealWALRecords(t, ctx, harness, "cf_global_items", syncedUpdateID, syncedDeleteID)
+	waitForRealWALRecords(t, ctx, harness, "cf_global_items", syncedUpdateID, syncedDeleteID, historyUpdateUpdateID)
 	waitForRealWALRecords(t, ctx, harness, "cf_documents", documentIDs...)
-	for _, accessID := range []string{accessUpdateID, accessDeleteID} {
+	waitForRealWALRecords(t, ctx, harness, "cf_items", truncatedID, truncUpdatedID, truncSoftDeletedID, truncHardDeletedID)
+	for _, accessID := range []string{accessUpdateID, accessDeleteID, accessHistoryUpdateUpdateID} {
 		if !waitForIssue49CaptureDependencyFence(t, ctx, admin, accessID) {
 			t.Fatalf("reset capture operation base %s did not materialize", accessID)
 		}
 	}
 
-	if err := harness.Operator().InjectRegisteredTruncate(ctx); err != nil {
+	poison, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin reset operation poison: %v", err)
+	}
+	for _, statement := range []struct {
+		query     string
+		arguments []any
+	}{
+		{"UPDATE public.cf_items SET value = 'issue49-reset-truncated-update', updated_at = clock_timestamp() WHERE id = $1", []any{truncUpdatedID}},
+		{"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'issue49-reset-truncated-insert')", []any{truncInsertedID}},
+		{"UPDATE public.cf_items SET deleted_at = clock_timestamp() WHERE id = $1", []any{truncSoftDeletedID}},
+		{"DELETE FROM public.cf_items WHERE id = $1", []any{truncHardDeletedID}},
+		{"TRUNCATE TABLE public.cf_items", nil},
+	} {
+		if _, err := poison.ExecContext(ctx, statement.query, statement.arguments...); err != nil {
+			_ = poison.Rollback()
+			t.Fatalf("reset operation poison %q: %v", statement.query, err)
+		}
+	}
+	if err := poison.Commit(); err != nil {
 		t.Fatalf("commit reset operation poison: %v", err)
+	}
+	type truncatedState struct {
+		SourcePresent   bool   `json:"source_present"`
+		Captured        bool   `json:"captured"`
+		CapturedDeleted *bool  `json:"captured_deleted"`
+		Fences          string `json:"fences"`
+		Version         *struct {
+			RowVersion    string `json:"row_version"`
+			FenceID       string `json:"fence_id"`
+			Deleted       bool   `json:"deleted"`
+			FenceCoverage string `json:"fence_coverage"`
+		} `json:"version"`
+	}
+	observeTruncated := func() (map[string]truncatedState, string) {
+		t.Helper()
+		var encoded string
+		if err := admin.QueryRowContext(ctx, `
+			WITH items AS (
+				SELECT registry.relation_id
+				FROM synchro.sync_registry registry
+				JOIN synchro.sync_registry_generations generation
+				  ON generation.generation = registry.registry_generation
+				 AND generation.state = 'active'
+				WHERE registry.table_name = 'cf_items'
+			)
+			SELECT jsonb_object_agg(input.id, jsonb_build_object(
+			       'source_present', EXISTS (SELECT 1 FROM public.cf_items item WHERE item.id::text = input.id),
+			       'captured', EXISTS (
+			           SELECT 1 FROM synchro.sync_captured_rows captured, items
+			           WHERE captured.relation_id = items.relation_id
+			             AND captured.record_id = input.id AND NOT captured.deleted
+			       ),
+			       'captured_deleted', (
+			           SELECT captured.deleted FROM synchro.sync_captured_rows captured, items
+			           WHERE captured.relation_id = items.relation_id
+			             AND captured.record_id = input.id
+			       ),
+			       'fences', (
+			           SELECT COALESCE(string_agg(fence.operation || ':' || fence.coverage, ','
+			                  ORDER BY fence.operation || ':' || fence.coverage), '')
+			           FROM synchro.sync_write_fences fence, items
+			           WHERE fence.relation_id = items.relation_id
+			             AND COALESCE(fence.new_record_id, fence.old_record_id) = input.id
+			       ),
+			       'version', (
+			           SELECT jsonb_build_object(
+			               'row_version', version.row_version::text,
+			               'fence_id', version.fence_id::text,
+			               'deleted', version.deleted,
+			               'fence_coverage', fence.coverage
+			           )
+			           FROM synchro.sync_row_versions version
+			           JOIN items ON items.relation_id = version.relation_id
+			           LEFT JOIN synchro.sync_write_fences fence ON fence.fence_id = version.fence_id
+			           WHERE version.record_id = input.id
+			       )
+			))::text
+			FROM unnest($1::text[]) input(id)`, truncIDs).Scan(&encoded); err != nil {
+			t.Fatalf("observe truncated reset rows: %v", err)
+		}
+		var state map[string]truncatedState
+		if err := json.Unmarshal([]byte(encoded), &state); err != nil {
+			t.Fatalf("decode truncated reset rows: %v", err)
+		}
+		return state, encoded
 	}
 	statements := []struct {
 		query     string
@@ -431,35 +551,274 @@ func TestRealIssue49ResetCoversEveryFenceOperation(t *testing.T) {
 		{"INSERT INTO cf_document_access (id, document_id, owner_id) VALUES ($1, $2, 'diagnostic-user')", []any{accessInsertID, documentIDs[2]}},
 		{"UPDATE cf_document_access SET owner_id = 'issue49-reset-updated-owner' WHERE id = $1", []any{accessUpdateID}},
 		{"DELETE FROM cf_document_access WHERE id = $1", []any{accessDeleteID}},
+		{"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'history-insert-first')", []any{historyInsertUpdateID}},
+		{"UPDATE cf_items SET value = 'history-insert-final', updated_at = clock_timestamp() WHERE id = $1", []any{historyInsertUpdateID}},
+		{"UPDATE cf_global_items SET value = 'history-update-first', updated_at = clock_timestamp() WHERE id = $1", []any{historyUpdateUpdateID}},
+		{"UPDATE cf_global_items SET value = 'history-update-final', updated_at = clock_timestamp() WHERE id = $1", []any{historyUpdateUpdateID}},
+		{"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'history-removed')", []any{historyInsertDeleteID}},
+		{"DELETE FROM cf_items WHERE id = $1", []any{historyInsertDeleteID}},
+		{"INSERT INTO cf_document_access (id, document_id, owner_id) VALUES ($1, $2, 'history-access-first')", []any{accessHistoryInsertUpdateID, documentIDs[0]}},
+		{"UPDATE cf_document_access SET owner_id = 'history-access-final' WHERE id = $1", []any{accessHistoryInsertUpdateID}},
+		{"INSERT INTO cf_document_access (id, document_id, owner_id) VALUES ($1, $2, 'history-access-removed')", []any{accessHistoryInsertDeleteID, documentIDs[1]}},
+		{"DELETE FROM cf_document_access WHERE id = $1", []any{accessHistoryInsertDeleteID}},
+		{"UPDATE cf_document_access SET owner_id = 'history-access-middle' WHERE id = $1", []any{accessHistoryUpdateUpdateID}},
+		{"UPDATE cf_document_access SET owner_id = 'history-access-last' WHERE id = $1", []any{accessHistoryUpdateUpdateID}},
 	}
 	for index, statement := range statements {
 		if err := harness.Source().ExecContext(ctx, statement.query, statement.arguments...); err != nil {
 			t.Fatalf("commit pending reset operation %d: %v", index+1, err)
 		}
 	}
-	waitForIssue49Poison(t, ctx, harness, syncedInsertID)
+	poisonObservation := waitForIssue49Poison(t, ctx, harness, syncedInsertID)
+	beforeTruncated, beforeTruncatedJSON := observeTruncated()
+	for recordID, want := range map[string]struct {
+		fences   string
+		deleted  bool
+		coverage string
+	}{
+		truncatedID:        {"insert:materialized", false, "materialized"},
+		truncUpdatedID:     {"insert:materialized,update:pending", false, "pending"},
+		truncInsertedID:    {"insert:pending", false, "pending"},
+		truncSoftDeletedID: {"insert:materialized,update:pending", true, "pending"},
+		truncHardDeletedID: {"delete:pending,insert:materialized", true, "pending"},
+	} {
+		state := beforeTruncated[recordID]
+		if poisonObservation.FailureClass != "truncate_unsupported" || state.SourcePresent || state.Fences != want.fences ||
+			state.Version == nil || state.Version.Deleted != want.deleted || state.Version.FenceCoverage != want.coverage ||
+			state.Captured != (recordID != truncInsertedID) {
+			t.Fatalf("reset truncate precondition failed for %s: poison=%q state=%s", recordID, poisonObservation.FailureClass, beforeTruncatedJSON)
+		}
+	}
 	expectedFenceIDs, combinations := loadIssue49PendingOperationFences(
 		t,
 		ctx,
 		admin,
 		[]string{syncedInsertID, syncedUpdateID, syncedDeleteID, accessInsertID, accessUpdateID, accessDeleteID},
 	)
+	historyFenceIDs, historyCombinations := loadIssue49PendingOperationFences(
+		t,
+		ctx,
+		admin,
+		[]string{
+			historyInsertUpdateID, historyUpdateUpdateID, historyInsertDeleteID,
+			accessHistoryInsertUpdateID, accessHistoryInsertDeleteID, accessHistoryUpdateUpdateID,
+		},
+	)
+	truncFenceIDs, truncCombinations := loadIssue49PendingOperationFences(t, ctx, admin, truncIDs)
+	allFenceIDs := append(append(append([]string(nil), expectedFenceIDs...), historyFenceIDs...), truncFenceIDs...)
+	// The trigger assigns each final version before the reset. The reset must
+	// install these exact versions, not an earlier fence version.
+	var finalVersionsJSON string
+	if err := admin.QueryRowContext(ctx, `
+		SELECT COALESCE(jsonb_object_agg(version.record_id, jsonb_build_object(
+		           'row_version', version.row_version::text,
+		           'fence_id', version.fence_id::text,
+		           'deleted', version.deleted
+		       )), '{}'::jsonb)::text
+		FROM synchro.sync_row_versions version
+		WHERE version.record_id = ANY($1)`,
+		[]string{syncedInsertID, historyInsertUpdateID, historyUpdateUpdateID, historyInsertDeleteID},
+	).Scan(&finalVersionsJSON); err != nil {
+		t.Fatalf("load final history source versions: %v", err)
+	}
 	reset, err := harness.Operator().RunStreamReset(ctx)
 	if err != nil {
 		t.Fatalf("run complete-operation stream reset: %v; %s", err, harness.FailureDiagnostics())
 	}
-	coverage := observeIssue49ResetFenceCoverage(t, ctx, admin, reset.ResetID, expectedFenceIDs)
-	syntheticEvents, syntheticEffects := observeIssue49ResetSyntheticEffects(t, ctx, admin, expectedFenceIDs)
+	coverage := observeIssue49ResetFenceCoverage(t, ctx, admin, reset.ResetID, allFenceIDs)
+	syntheticEvents, syntheticEffects := observeIssue49ResetSyntheticEffects(t, ctx, admin, allFenceIDs)
+	var installedJSON string
+	if err := admin.QueryRowContext(ctx, `
+		WITH value_field AS (
+			SELECT registry.relation_id, field.field_id::text AS field_id
+			FROM synchro.sync_registry registry
+			JOIN synchro.sync_registry_generations generation
+			  ON generation.generation = registry.registry_generation
+			 AND generation.state = 'active'
+			JOIN synchro.sync_registry_fields field
+			  ON field.registry_generation = registry.registry_generation
+			 AND field.relation_id = registry.relation_id
+			 AND field.physical_column = 'value'
+			WHERE registry.physical_relation IN ('cf_items', 'cf_global_items')
+		)
+		SELECT jsonb_build_object(
+		       'synced', COALESCE((
+		           SELECT jsonb_object_agg(version.record_id, jsonb_build_object(
+		               'row_version', version.row_version::text,
+		               'fence_id', version.fence_id::text,
+		               'deleted', version.deleted,
+		               'value', captured.row_data->>value_field.field_id,
+		               'captured_version', captured.row_version::text,
+		               'captured_from_reset', captured.source_reset_id = $2::uuid
+		           ))
+		           FROM synchro.sync_row_versions version
+		           JOIN value_field ON value_field.relation_id = version.relation_id
+		           LEFT JOIN synchro.sync_captured_rows captured
+		             ON captured.relation_id = version.relation_id
+		            AND captured.record_id = version.record_id
+		            AND NOT captured.deleted
+		           WHERE version.record_id = ANY($1)
+		       ), '{}'::jsonb),
+		       'dependencies', COALESCE((
+		           SELECT jsonb_object_agg(dependency.capture_key->>'id', jsonb_build_object(
+		               'owner_id', dependency.row_data->>'owner_id',
+		               'from_reset', dependency.source_reset_id = $2::uuid
+		           ))
+		           FROM synchro.sync_capture_dependency_rows dependency
+		           WHERE dependency.capture_key->>'id' = ANY($3)
+		             AND NOT dependency.deleted
+		       ), '{}'::jsonb)
+		)::text`,
+		[]string{historyInsertUpdateID, historyUpdateUpdateID, historyInsertDeleteID},
+		reset.ResetID,
+		[]string{accessHistoryInsertUpdateID, accessHistoryInsertDeleteID, accessHistoryUpdateUpdateID},
+	).Scan(&installedJSON); err != nil {
+		t.Fatalf("load installed reset history state: %v", err)
+	}
+	afterTruncated, afterTruncatedJSON := observeTruncated()
+	client := connectRealProtocolClient(t, ctx, harness, token, "issue49-reset-truncate-rebuild")
+	itemsTable := requireRealTable(t, client, "cf_items")
+	userRecords, _ := rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8e05-000000000071")
+	rebuiltItems := make(map[string][2]string)
+	for _, record := range userRecords {
+		if record["table"] != itemsTable.ID {
+			continue
+		}
+		pk, _ := record["pk"].(map[string]any)
+		recordID, _ := pk[itemsTable.PrimaryKeyField].(string)
+		row, _ := record["row"].(map[string]any)
+		value, _ := row[itemsTable.ValueField].(string)
+		version, _ := record["server_version"].(string)
+		if _, duplicate := rebuiltItems[recordID]; duplicate || recordID == "" {
+			t.Fatalf("reset rebuild returned an invalid item record: %#v", record)
+		}
+		rebuiltItems[recordID] = [2]string{value, version}
+	}
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'history-witness')",
+		witnessID,
+	); err != nil {
+		t.Fatalf("commit post-reset witness row: %v", err)
+	}
+	waitForRealWALRecord(t, ctx, harness, witnessID)
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'truncate-reinserted')",
+		truncInsertedID,
+	); err != nil {
+		t.Fatalf("commit post-reset insert of a truncated key: %v", err)
+	}
+	waitForRealWALRecord(t, ctx, harness, truncInsertedID)
+	tombstoneErr := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'truncate-resurrected')",
+		truncSoftDeletedID,
+	)
+	reinserted, _ := observeTruncated()
 
 	t.Run("assertion", func(t *testing.T) {
 		if len(expectedFenceIDs) != 6 || combinations != "capture_dependency:delete,capture_dependency:insert,capture_dependency:update,synced:delete,synced:insert,synced:update" {
 			t.Fatalf("reset operation fence set is incomplete: count=%d combinations=%q", len(expectedFenceIDs), combinations)
 		}
-		if coverage.Staged != 0 || coverage.Covered != 6 || coverage.UniqueCovered != 6 ||
+		if len(historyFenceIDs) != 12 || historyCombinations != "capture_dependency:delete,capture_dependency:insert,capture_dependency:insert,capture_dependency:update,capture_dependency:update,capture_dependency:update,synced:delete,synced:insert,synced:insert,synced:update,synced:update,synced:update" {
+			t.Fatalf("reset repeated-history fence set is incomplete: count=%d combinations=%q", len(historyFenceIDs), historyCombinations)
+		}
+		if len(truncFenceIDs) != 4 || truncCombinations != "synced:delete,synced:insert,synced:update,synced:update" {
+			t.Fatalf("reset truncated fence set is incomplete: count=%d combinations=%q", len(truncFenceIDs), truncCombinations)
+		}
+		if coverage.Staged != 0 || coverage.Covered != 22 || coverage.UniqueCovered != 22 ||
 			!coverage.ExactFenceSet || coverage.MetadataMismatches != 0 || coverage.PendingExpected != 0 ||
 			coverage.PendingRegistered != 0 || !coverage.SnapshotMarkersBounded || coverage.CoverageModes != "reset_baseline" ||
 			syntheticEvents != 0 || syntheticEffects != 0 {
 			t.Fatalf("reset omitted or fabricated operation fence coverage: coverage=%#v events=%d effects=%d", coverage, syntheticEvents, syntheticEffects)
+		}
+		var finalVersions map[string]struct {
+			RowVersion string `json:"row_version"`
+			FenceID    string `json:"fence_id"`
+			Deleted    bool   `json:"deleted"`
+		}
+		if err := json.Unmarshal([]byte(finalVersionsJSON), &finalVersions); err != nil || len(finalVersions) != 4 {
+			t.Fatalf("final history source versions are invalid: %s", finalVersionsJSON)
+		}
+		var installed struct {
+			Synced map[string]struct {
+				RowVersion        string  `json:"row_version"`
+				FenceID           string  `json:"fence_id"`
+				Deleted           bool    `json:"deleted"`
+				Value             *string `json:"value"`
+				CapturedVersion   *string `json:"captured_version"`
+				CapturedFromReset *bool   `json:"captured_from_reset"`
+			} `json:"synced"`
+			Dependencies map[string]struct {
+				OwnerID   string `json:"owner_id"`
+				FromReset bool   `json:"from_reset"`
+			} `json:"dependencies"`
+		}
+		if err := json.Unmarshal([]byte(installedJSON), &installed); err != nil {
+			t.Fatalf("decode installed reset history state: %v", err)
+		}
+		for recordID, wantValue := range map[string]string{
+			historyInsertUpdateID: "history-insert-final",
+			historyUpdateUpdateID: "history-update-final",
+		} {
+			state, found := installed.Synced[recordID]
+			final := finalVersions[recordID]
+			if !found || final.Deleted || state.Deleted || state.RowVersion != final.RowVersion || state.FenceID != final.FenceID ||
+				state.Value == nil || *state.Value != wantValue || state.CapturedVersion == nil ||
+				*state.CapturedVersion != final.RowVersion || state.CapturedFromReset == nil || !*state.CapturedFromReset {
+				t.Fatalf("reset did not install the final history state for %s: final=%#v installed=%s", recordID, final, installedJSON)
+			}
+		}
+		removed, found := installed.Synced[historyInsertDeleteID]
+		removedFinal := finalVersions[historyInsertDeleteID]
+		if !found || !removedFinal.Deleted || !removed.Deleted || removed.RowVersion != removedFinal.RowVersion ||
+			removed.FenceID != removedFinal.FenceID || removed.Value != nil || removed.CapturedVersion != nil {
+			t.Fatalf("reset did not keep the final history tombstone: final=%#v installed=%s", removedFinal, installedJSON)
+		}
+		if len(installed.Dependencies) != 2 ||
+			installed.Dependencies[accessHistoryInsertUpdateID].OwnerID != "history-access-final" ||
+			!installed.Dependencies[accessHistoryInsertUpdateID].FromReset ||
+			installed.Dependencies[accessHistoryUpdateUpdateID].OwnerID != "history-access-last" ||
+			!installed.Dependencies[accessHistoryUpdateUpdateID].FromReset {
+			t.Fatalf("reset did not install the final dependency histories: %s", installedJSON)
+		}
+		for _, recordID := range []string{truncatedID, truncUpdatedID, truncInsertedID} {
+			state := afterTruncated[recordID]
+			if state.SourcePresent || state.CapturedDeleted != nil || state.Version != nil {
+				t.Fatalf("reset invented final state for truncated %s: %s", recordID, afterTruncatedJSON)
+			}
+		}
+		for _, recordID := range []string{truncSoftDeletedID, truncHardDeletedID} {
+			before, after := beforeTruncated[recordID].Version, afterTruncated[recordID].Version
+			if afterTruncated[recordID].SourcePresent || afterTruncated[recordID].CapturedDeleted != nil || after == nil || before == nil ||
+				!after.Deleted || after.RowVersion != before.RowVersion || after.FenceID != before.FenceID ||
+				after.FenceCoverage != "reset_baseline" {
+				t.Fatalf("reset did not keep the deletion version for truncated %s: before=%s after=%s", recordID, beforeTruncatedJSON, afterTruncatedJSON)
+			}
+		}
+		wantRebuilt := map[string][2]string{
+			syncedInsertID:        {"issue49-reset-insert", finalVersions[syncedInsertID].RowVersion},
+			historyInsertUpdateID: {"history-insert-final", finalVersions[historyInsertUpdateID].RowVersion},
+		}
+		if len(rebuiltItems) != len(wantRebuilt) {
+			t.Fatalf("reset rebuild item set = %#v, want %#v", rebuiltItems, wantRebuilt)
+		}
+		for recordID, want := range wantRebuilt {
+			if rebuiltItems[recordID] != want || want[1] == "" {
+				t.Fatalf("reset rebuild item set = %#v, want %#v", rebuiltItems, wantRebuilt)
+			}
+		}
+		reinsertedState := reinserted[truncInsertedID]
+		if !reinsertedState.SourcePresent || !reinsertedState.Captured || reinsertedState.Version == nil ||
+			reinsertedState.Version.Deleted || reinsertedState.Version.FenceCoverage != "materialized" ||
+			reinsertedState.Fences != "insert:materialized,insert:reset_baseline" {
+			t.Fatalf("later insert of a truncated key did not capture: %#v", reinsertedState)
+		}
+		if tombstoneErr == nil || !strings.Contains(tombstoneErr.Error(), "SQLSTATE 23514") ||
+			reinserted[truncSoftDeletedID].SourcePresent || reinserted[truncSoftDeletedID].Version == nil ||
+			*reinserted[truncSoftDeletedID].Version != *afterTruncated[truncSoftDeletedID].Version {
+			t.Fatalf("soft-delete tombstone did not remain authoritative: err=%v state=%#v", tombstoneErr, reinserted[truncSoftDeletedID])
 		}
 	})
 }

@@ -123,6 +123,15 @@ func TestValidateXCResult(t *testing.T) {
 			input: `{"devicesAndConfigurations":[{"expectedFailures":0,"failedTests":0,"passedTests":2,"skippedTests":0}],"expectedFailures":0,"failedTests":0,"passedTests":2,"result":"Passed","skippedTests":0,"totalTestCount":2}`,
 		},
 		{
+			name:  "passing result with empty runtime warnings",
+			input: `{"devicesAndConfigurations":[{"expectedFailures":0,"failedTests":0,"passedTests":2,"skippedTests":0}],"expectedFailures":0,"failedTests":0,"passedTests":2,"result":"Passed","runtimeWarnings":[],"skippedTests":0,"totalTestCount":2}`,
+		},
+		{
+			name:      "runtime warning",
+			input:     `{"devicesAndConfigurations":[{"expectedFailures":0,"failedTests":0,"passedTests":2,"skippedTests":0}],"expectedFailures":0,"failedTests":0,"passedTests":2,"result":"Passed","runtimeWarnings":[{"message":"warning"}],"skippedTests":0,"totalTestCount":2}`,
+			wantError: true,
+		},
+		{
 			name:      "zero tests",
 			input:     `{"devicesAndConfigurations":[{"expectedFailures":0,"failedTests":0,"passedTests":0,"skippedTests":0}],"expectedFailures":0,"failedTests":0,"passedTests":0,"result":"Passed","skippedTests":0,"totalTestCount":0}`,
 			wantError: true,

@@ -44,6 +44,15 @@ Use one of these modes when the adapter validates bearer tokens:
 the handler lifetime. Cancel it during server shutdown. `JWTUserClaim` selects
 the canonical user claim and defaults to `sub`.
 
+The adapter checks the token signature and algorithm. It rejects a token with
+a past `exp` or a future `nbf`. It does not require `exp`, and it does not check
+`aud` or `iss`. The user claim must be a nonempty string. Every rejected token
+returns `401 auth_required`.
+
+A key set refreshes every hour. When a token names an unknown `kid`, the
+adapter also fetches the key set again, at most once in five minutes. Publish a
+new key before the identity provider signs tokens with it.
+
 ```go
 jwksContext, cancelJWKS := context.WithCancel(context.Background())
 defer cancelJWKS()
@@ -82,14 +91,31 @@ diagnostics to a public route.
 
 ## Scope assignment
 
-The server assigns scopes. The default private scope is
-`user:{canonical_user_id}`. Registered shared scopes apply to every active
-client. An operator can grant or revoke an existing scope for one user with
-`synchro_grant_user_scope` and `synchro_revoke_user_scope`.
+The server assigns scopes. Identity stays outside sync semantics. The adapter
+resolves the canonical user ID and passes that ID with the request body to
+the extension. The extension does not receive the token or its claims.
 
-The next connect reconciles a grant or revoke. An added scope has a null cursor
-and rebuilds. A removed scope causes local provenance cleanup. A client cannot
-invent, grant, or retain an unassigned scope.
+The server assigns scopes from four sources:
+
+- The default private scope is `user:{canonical_user_id}`.
+- Registered shared scopes apply to every active client.
+- An operator can grant or revoke an existing scope for one user with
+  `synchro_grant_user_scope` and `synchro_revoke_user_scope`.
+- A registered assignment function returns scopes from application data.
+
+The assignment function receives only the canonical user ID as its one `text`
+argument. It does not receive a token, a claim, a header, or a request member.
+Put product authorization in application tables that the function reads. See
+[scope modeling](/synchro/architecture/scope-modeling/) for the function rules.
+
+The next successful connect or pull reconciles each assignment change. An added
+scope has a null cursor and rebuilds. A removed scope causes local provenance
+cleanup. A client cannot invent, grant, or retain an unassigned scope.
+
+Pull reconciles the scope set after request validation. A changed set advances
+`scope_set_version` by exactly one and appears in `scope_updates` of the same
+response. A pull that fails validation writes no assignment state. Rebuild does
+not reconcile assignment, and a rebuild of a revoked scope is rejected.
 
 ## Read next
 

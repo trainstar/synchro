@@ -44,6 +44,7 @@ enum class MutationRejectionCode {
     @SerialName("policy_rejected") POLICY_REJECTED,
     @SerialName("validation_failed") VALIDATION_FAILED,
     @SerialName("table_not_synced") TABLE_NOT_SYNCED,
+    @SerialName("atomic_batch_rejected") ATOMIC_BATCH_REJECTED,
 }
 
 @Serializable
@@ -462,13 +463,16 @@ data class PushRequest(
     @SerialName("batch_id") val batchID: String,
     val schema: SchemaRef,
     val mutations: List<Mutation>,
+    val atomic: Boolean? = null,
 ) {
     /**
      * Validates the immutable envelope and mutation shapes.
      * A retained authored table can be absent from the current schema.
      */
     fun validate(syncedTables: List<LocalSchemaTable>? = null) {
-        if (clientID.isEmpty() || clientGeneration <= 0L || !isCanonicalUUID(batchID) || mutations.isEmpty()) {
+        if (clientID.isEmpty() || clientGeneration <= 0L || !isCanonicalUUID(batchID) || mutations.isEmpty() ||
+            atomic == false
+        ) {
             throw ContractException("invalid push envelope")
         }
         schema.validate()
@@ -502,7 +506,8 @@ data class PushRequest(
                 }
             }
             when (mutation.op) {
-                Operation.INSERT -> if (mutation.baseVersion != null || columns.isEmpty()) {
+                // An insert can author no fields. An update must author at least one field.
+                Operation.INSERT -> if (mutation.baseVersion != null || mutation.columns == null) {
                     throw ContractException("insert shape is invalid")
                 }
                 Operation.UPDATE -> if (mutation.baseVersion.isNullOrEmpty() || columns.isEmpty()) {
@@ -604,6 +609,18 @@ data class PushResponse(
             if (accepted.map { it.mutationID } != expectedAccepted || rejected.map { it.mutationID } != expectedRejected) {
                 throw ContractException("push response does not preserve request-relative outcome order")
             }
+            validateAtomicPartition(request)
+        }
+    }
+
+    private fun validateAtomicPartition(request: PushRequest) {
+        val groupRejections = rejected.count { it.code == MutationRejectionCode.ATOMIC_BATCH_REJECTED }
+        if (request.atomic != true) {
+            if (groupRejections > 0) throw ContractException("non-atomic push response contains an atomic batch rejection")
+            return
+        }
+        if (rejected.isNotEmpty() && (accepted.isNotEmpty() || rejected.size - groupRejections != 1)) {
+            throw ContractException("atomic push response is not all applied or one failure")
         }
     }
 
@@ -616,6 +633,7 @@ data class PushResponse(
         }
         outcome.outcomeSchema.validate()
         outcome.rowChecksum?.validate()
+        // An accepted outcome without a row states that the row is absent after its push unit.
         if ((outcome.serverRow == null) != (outcome.rowChecksum == null)) {
             throw ContractException("accepted row and checksum must be paired")
         }
@@ -625,16 +643,8 @@ data class PushResponse(
         if (outcome.table != request.table || outcome.pk != request.pk) {
             throw ContractException("accepted outcome does not match request")
         }
-        val hasRow = outcome.serverRow != null
-        val hasChecksum = outcome.rowChecksum != null
-        when (request.op) {
-            Operation.INSERT, Operation.UPDATE -> if (!hasRow || !hasChecksum) {
-                throw ContractException("accepted insert or update lacks its row or checksum")
-            }
-            Operation.DELETE -> if (hasRow != hasChecksum) {
-                throw ContractException("accepted delete row and checksum must be paired")
-            }
-            Operation.UPSERT -> throw ContractException("accepted outcome targets an unsupported push operation")
+        if (request.op == Operation.UPSERT) {
+            throw ContractException("accepted outcome targets an unsupported push operation")
         }
     }
 
@@ -657,6 +667,7 @@ data class PushResponse(
             MutationRejectionCode.POLICY_REJECTED,
             MutationRejectionCode.VALIDATION_FAILED,
             MutationRejectionCode.TABLE_NOT_SYNCED,
+            MutationRejectionCode.ATOMIC_BATCH_REJECTED,
         )
         when (outcome.status) {
             MutationStatus.CONFLICT -> {

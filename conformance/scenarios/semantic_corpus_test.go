@@ -34,6 +34,7 @@ func TestSemanticCorpusBindingsMatchApprovedCells(t *testing.T) {
 		"SCN-REBUILD-FORGED-CURSOR-001",
 		"SCN-RETENTION-RECONNECT-001",
 		"SCN-SCHEMA-QUEUED-MUTATION-001",
+		"SCN-SCOPE-EMPTY-PULL-001",
 	}
 	wantTargets := map[contract.SupportCellID]string{
 		"SUP-MACOS-CURRENT-001":      "test-swift",

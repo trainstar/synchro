@@ -78,6 +78,7 @@ export default defineConfig({
 					label: 'Reference',
 					items: [
 						{ label: 'Support Policy', slug: 'reference/support-policy' },
+						{ label: 'Changelog', link: 'https://github.com/trainstar/synchro/blob/master/CHANGELOG.md' },
 					],
 				},
 				{

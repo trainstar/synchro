@@ -31,6 +31,7 @@ data class PendingChange(
     val sealedBatchID: String?,
     val sealedOrdinal: Int?,
     val localRevision: Long = localOrder,
+    val atomicGroupID: String? = null,
 )
 
 internal data class LedgerValue(
@@ -64,7 +65,7 @@ internal data class LedgerValue(
 internal class ChangeTracker(private val database: SynchroDatabase) {
 
     internal fun inspectPendingMutations(): List<PendingMutationInspection> =
-        inspectMutations(includeTerminal = false)
+        database.readTransaction { db -> inspectMutations(db, includeTerminal = false) }.map(::currentMutation)
 
     /**
      * Returns every mutation the client retains, including one the server
@@ -73,7 +74,14 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
      * this instead.
      */
     internal fun inspectRetainedMutations(): List<PendingMutationInspection> =
-        inspectMutations(includeTerminal = true)
+        inspectRetainedMutationRecords().map(::currentMutation)
+
+    internal fun inspectRetainedMutationRecords(): List<RetainedMutationInspection> =
+        database.readTransaction { db -> inspectMutations(db, includeTerminal = true) }
+
+    private fun currentMutation(record: RetainedMutationInspection): PendingMutationInspection =
+        (record as? RetainedMutationInspection.Current)?.mutation
+            ?: throw SynchroError.InvalidResponse("stored mutation cannot be inspected")
 
     internal fun retainedMutationCount(): Int = database.readTransaction { db ->
         db.rawQuery(
@@ -93,22 +101,22 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
         }
     }
 
-    private fun inspectMutations(includeTerminal: Boolean): List<PendingMutationInspection> =
-        database.readTransaction { db ->
-            val terminalStates = if (includeTerminal) ", 'rejected_terminal', 'exceeds_push_limit'" else ""
-            queryChanges(
-                db,
-                """
-                SELECT $CHANGE_COLUMNS
-                FROM _synchro_pending_changes
-                WHERE lifecycle_state IN (
-                    'captured', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
-                    'superseded_before_send', 'cancelled_before_send'$terminalStates
-                )
-                ORDER BY local_order
-                """.trimIndent(),
-                emptyArray(),
-            ).map { change ->
+    internal fun inspectMutations(db: SQLiteDatabase, includeTerminal: Boolean): List<RetainedMutationInspection> {
+        val terminalStates = if (includeTerminal) ", 'rejected_terminal', 'exceeds_push_limit'" else ""
+        return queryChanges(
+            db,
+            """
+            SELECT $CHANGE_COLUMNS
+            FROM _synchro_pending_changes
+            WHERE lifecycle_state IN (
+                'captured', 'sealed', 'legacy_blocked', 'blocked_by_predecessor',
+                'superseded_before_send', 'cancelled_before_send'$terminalStates
+            )
+            ORDER BY local_order
+            """.trimIndent(),
+            emptyArray(),
+        ).map { change ->
+            RetainedMutationInspection.Current(
                 PendingMutationInspection(
                     mutationID = change.mutationID,
                     localOrder = change.localOrder,
@@ -130,9 +138,10 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
                     authoredFields = valuesForMutation(db, change.mutationID).map { value ->
                         AuthoredMutationField(value.fieldID, value.logicalType, value.asAnyCodable())
                     },
-                )
-            }
+                ),
+            )
         }
+    }
 
     /** Returns only unsealed records that can become a new batch. */
     fun pendingChanges(limit: Int = 100): List<PendingChange> =
@@ -283,12 +292,13 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
     }
 
     /** A completed or blocked record remains inspectable but is not pending work. */
-    fun pendingChangeCount(): Int = database.readTransaction { db ->
+    fun pendingChangeCount(): Int = database.readTransaction(::pendingChangeCount)
+
+    internal fun pendingChangeCount(db: SQLiteDatabase): Int =
         db.rawQuery(
             "SELECT COUNT(*) FROM _synchro_pending_changes WHERE lifecycle_state IN ('captured', 'sealed')",
             null,
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
-    }
 
     private fun queryChanges(db: SQLiteDatabase, sql: String, args: Array<String>): List<PendingChange> {
         val changes = mutableListOf<PendingChange>()
@@ -313,6 +323,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
                     normalizedMutationID = if (cursor.isNull(15)) null else cursor.getString(15),
                     sealedBatchID = if (cursor.isNull(16)) null else cursor.getString(16),
                     sealedOrdinal = if (cursor.isNull(17)) null else cursor.getInt(17),
+                    atomicGroupID = if (cursor.isNull(18)) null else cursor.getString(18),
                 )
             }
         }
@@ -342,7 +353,7 @@ internal class ChangeTracker(private val database: SynchroDatabase) {
             mutation_id, local_order, table_id, record_id, table_name, pk_field_id, pk_logical_type,
             operation, authored_schema_version, authored_schema_hash, base_version, client_version,
             lifecycle_state, source_kind, depends_on_mutation_id, normalized_mutation_id,
-            sealed_batch_id, sealed_ordinal
+            sealed_batch_id, sealed_ordinal, atomic_group_id
         """
     }
 }

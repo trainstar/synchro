@@ -1,17 +1,32 @@
     use synchro_core::checksum::{row_digest, CanonicalRow, ChecksumObject, SchemaHash};
 
-    // Each binary64 value and its RFC 8785 text. serde_json writes a different text for the first six.
-    const FLOAT_WIRE_CASES: [(f64, &str); 9] = [
-        (5.0, "5"),
-        (-0.0, "0"),
-        (0.000001, "0.000001"),
-        (0.0000015, "0.0000015"),
-        (18_446_744_073_709_552_000.0, "18446744073709552000"),
-        (1e20, "100000000000000000000"),
-        (1e-7, "1e-7"),
-        (1.5, "1.5"),
-        (1e21, "1e+21"),
-    ];
+    /// Each shared source binary64 value and its RFC 8785 text.
+    /// serde_json writes a different text for the first six.
+    fn float_wire_cases() -> Vec<(f64, String)> {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../conformance/protocol/float-wire-boundaries-v1.json"
+        ))
+        .expect("parse shared float wire cases");
+        assert_eq!(document["version"], 1);
+        document["cases"]
+            .as_array()
+            .expect("shared float wire cases")
+            .iter()
+            .map(|case| {
+                (
+                    case["source"]
+                        .as_str()
+                        .expect("float wire source")
+                        .parse()
+                        .expect("finite float wire source"),
+                    case["canonical"]
+                        .as_str()
+                        .expect("float wire text")
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
 
     /// Computes the expected checksum from row text that contains the literal RFC 8785 float text.
     fn float_oracle_checksum(
@@ -64,10 +79,11 @@
         let user_id = "float-user";
         let client_id = "float-client";
         register_client(user_id, client_id);
-        let record_ids: Vec<String> = (0..FLOAT_WIRE_CASES.len())
+        let cases = float_wire_cases();
+        let record_ids: Vec<String> = (0..cases.len())
             .map(|index| test_uuid(&format!("float-push-row:{index}")))
             .collect();
-        let mutations = FLOAT_WIRE_CASES
+        let mutations = cases
             .iter()
             .zip(&record_ids)
             .enumerate()
@@ -89,10 +105,8 @@
         let accepted = response.json["accepted"]
             .as_array()
             .expect("accepted outcomes");
-        assert_eq!(accepted.len(), FLOAT_WIRE_CASES.len());
-        for ((outcome, (value, text)), record_id) in
-            accepted.iter().zip(FLOAT_WIRE_CASES).zip(&record_ids)
-        {
+        assert_eq!(accepted.len(), cases.len());
+        for ((outcome, (value, text)), record_id) in accepted.iter().zip(&cases).zip(&record_ids) {
             assert_eq!(outcome["status"], "applied");
             assert_eq!(
                 outcome["row_checksum"],
@@ -105,7 +119,7 @@
                     outcome["outcome_schema"]["hash"].as_str().unwrap(),
                 )
             );
-            assert_eq!(stored_double(record_id), value);
+            assert_eq!(stored_double(record_id), *value);
         }
     }
 
@@ -141,7 +155,7 @@
     fn test_hydrated_row_checksum_uses_rfc8785_float_text() {
         setup_portable_type_contract_table();
         let (_, schema_hash) = latest_schema_ref();
-        for (index, (value, text)) in FLOAT_WIRE_CASES.iter().enumerate() {
+        for (index, (value, text)) in float_wire_cases().iter().enumerate() {
             let record_id = test_uuid(&format!("float-hydrate-row:{index}"));
             Spi::run_with_args(
                 "INSERT INTO test_portable_type_contract (id, user_id, col_double)
@@ -226,7 +240,8 @@
         let mut events = Vec::new();
         let mut messages = Vec::new();
         let mut record_ids = Vec::new();
-        for (offset, (value, _)) in FLOAT_WIRE_CASES.iter().enumerate() {
+        let cases = float_wire_cases();
+        for (offset, (value, _)) in cases.iter().enumerate() {
             let record_id = test_uuid(&format!("float-wal-row:{offset}"));
             let fence_id = test_uuid(&format!("float-wal-fence:{offset}"));
             let row_version = test_uuid(&format!("float-wal-version:{offset}"));
@@ -294,6 +309,7 @@
                 }))
                 .unwrap(),
                 message_lsn: commit_lsn,
+                event_boundary: u64::try_from(offset).unwrap() + 1,
             });
             record_ids.push(record_id);
         }
@@ -308,12 +324,18 @@
             messages,
         };
 
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = '0/1', processed_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("bind float WAL progress");
         Spi::connect_mut(|client| {
             crate::bgworker::materialize_transaction_for_test(client, &transaction)
         })
         .expect("materialize float WAL transaction");
 
-        for ((_, text), record_id) in FLOAT_WIRE_CASES.iter().zip(&record_ids) {
+        for ((_, text), record_id) in cases.iter().zip(&record_ids) {
             let captured: pgrx::JsonB = Spi::get_one_with_args(
                 "SELECT jsonb_build_object(
                      'row_data', row_data,

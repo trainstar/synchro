@@ -17,6 +17,7 @@ use synchro_core::fingerprint::{batch_fingerprint, mutation_fingerprint, normali
 use crate::client::{acquire_client_identity_lock, PROTOCOL_VERSION};
 use crate::pull::{pg_quote_ident, synced_row_projection_sql};
 use crate::registry::{qualified_relation_name, FieldRegistration, PushPolicy, TableRegistration};
+use crate::spi_helpers::is_lower_uuid;
 
 const FINGERPRINT_ALGORITHM: &str = "sha256";
 const FINGERPRINT_VERSION: i64 = 1;
@@ -58,8 +59,8 @@ struct EvaluationContext<'a> {
     current_tables: &'a TableIndex<'a>,
     registry: &'a HashMap<String, TableRegistration>,
     ever_synced_tables: &'a HashSet<String>,
-    required_insert_columns: &'a HashMap<u32, HashSet<String>>,
     has_write_protect: bool,
+    mutation_is_push_unit: bool,
 }
 
 type TableIndex<'a> = HashMap<String, &'a TableSchema>;
@@ -91,6 +92,15 @@ struct RowState {
     data: Option<serde_json::Value>,
     row_version: Option<String>,
     deleted: bool,
+}
+
+impl RowState {
+    /// The capture fence trigger updates `sync_row_versions` in the transaction of each
+    /// source write. Thus, a live version without a visible source row identifies a
+    /// present row that the row security of the source relation hides from the caller.
+    fn hidden_by_row_security(&self) -> bool {
+        self.data.is_none() && !self.deleted
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +136,35 @@ enum DmlOutcome {
     Applied,
     NotApplied,
     ValidationFailed,
+    PolicyRejected,
+}
+
+fn require_no_pending_deferred_trigger_events(client: &SpiClient<'_>) {
+    let relations = client
+        .select(
+            "SELECT DISTINCT tgrelid::bigint AS relation_oid
+             FROM pg_catalog.pg_trigger
+             WHERE tgdeferrable",
+            None,
+            &[],
+        )
+        .unwrap_or_else(|_| pgrx::error!("checking pending deferred trigger events failed"));
+    for relation in relations {
+        let relation_oid = relation
+            .get_by_name::<i64, &str>("relation_oid")
+            .unwrap_or_else(|_| pgrx::error!("reading deferred trigger relation failed"))
+            .and_then(|oid| u32::try_from(oid).ok())
+            .map(pg_sys::Oid::from)
+            .unwrap_or_else(|| pgrx::error!("deferred trigger relation is invalid"));
+        // A deferred check uses current user authority, which is synchro_owner here.
+        if unsafe { pg_sys::AfterTriggerPendingOnRel(relation_oid) } {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_INVALID_TRANSACTION_STATE,
+                "synchro_push requires a transaction without pending deferred trigger events"
+            );
+        }
+    }
 }
 
 /// Push canonical Protocol 3 mutations through one transactional extension path.
@@ -141,12 +180,13 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
         );
     }
 
+    // Parser errors can quote submitted values, so the response keeps only the class.
     let request: PushRequest = match serde_json::from_value(p_request.0.clone()) {
         Ok(request) => request,
-        Err(error) => {
+        Err(_) => {
             return push_protocol_error(
                 ProtocolErrorCode::InvalidRequest,
-                format!("invalid push request: {error}"),
+                "invalid push request",
                 false,
             )
         }
@@ -294,6 +334,29 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
                 );
             }
         }
+        // Exact batch replay returned above, so every stored mutation belongs to another batch.
+        if request.atomic == Some(true) && !stored_mutations.is_empty() {
+            return push_protocol_error(
+                ProtocolErrorCode::InvalidRequest,
+                "atomic push request reuses a mutation from another batch",
+                false,
+            );
+        }
+        if request.atomic != Some(true)
+            && stored_mutations.values().any(|stored| {
+                stored
+                    .outcome
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("atomic_batch_rejected")
+            })
+        {
+            return push_protocol_error(
+                ProtocolErrorCode::InvalidRequest,
+                "non-atomic push request reuses an atomic batch rejection",
+                false,
+            );
+        }
 
         let generation = match check_client_generation(
             client,
@@ -381,8 +444,6 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             .map(|mutation| mutation.table.clone())
             .collect::<HashSet<_>>();
         let ever_synced_tables = load_ever_synced_tables(client, &historically_synced_table_ids);
-        let required_insert_columns =
-            load_required_insert_columns(client, &request.mutations, &registry);
         let has_write_protect = check_write_protect_exists(client);
         let evaluation_context = EvaluationContext {
             submitted_schema: &request.schema,
@@ -390,29 +451,36 @@ fn synchro_push_contract(p_user_id: &str, p_request: pgrx::JsonB) -> String {
             current_tables,
             registry: &registry,
             ever_synced_tables: &ever_synced_tables,
-            required_insert_columns: &required_insert_columns,
             has_write_protect,
+            mutation_is_push_unit: request.atomic != Some(true),
         };
 
+        require_no_pending_deferred_trigger_events(client);
         // This claim and every later source write remain in the same SPI transaction.
         claim_batch_ledger(client, p_user_id, &request, &fingerprints)
             .unwrap_or_else(|_| pgrx::error!("claiming push batch ledger failed"));
 
         let server_time = canonical_server_time();
-        let mut evaluated = Vec::with_capacity(request.mutations.len());
-        let mut accepted_write = false;
-        for mutation in &request.mutations {
-            if let Some(stored) = stored_mutations.get(&mutation.mutation_id) {
-                evaluated.push(replayed_mutation(mutation, stored));
-                continue;
-            }
+        let evaluated = if request.atomic == Some(true) {
+            evaluate_atomic_group(client, p_user_id, &request, &evaluation_context)
+        } else {
+            let mut evaluated = Vec::with_capacity(request.mutations.len());
+            for mutation in &request.mutations {
+                if let Some(stored) = stored_mutations.get(&mutation.mutation_id) {
+                    evaluated.push(replayed_mutation(mutation, stored));
+                    continue;
+                }
 
-            let evaluation = evaluate_mutation(client, p_user_id, mutation, &evaluation_context);
-            if evaluation.new_write {
-                accepted_write = true;
+                evaluated.push(evaluate_mutation(
+                    client,
+                    p_user_id,
+                    mutation,
+                    &evaluation_context,
+                ));
             }
-            evaluated.push(evaluation);
-        }
+            evaluated
+        };
+        let accepted_write = evaluated.iter().any(|evaluation| evaluation.new_write);
 
         if accepted_write {
             increment_accepted_write_epoch(client, p_user_id, &request.client_id);
@@ -1033,6 +1101,12 @@ pub(crate) fn load_authored_manifests(
 }
 
 fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) -> HashSet<String> {
+    // A value that is not a canonical UUID cannot match a logical ID.
+    let table_ids = table_ids
+        .iter()
+        .filter(|table_id| is_lower_uuid(table_id))
+        .cloned()
+        .collect::<Vec<_>>();
     if table_ids.is_empty() {
         return HashSet::new();
     }
@@ -1043,7 +1117,7 @@ fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) 
             WHERE kind = 'table'
                AND logical_id = ANY($1::uuid[])",
             None,
-            &[table_ids.iter().cloned().collect::<Vec<_>>().into()],
+            &[table_ids.into()],
         )
         .unwrap_or_else(|_| pgrx::error!("loading push table identities failed"));
     rows.into_iter()
@@ -1053,70 +1127,6 @@ fn load_ever_synced_tables(client: &SpiClient<'_>, table_ids: &HashSet<String>) 
                 .unwrap_or_else(|| pgrx::error!("push table identity is missing"))
         })
         .collect()
-}
-
-fn load_required_insert_columns(
-    client: &SpiClient<'_>,
-    mutations: &[Mutation],
-    registry: &HashMap<String, TableRegistration>,
-) -> HashMap<u32, HashSet<String>> {
-    let relation_ids = mutations
-        .iter()
-        .filter(|mutation| mutation.op == Operation::Insert)
-        .filter_map(|mutation| registry.get(&mutation.table))
-        .map(|registration| registration.physical_relation_oid)
-        .collect::<HashSet<_>>();
-    if relation_ids.is_empty() {
-        return HashMap::new();
-    }
-    let relation_ids = relation_ids.into_iter().collect::<Vec<_>>();
-    let relations = relation_ids
-        .iter()
-        .map(|relation_id| serde_json::json!({ "physical_relation_oid": relation_id }))
-        .collect::<Vec<_>>();
-    let rows = client
-        .select(
-            "WITH relations AS (
-                 SELECT physical_relation_oid::oid AS physical_relation_oid
-                 FROM jsonb_to_recordset($1::jsonb) AS relation(
-                     physical_relation_oid bigint
-                 )
-             )
-             SELECT attribute.attrelid::bigint AS physical_relation_oid,
-                    attribute.attname::text AS attname
-             FROM pg_catalog.pg_attribute attribute
-             JOIN relations ON relations.physical_relation_oid = attribute.attrelid
-             LEFT JOIN pg_catalog.pg_attrdef default_value
-               ON default_value.adrelid = attribute.attrelid
-              AND default_value.adnum = attribute.attnum
-             WHERE attribute.attnum > 0
-               AND NOT attribute.attisdropped
-               AND attribute.attnotnull
-               AND default_value.adbin IS NULL",
-            None,
-            &[pgrx::JsonB(serde_json::Value::Array(relations)).into()],
-        )
-        .unwrap_or_else(|_| pgrx::error!("loading required insert columns failed"));
-    let mut required = relation_ids
-        .into_iter()
-        .map(|relation_id| (relation_id, HashSet::new()))
-        .collect::<HashMap<_, _>>();
-    for row in rows {
-        let relation_id = row
-            .get_by_name::<i64, &str>("physical_relation_oid")
-            .unwrap_or_else(|_| pgrx::error!("reading required insert relation failed"))
-            .map(|relation_id| relation_id as u32)
-            .unwrap_or_else(|| pgrx::error!("required insert relation is missing"));
-        let column = row
-            .get_by_name::<String, &str>("attname")
-            .unwrap_or_else(|_| pgrx::error!("reading required insert column failed"))
-            .unwrap_or_else(|| pgrx::error!("required insert column is missing"));
-        required
-            .get_mut(&relation_id)
-            .unwrap_or_else(|| pgrx::error!("required insert relation is unknown"))
-            .insert(column);
-    }
-    required
 }
 
 fn all_mutation_field_ids(mutation: &Mutation) -> Vec<String> {
@@ -1199,15 +1209,18 @@ fn fields_compatible(
     authored.type_name == current.type_name
         && (!authored.nullable || current.nullable)
         && (!authored.writable || current.writable)
-        && (authored.type_name != "decimal"
-            || (authored.precision.is_some()
-                && authored.scale.is_some()
-                && current.precision.is_some()
-                && current.scale.is_some()
-                && current.precision.unwrap() >= authored.precision.unwrap()
-                && current.scale.unwrap() >= authored.scale.unwrap()
-                && current.precision.unwrap() - current.scale.unwrap()
-                    >= authored.precision.unwrap() - authored.scale.unwrap()))
+        && (authored.type_name != "decimal" || authored.decimal_domain_within(current))
+}
+
+fn mutation_primary_key(mutation: &Mutation) -> (String, serde_json::Value) {
+    let Some((field_id, value)) = mutation
+        .pk
+        .as_object()
+        .and_then(|object| object.iter().next())
+    else {
+        return (String::new(), serde_json::Value::Null);
+    };
+    (field_id.clone(), value.clone())
 }
 
 fn evaluate_mutation(
@@ -1221,20 +1234,9 @@ fn evaluate_mutation(
     let current_tables = context.current_tables;
     let registry = context.registry;
     let ever_synced_tables = context.ever_synced_tables;
-    let required_insert_columns = context.required_insert_columns;
     let has_write_protect = context.has_write_protect;
-    let pk_field_id = mutation
-        .pk
-        .as_object()
-        .and_then(|object| object.keys().next())
-        .cloned()
-        .unwrap_or_default();
-    let pk_value = mutation
-        .pk
-        .as_object()
-        .and_then(|object| object.values().next())
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let mutation_is_push_unit = context.mutation_is_push_unit;
+    let (pk_field_id, pk_value) = mutation_primary_key(mutation);
     let outcome_schema = submitted_schema.clone();
     let authored_tables = authored_tables.get(&mutation.authored_schema);
     let authored_table = authored_tables.and_then(|tables| tables.get(&mutation.table).copied());
@@ -1311,13 +1313,10 @@ fn evaluate_mutation(
         pgrx::error!("active registry and schema manifest are inconsistent")
     }
     if table_reg.push_policy == PushPolicy::ReadOnly {
-        return terminal_evaluation(
+        return policy_evaluation(
             mutation,
             outcome_schema,
-            "policy_rejected",
-            "authenticated write policy rejected the mutation",
             registered_target(table_reg, &pk_field_id, &pk_value, None),
-            None,
         );
     }
 
@@ -1335,13 +1334,10 @@ fn evaluate_mutation(
             operation_name(mutation.op),
             &serde_json::Value::Object(authored_columns.clone()),
         ) else {
-            return terminal_evaluation(
+            return policy_evaluation(
                 mutation,
                 outcome_schema,
-                "policy_rejected",
-                "authenticated write policy rejected the mutation",
                 registered_target(table_reg, &pk_field_id, &pk_value, None),
-                None,
             );
         };
         value
@@ -1429,22 +1425,33 @@ fn evaluate_mutation(
     } else {
         serde_json::Value::Object(serde_json::Map::new())
     };
-    if mutation.op == Operation::Insert
-        && !has_required_insert_columns(required_insert_columns, table_reg, &dml_data)
-    {
-        return validation_evaluation(
-            mutation,
-            outcome_schema,
-            table_reg,
-            &pk_field_id,
-            &pk_value,
-            None,
-            "required push insert field is missing",
-        );
-    }
-
     let row_identity = logical_row_identity(table_reg, &pk_value);
-    let existing = load_existing_record(client, &record_id, table_reg);
+    let existing = load_existing_record(
+        client,
+        &record_id,
+        table_reg,
+        match mutation.op {
+            Operation::Insert => SourceStatement::NoRowWrite,
+            Operation::Delete if !table_reg.has_deleted_at => SourceStatement::Delete,
+            Operation::Update | Operation::Delete => {
+                let mut assigned = if mutation.op == Operation::Update {
+                    dml_data
+                        .as_object()
+                        .unwrap_or_else(|| pgrx::error!("push update payload is not an object"))
+                        .keys()
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![table_reg.deleted_at_col.clone()]
+                };
+                if table_reg.has_updated_at {
+                    assigned.push(table_reg.updated_at_col.clone());
+                }
+                SourceStatement::Update(assigned)
+            }
+            Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
+        },
+    );
 
     if existing.as_ref().is_some_and(|row| row.deleted) {
         return conflict_evaluation(
@@ -1459,6 +1466,16 @@ fn evaluate_mutation(
                 record_id: &record_id,
                 row_identity,
             },
+        );
+    }
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            mutation,
+            outcome_schema,
+            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
         );
     }
 
@@ -1485,6 +1502,7 @@ fn evaluate_mutation(
                 &record_id,
                 table_reg,
                 &dml_data,
+                mutation_is_push_unit,
             ) {
                 DmlOutcome::ValidationFailed => validation_evaluation(
                     mutation,
@@ -1495,11 +1513,28 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
+                DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::NotApplied => {
-                    let current = load_existing_record(client, &record_id, table_reg)
-                        .unwrap_or_else(|| {
-                            pgrx::error!("conflicting push insert has no row state")
-                        });
+                    // The insert found no conflicting row that the caller can see, so a BEFORE
+                    // trigger or row security denied the write.
+                    let current = load_existing_record(
+                        client,
+                        &record_id,
+                        table_reg,
+                        SourceStatement::NoRowWrite,
+                    )
+                    .filter(|current| !current.hidden_by_row_security());
+                    let Some(current) = current else {
+                        return policy_evaluation(
+                            mutation,
+                            outcome_schema,
+                            registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                        );
+                    };
                     let code = if current.deleted {
                         "row_deleted"
                     } else {
@@ -1526,7 +1561,6 @@ fn evaluate_mutation(
                     table_reg,
                     &record_id,
                     row_identity,
-                    false,
                 ),
             }
         }
@@ -1572,11 +1606,24 @@ fn evaluate_mutation(
                     &record_id,
                     table_reg,
                     &dml_data,
+                    mutation_is_push_unit,
                 )
             } else if table_reg.has_deleted_at {
-                push_soft_delete(client, &mutation.mutation_id, &record_id, table_reg)
+                push_soft_delete(
+                    client,
+                    &mutation.mutation_id,
+                    &record_id,
+                    table_reg,
+                    mutation_is_push_unit,
+                )
             } else {
-                push_hard_delete(client, &mutation.mutation_id, &record_id, table_reg)
+                push_hard_delete(
+                    client,
+                    &mutation.mutation_id,
+                    &record_id,
+                    table_reg,
+                    mutation_is_push_unit,
+                )
             };
             match dml_outcome {
                 DmlOutcome::ValidationFailed => validation_evaluation(
@@ -1588,9 +1635,13 @@ fn evaluate_mutation(
                     row_identity,
                     "mutation failed physical validation",
                 ),
-                DmlOutcome::NotApplied => {
-                    pgrx::error!("locked authoritative row disappeared during push")
-                }
+                // Push holds the lock on the source row, so a zero-row write to that row is a
+                // write policy denial.
+                DmlOutcome::NotApplied | DmlOutcome::PolicyRejected => policy_evaluation(
+                    mutation,
+                    outcome_schema,
+                    registered_target(table_reg, &pk_field_id, &pk_value, row_identity),
+                ),
                 DmlOutcome::Applied => accepted_evaluation(
                     client,
                     mutation,
@@ -1598,7 +1649,6 @@ fn evaluate_mutation(
                     table_reg,
                     &record_id,
                     row_identity,
-                    mutation.op == Operation::Delete && !table_reg.has_deleted_at,
                 ),
             }
         }
@@ -1633,7 +1683,7 @@ fn validate_policy_columns(
 ) -> Result<serde_json::Map<String, serde_json::Value>, ()> {
     let columns = value.as_object().ok_or(())?;
     match operation {
-        Operation::Insert | Operation::Update if columns.is_empty() => return Err(()),
+        Operation::Update if columns.is_empty() => return Err(()),
         Operation::Delete if !columns.is_empty() => return Err(()),
         Operation::Upsert => return Err(()),
         _ => {}
@@ -1721,6 +1771,21 @@ fn registered_target(
         primary_key_value: primary_key_value.clone(),
         row_identity,
     }
+}
+
+fn policy_evaluation(
+    mutation: &Mutation,
+    outcome_schema: SchemaRef,
+    target: EvaluationTarget,
+) -> EvaluatedMutation {
+    terminal_evaluation(
+        mutation,
+        outcome_schema,
+        "policy_rejected",
+        "authenticated write policy rejected the mutation",
+        target,
+        None,
+    )
 }
 
 fn terminal_evaluation(
@@ -1849,10 +1914,37 @@ fn accepted_evaluation(
     table_reg: &TableRegistration,
     record_id: &str,
     row_identity: Option<Vec<u8>>,
-    fence_only_delete: bool,
 ) -> EvaluatedMutation {
-    let fence_version = load_current_fence_version(client, mutation, table_reg, record_id)
+    let fence = load_current_fence_version(client, mutation, table_reg, record_id)
         .unwrap_or_else(|| pgrx::error!("accepted push source write has no version fence"));
+    accepted_outcome(
+        client,
+        mutation,
+        outcome_schema,
+        table_reg,
+        record_id,
+        row_identity,
+        fence,
+    )
+}
+
+/// The last write fence of a row in a push unit. It gives the row version and whether the row
+/// exists after the unit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UnitEndFence {
+    pub(crate) version: String,
+    pub(crate) row_present: bool,
+}
+
+fn accepted_outcome(
+    client: &SpiClient<'_>,
+    mutation: &Mutation,
+    outcome_schema: SchemaRef,
+    table_reg: &TableRegistration,
+    record_id: &str,
+    row_identity: Option<Vec<u8>>,
+    fence: UnitEndFence,
+) -> EvaluatedMutation {
     let mut object = base_outcome(
         mutation,
         &outcome_schema,
@@ -1865,8 +1957,8 @@ fn accepted_evaluation(
             .unwrap_or(&serde_json::Value::Null),
     );
     object["status"] = serde_json::Value::String("applied".into());
-    object["server_version"] = serde_json::Value::String(fence_version.clone());
-    if !fence_only_delete {
+    object["server_version"] = serde_json::Value::String(fence.version.clone());
+    if fence.row_present {
         let row = load_current_server_row_json(client, record_id, table_reg)
             .unwrap_or_else(|| pgrx::error!("accepted row is missing from the source relation"));
         object["server_row"] = row.clone();
@@ -1875,7 +1967,7 @@ fn accepted_evaluation(
             table_reg,
             &row,
             record_id,
-            &fence_version,
+            &fence.version,
             &outcome_schema,
         );
         object["row_checksum"] = serde_json::to_value(checksum).unwrap();
@@ -1927,6 +2019,268 @@ fn replayed_mutation(mutation: &Mutation, stored: &StoredMutation) -> EvaluatedM
             .unwrap_or(serde_json::Value::Null),
         row_identity: None,
     }
+}
+
+/// Evaluates an atomic group in request order and keeps its writes only when every mutation applies.
+fn evaluate_atomic_group(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    request: &PushRequest,
+    context: &EvaluationContext<'_>,
+) -> Vec<EvaluatedMutation> {
+    let evaluated = run_in_subtransaction(|| {
+        client
+            .update("SET CONSTRAINTS ALL DEFERRED", None, &[])
+            .unwrap_or_else(|_| pgrx::error!("deferring atomic group constraints failed"));
+        let mut evaluated = Vec::with_capacity(request.mutations.len());
+        for mutation in &request.mutations {
+            let evaluation = evaluate_mutation(client, user_id, mutation, context);
+            let applied = evaluation.accepted;
+            evaluated.push(evaluation);
+            if !applied {
+                return (evaluated, false);
+            }
+        }
+        // The last mutation owns the group-end check, so it also owns each write that a
+        // deferred trigger makes during that check.
+        let last_mutation = request
+            .mutations
+            .last()
+            .unwrap_or_else(|| pgrx::error!("atomic group has no last mutation"));
+        set_push_mutation_id(client, &last_mutation.mutation_id);
+        let constraints_valid = client
+            .select(
+                "SELECT synchro_check_push_constraints() AS valid",
+                None,
+                &[],
+            )
+            .unwrap_or_else(|_| pgrx::error!("checking atomic group constraints failed"))
+            .first()
+            .get_by_name::<bool, &str>("valid")
+            .unwrap_or_else(|_| pgrx::error!("reading atomic group constraint result failed"))
+            .unwrap_or_else(|| pgrx::error!("atomic group constraint result is missing"));
+        clear_push_mutation_id(client);
+        if !constraints_valid {
+            let failure = evaluated
+                .last()
+                .map(push_constraint_validation_evaluation)
+                .unwrap_or_else(|| pgrx::error!("atomic group has no last mutation"));
+            *evaluated
+                .last_mut()
+                .unwrap_or_else(|| pgrx::error!("atomic group has no last mutation")) = failure;
+            return (evaluated, false);
+        }
+        let evaluated = evaluated
+            .iter()
+            .map(|evaluation| group_end_evaluation(client, evaluation, context))
+            .collect();
+        (evaluated, true)
+    });
+    let Some(failure) = evaluated.last().filter(|evaluation| !evaluation.accepted) else {
+        return evaluated;
+    };
+    let failing_index = evaluated.len() - 1;
+    let failure = if failure.outcome["status"] == "conflict" {
+        reread_group_conflict(client, failure, context)
+    } else {
+        failure.clone()
+    };
+    request
+        .mutations
+        .iter()
+        .enumerate()
+        .map(|(index, mutation)| {
+            if index == failing_index {
+                failure.clone()
+            } else {
+                atomic_group_rejection(mutation, context)
+            }
+        })
+        .collect()
+}
+
+/// Rebuilds an accepted group outcome from the row state after the group-end check. The group is
+/// one push unit, so a later mutation or a deferred trigger can write the row after its mutation.
+fn group_end_evaluation(
+    client: &SpiClient<'_>,
+    evaluation: &EvaluatedMutation,
+    context: &EvaluationContext<'_>,
+) -> EvaluatedMutation {
+    let (table_reg, record_id) = group_evaluation_record(client, evaluation, context);
+    let fence = load_group_end_fence(client, table_reg, &record_id);
+    accepted_outcome(
+        client,
+        &evaluation.mutation,
+        evaluation.outcome_schema.clone(),
+        table_reg,
+        &record_id,
+        evaluation.row_identity.clone(),
+        fence,
+    )
+}
+
+fn group_evaluation_record<'a>(
+    client: &SpiClient<'_>,
+    evaluation: &EvaluatedMutation,
+    context: &EvaluationContext<'a>,
+) -> (&'a TableRegistration, String) {
+    let table_reg = context
+        .registry
+        .get(&evaluation.table_id)
+        .unwrap_or_else(|| pgrx::error!("atomic group table is not registered"));
+    let wire_record_id = wire_record_id(table_reg, &evaluation.primary_key_value)
+        .unwrap_or_else(|_| pgrx::error!("atomic group primary key is invalid"));
+    let record_id = canonicalize_record_id(client, &wire_record_id, table_reg)
+        .unwrap_or_else(|| pgrx::error!("atomic group primary key is not canonical"));
+    (table_reg, record_id)
+}
+
+/// Reads the last write fence of a row in the current transaction. An atomic request writes each
+/// row in one group, so every fence of the row in this transaction belongs to the group.
+fn load_group_end_fence(
+    client: &SpiClient<'_>,
+    table_reg: &TableRegistration,
+    record_id: &str,
+) -> UnitEndFence {
+    let rows = client
+        .select(
+            "SELECT new_record_id, row_version::text AS row_version, coverage
+             FROM sync_write_fences
+             WHERE transaction_xid = pg_current_xact_id()
+               AND relation_id = $1::uuid
+               AND (old_record_id = $2 OR new_record_id = $2)
+             ORDER BY dml_ordinal DESC
+             LIMIT 1",
+            None,
+            &[table_reg.relation_id.as_str().into(), record_id.into()],
+        )
+        .unwrap_or_else(|_| pgrx::error!("loading atomic group write fence failed"));
+    rows.into_iter()
+        .next()
+        .and_then(|fence| {
+            let new_record_id = fence.get_by_name::<String, &str>("new_record_id").ok()?;
+            let coverage = fence.get_by_name::<String, &str>("coverage").ok()??;
+            let version = fence.get_by_name::<String, &str>("row_version").ok()??;
+            (coverage == "pending").then(|| UnitEndFence {
+                version,
+                row_present: new_record_id.as_deref() == Some(record_id),
+            })
+        })
+        .unwrap_or_else(|| pgrx::error!("accepted atomic group row has no final version fence"))
+}
+
+fn push_constraint_validation_evaluation(evaluation: &EvaluatedMutation) -> EvaluatedMutation {
+    terminal_evaluation(
+        &evaluation.mutation,
+        evaluation.outcome_schema.clone(),
+        "validation_failed",
+        "mutation failed physical validation",
+        EvaluationTarget {
+            table_id: evaluation.table_id.clone(),
+            primary_key_field_id: evaluation.primary_key_field_id.clone(),
+            primary_key_type: evaluation.primary_key_type.clone(),
+            primary_key_value: evaluation.primary_key_value.clone(),
+            row_identity: evaluation.row_identity.clone(),
+        },
+        None,
+    )
+}
+
+/// Runs `body` in one internal subtransaction. `body` returns its value and whether to keep its writes.
+fn run_in_subtransaction<T>(body: impl FnOnce() -> (T, bool)) -> T {
+    // SAFETY: This is the PL/pgSQL exec_stmt_block sequence. It saves the memory context and
+    // resource owner, begins an internal subtransaction, runs the body in the outer memory context,
+    // then releases or rolls back the subtransaction and restores both. The catch is required
+    // because an error that escapes an open internal subtransaction leaves an autocommit session in
+    // a failed subtransaction, and a catching caller would then roll back the wrong subtransaction.
+    // The catch keeps the error data stack, because pgrx rethrows a PostgreSQL error from it.
+    unsafe {
+        let outer_context = pg_sys::CurrentMemoryContext;
+        let outer_owner = pg_sys::CurrentResourceOwner;
+        pg_sys::BeginInternalSubTransaction(std::ptr::null());
+        // pgrx runs SPI read-only while the current subtransaction has no transaction ID. A
+        // read-only statement cannot lock rows and does not see earlier writes of the calling function.
+        pg_sys::GetCurrentTransactionId();
+        pg_sys::MemoryContextSwitchTo(outer_context);
+        let (value, commit) = PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
+            .catch_others(|error| {
+                pg_sys::RollbackAndReleaseCurrentSubTransaction();
+                pg_sys::MemoryContextSwitchTo(outer_context);
+                pg_sys::CurrentResourceOwner = outer_owner;
+                error.rethrow()
+            })
+            .execute();
+        if commit {
+            pg_sys::ReleaseCurrentSubTransaction();
+        } else {
+            pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        }
+        pg_sys::MemoryContextSwitchTo(outer_context);
+        pg_sys::CurrentResourceOwner = outer_owner;
+        value
+    }
+}
+
+/// Rebuilds a failing group conflict from the committed row state after the rollback.
+fn reread_group_conflict(
+    client: &SpiClient<'_>,
+    failure: &EvaluatedMutation,
+    context: &EvaluationContext<'_>,
+) -> EvaluatedMutation {
+    let (table_reg, record_id) = group_evaluation_record(client, failure, context);
+    let existing = load_existing_record(client, &record_id, table_reg, SourceStatement::NoRowWrite);
+    if existing
+        .as_ref()
+        .is_some_and(RowState::hidden_by_row_security)
+    {
+        return policy_evaluation(
+            &failure.mutation,
+            failure.outcome_schema.clone(),
+            registered_target(
+                table_reg,
+                &failure.primary_key_field_id,
+                &failure.primary_key_value,
+                failure.row_identity.clone(),
+            ),
+        );
+    }
+    let outcome_text = |member: &str| {
+        failure.outcome[member]
+            .as_str()
+            .unwrap_or_else(|| pgrx::error!("atomic group conflict outcome is incomplete"))
+    };
+    conflict_evaluation(
+        &failure.mutation,
+        failure.outcome_schema.clone(),
+        outcome_text("code"),
+        outcome_text("message"),
+        client,
+        ConflictTarget {
+            existing: existing.as_ref(),
+            table: table_reg,
+            record_id: &record_id,
+            row_identity: failure.row_identity.clone(),
+        },
+    )
+}
+
+fn atomic_group_rejection(
+    mutation: &Mutation,
+    context: &EvaluationContext<'_>,
+) -> EvaluatedMutation {
+    let (pk_field_id, pk_value) = mutation_primary_key(mutation);
+    let target = match context.registry.get(&mutation.table) {
+        Some(table_reg) => registered_target(table_reg, &pk_field_id, &pk_value, None),
+        None => unresolved_target(mutation, &pk_field_id, &pk_value),
+    };
+    terminal_evaluation(
+        mutation,
+        context.submitted_schema.clone(),
+        "atomic_batch_rejected",
+        "atomic batch rejected",
+        target,
+        None,
+    )
 }
 
 fn build_push_response(
@@ -2100,43 +2454,101 @@ fn load_existing_record(
     client: &SpiClient<'_>,
     record_id: &str,
     table_reg: &TableRegistration,
+    statement: SourceStatement,
 ) -> Option<RowState> {
     let deleted_at_expr = if table_reg.has_deleted_at {
         format!("{}::text", pg_quote_ident(&table_reg.deleted_at_col))
     } else {
         "NULL::text".into()
     };
-    let sql = format!(
-        "SELECT {deleted_at} AS deleted_at, ({projection})::text AS data
-         FROM {table} t WHERE {pk} = $1::{pk_type} FOR UPDATE OF t",
-        deleted_at = deleted_at_expr,
-        projection = synced_row_projection_sql(table_reg, "t"),
+    let source_rows = format!(
+        "FROM {table} t WHERE {pk} = $1::{pk_type}",
         table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    let source = client
-        .select(&sql, None, &[record_id.into()])
-        .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
-        .next()
-        .map(|row| {
-            let deleted = row
-                .get_by_name::<String, &str>("deleted_at")
-                .unwrap_or(None)
-                .is_some();
-            let data = row
-                .get_by_name::<String, &str>("data")
-                .unwrap_or(None)
-                .map(|data| {
-                    let mut data: serde_json::Value = serde_json::from_str(&data)
-                        .unwrap_or_else(|_| pgrx::error!("authoritative source row is not JSON"));
-                    crate::pull::canonicalize_synced_row_data(table_reg, &mut data).unwrap_or_else(
-                        |_| pgrx::error!("authoritative source row is not canonical"),
-                    );
-                    data
-                });
-            (deleted, data)
-        });
+    let sql = format!(
+        "SELECT {deleted_at} AS deleted_at, ({projection})::text AS data
+         {source_rows}",
+        deleted_at = deleted_at_expr,
+        projection = synced_row_projection_sql(table_reg, "t"),
+    );
+    let registered = pg_sys::Oid::from(table_reg.physical_relation_oid);
+    if matches!(statement, SourceStatement::Update(_)) {
+        // SAFETY: LockRelationOid only takes a lock. The source DML takes the same lock later.
+        unsafe {
+            pg_sys::LockRelationOid(registered, pg_sys::RowExclusiveLock as pg_sys::LOCKMODE)
+        };
+    }
+    let row_lock = || match &statement {
+        SourceStatement::NoRowWrite => Some(SourceRowLock::NoKeyUpdate),
+        SourceStatement::Delete => Some(SourceRowLock::Update),
+        SourceStatement::Update(assigned) => {
+            // SAFETY: get_rel_relkind only reads the system cache.
+            let relkind = unsafe { pg_sys::get_rel_relkind(registered) } as u8;
+            let partition = if relkind == pg_sys::RELKIND_PARTITIONED_TABLE {
+                let partition = client
+                    .select(
+                        &format!("SELECT t.tableoid {source_rows}"),
+                        None,
+                        &[record_id.into()],
+                    )
+                    .unwrap_or_else(|_| {
+                        pgrx::error!("finding authoritative source partition failed")
+                    })
+                    .next()?
+                    .get_by_name::<pg_sys::Oid, &str>("tableoid")
+                    .unwrap_or_else(|_| {
+                        pgrx::error!("reading authoritative source partition failed")
+                    })
+                    .unwrap_or_else(|| pgrx::error!("authoritative source partition is missing"));
+                if !lock_partition_path(registered, partition) {
+                    return None;
+                }
+                partition
+            } else {
+                registered
+            };
+            // The first lock takes the mode that PostgreSQL takes for the same statement before
+            // its BEFORE row triggers. A weaker lock forces an upgrade in the statement. A
+            // stronger lock blocks the foreign key checks of child rows.
+            Some(update_row_lock(partition, assigned))
+        }
+    };
+    let load_source = |nowait: bool| {
+        let lock = row_lock()?;
+        let nowait = if nowait { " NOWAIT" } else { "" };
+        client
+            .select(
+                &format!("{sql} {}{nowait}", lock.clause()),
+                None,
+                &[record_id.into()],
+            )
+            .unwrap_or_else(|_| pgrx::error!("locking authoritative source row failed"))
+            .next()
+            .map(|row| {
+                let deleted = row
+                    .get_by_name::<String, &str>("deleted_at")
+                    .unwrap_or(None)
+                    .is_some();
+                let data = row
+                    .get_by_name::<String, &str>("data")
+                    .unwrap_or(None)
+                    .map(|data| {
+                        let mut data: serde_json::Value = serde_json::from_str(&data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not JSON")
+                            });
+                        crate::pull::canonicalize_synced_row_data(table_reg, &mut data)
+                            .unwrap_or_else(|_| {
+                                pgrx::error!("authoritative source row is not canonical")
+                            });
+                        data
+                    });
+                (deleted, data)
+            })
+    };
+    let mut source = load_source(false);
     let versions = client
         .select(
             "SELECT row_version::text AS row_version, deleted
@@ -2156,6 +2568,13 @@ fn load_existing_record(
                 .unwrap_or(false),
         )
     });
+    if source.is_none() && version.as_ref().is_some_and(|(_, deleted)| !deleted) {
+        // A writer can commit a new row between the two reads. Each writer changes the version
+        // row in its own transaction, so the locked version fixes the committed source state.
+        // A writer locks the source row before the version row. NOWAIT fails this push with a
+        // retryable lock error instead of a deadlock that can abort that writer.
+        source = load_source(true);
+    }
     match (source, version) {
         (None, None) => None,
         (source, version) => {
@@ -2168,6 +2587,151 @@ fn load_existing_record(
             })
         }
     }
+}
+
+/// Row lock mode for the authoritative source row of one push operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRowLock {
+    /// Serializes writers of the row and permits foreign key checks of child rows.
+    NoKeyUpdate,
+    /// Serializes writers and foreign key checks. A delete or a key update needs it.
+    Update,
+}
+
+impl SourceRowLock {
+    fn clause(self) -> &'static str {
+        match self {
+            Self::NoKeyUpdate => "FOR NO KEY UPDATE OF t",
+            Self::Update => "FOR UPDATE OF t",
+        }
+    }
+}
+
+/// Source statement that follows the lock of the authoritative source row.
+enum SourceStatement {
+    /// An insert or a reread. It does not write the locked row.
+    NoRowWrite,
+    /// A hard delete.
+    Delete,
+    /// An update or a soft delete that assigns these physical columns.
+    Update(Vec<String>),
+}
+
+/// Returns the row lock mode that `ExecUpdateLockMode` computes for an `UPDATE` of `relation`
+/// that assigns the `assigned` columns. The caller must hold a lock on `relation`.
+pub(crate) fn update_row_lock(relation: pg_sys::Oid, assigned: &[String]) -> SourceRowLock {
+    if assigned.is_empty() {
+        pgrx::error!("push update assigns no source column");
+    }
+    // A new statement accepts invalidation messages when it first locks the relation. The push
+    // can hold that lock from an earlier mutation. So the push accepts them here, and the
+    // statement of this mutation uses the same relation cache entry.
+    // SAFETY: AcceptInvalidationMessages only makes the caches of this backend current.
+    unsafe { pg_sys::AcceptInvalidationMessages() };
+    // SAFETY: The caller holds a lock on the relation.
+    let rel = unsafe { pg_sys::relation_open(relation, pg_sys::NoLock as pg_sys::LOCKMODE) };
+    let mut memory = pgrx::PgMemoryContexts::new("synchro source row lock");
+    // SAFETY: The relation stays open until the closure returns. The closure returns no value
+    // that the memory context owns.
+    let lock = unsafe {
+        memory.switch_to(|_| {
+            let mut assigned_columns: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+            for name in assigned {
+                let name = std::ffi::CString::new(name.as_str())
+                    .unwrap_or_else(|_| pgrx::error!("push update column name is invalid"));
+                let attnum = pg_sys::get_attnum(relation, name.as_ptr());
+                if attnum <= 0 {
+                    pgrx::error!("push update column is not a source column");
+                }
+                assigned_columns = pg_sys::bms_add_member(
+                    assigned_columns,
+                    i32::from(attnum) - pg_sys::FirstLowInvalidHeapAttributeNumber,
+                );
+            }
+            // This is the rule of ExecInitGenerated for an UPDATE.
+            let mut generated_columns: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+            let constraints = (*(*rel).rd_att).constr;
+            if !constraints.is_null()
+                && ((*constraints).has_generated_stored || (*constraints).has_generated_virtual)
+            {
+                let before_row_trigger =
+                    !(*rel).trigdesc.is_null() && (*(*rel).trigdesc).trig_update_before_row;
+                let descriptor = pgrx::PgTupleDesc::from_pg_unchecked((*rel).rd_att);
+                for (index, attribute) in descriptor.iter().enumerate() {
+                    if attribute.attgenerated == 0 {
+                        continue;
+                    }
+                    let attnum = i32::try_from(index + 1)
+                        .unwrap_or_else(|_| pgrx::error!("source column number is invalid"));
+                    if !before_row_trigger {
+                        let expression = pg_sys::build_column_default(rel, attnum);
+                        if expression.is_null() {
+                            pgrx::error!("generated source column has no expression");
+                        }
+                        let mut referenced: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+                        pg_sys::pull_varattnos(expression, 1, &mut referenced);
+                        if !pg_sys::bms_overlap(assigned_columns, referenced) {
+                            continue;
+                        }
+                    }
+                    generated_columns = pg_sys::bms_add_member(
+                        generated_columns,
+                        attnum - pg_sys::FirstLowInvalidHeapAttributeNumber,
+                    );
+                }
+            }
+            let key_columns = pg_sys::RelationGetIndexAttrBitmap(
+                rel,
+                pg_sys::IndexAttrBitmapKind::INDEX_ATTR_BITMAP_KEY,
+            );
+            if pg_sys::bms_overlap(key_columns, assigned_columns)
+                || pg_sys::bms_overlap(key_columns, generated_columns)
+            {
+                SourceRowLock::Update
+            } else {
+                SourceRowLock::NoKeyUpdate
+            }
+        })
+    };
+    drop(memory);
+    // SAFETY: relation_open opened this relation.
+    unsafe { pg_sys::relation_close(rel, pg_sys::NoLock as pg_sys::LOCKMODE) };
+    lock
+}
+
+/// Locks each relation below `registered` down to `partition` in `ROW EXCLUSIVE` mode, in that
+/// order, as an `UPDATE` of `registered` does. Returns `false` and takes no lock when
+/// `registered` is not an ancestor of `partition`.
+pub(crate) fn lock_partition_path(registered: pg_sys::Oid, partition: pg_sys::Oid) -> bool {
+    let ancestors = Spi::connect(|client| {
+        client
+            .select(
+                "SELECT ancestor.relid::pg_catalog.oid AS relid
+                 FROM pg_catalog.pg_partition_ancestors($1::pg_catalog.regclass)
+                      WITH ORDINALITY AS ancestor(relid, ordinal)
+                 ORDER BY ancestor.ordinal",
+                None,
+                &[partition.into()],
+            )
+            .unwrap_or_else(|_| pgrx::error!("reading source partition ancestors failed"))
+            .map(|row| {
+                row.get_by_name::<pg_sys::Oid, &str>("relid")
+                    .unwrap_or_else(|_| pgrx::error!("reading source partition ancestor failed"))
+                    .unwrap_or_else(|| pgrx::error!("source partition ancestor is missing"))
+            })
+            .collect::<Vec<_>>()
+    });
+    let Some(depth) = ancestors
+        .iter()
+        .position(|ancestor| *ancestor == registered)
+    else {
+        return false;
+    };
+    for relation in ancestors[..depth].iter().rev() {
+        // SAFETY: LockRelationOid only takes a lock.
+        unsafe { pg_sys::LockRelationOid(*relation, pg_sys::RowExclusiveLock as pg_sys::LOCKMODE) };
+    }
+    true
 }
 
 fn load_current_server_row_json(
@@ -2200,42 +2764,35 @@ fn load_current_server_row_json(
         })
 }
 
-fn load_current_fence_version(
+/// Reads the fences of one mutation for its row. The first fence must be the write of the mutation.
+/// Later fences come from triggers in the same push unit, and the last fence gives the final state.
+pub(crate) fn load_current_fence_version(
     client: &SpiClient<'_>,
     mutation: &Mutation,
     table_reg: &TableRegistration,
     record_id: &str,
-) -> Option<String> {
+) -> Option<UnitEndFence> {
     let rows = client
         .select(
             "SELECT operation, old_record_id, new_record_id,
                     row_version::text AS row_version, coverage
              FROM sync_write_fences
              WHERE transaction_xid = pg_current_xact_id()
-               AND mutation_id = $1 AND relation_id = $2::uuid",
+               AND mutation_id = $1
+               AND relation_id = $2::uuid
+               AND (old_record_id = $3 OR new_record_id = $3)
+             ORDER BY dml_ordinal",
             None,
             &[
                 mutation.mutation_id.as_str().into(),
                 table_reg.relation_id.as_str().into(),
+                record_id.into(),
             ],
         )
         .unwrap_or_else(|_| pgrx::error!("loading push write fence failed"));
-    if rows.len() != 1 {
+    if rows.is_empty() {
         return None;
     }
-    let row = rows.first();
-    let operation = row
-        .get_by_name::<String, &str>("operation")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence operation failed"))?;
-    let old_record_id = row
-        .get_by_name::<String, &str>("old_record_id")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence old identity failed"));
-    let new_record_id = row
-        .get_by_name::<String, &str>("new_record_id")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence new identity failed"));
-    let coverage = row
-        .get_by_name::<String, &str>("coverage")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence coverage failed"))?;
     let expected = match mutation.op {
         Operation::Insert => ("insert", None, Some(record_id)),
         Operation::Update => ("update", Some(record_id), Some(record_id)),
@@ -2245,15 +2802,36 @@ fn load_current_fence_version(
         Operation::Delete => ("delete", Some(record_id), None),
         Operation::Upsert => pgrx::error!("push upsert passed contract validation"),
     };
-    if operation != expected.0
-        || old_record_id.as_deref() != expected.1
-        || new_record_id.as_deref() != expected.2
-        || coverage != "pending"
-    {
-        return None;
+    let mut fence = None;
+    for (index, row) in rows.into_iter().enumerate() {
+        let operation = row
+            .get_by_name::<String, &str>("operation")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence operation failed"))?;
+        let old_record_id = row
+            .get_by_name::<String, &str>("old_record_id")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence old identity failed"));
+        let new_record_id = row
+            .get_by_name::<String, &str>("new_record_id")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence new identity failed"));
+        let coverage = row
+            .get_by_name::<String, &str>("coverage")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence coverage failed"))?;
+        let identities_match = index > 0
+            || (operation == expected.0
+                && old_record_id.as_deref() == expected.1
+                && new_record_id.as_deref() == expected.2);
+        if !identities_match || coverage != "pending" {
+            return None;
+        }
+        let version = row
+            .get_by_name::<String, &str>("row_version")
+            .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"))?;
+        fence = Some(UnitEndFence {
+            version,
+            row_present: new_record_id.as_deref() == Some(record_id),
+        });
     }
-    row.get_by_name::<String, &str>("row_version")
-        .unwrap_or_else(|_| pgrx::error!("reading push write fence failed"))
+    fence
 }
 
 fn build_dml_data(
@@ -2298,43 +2876,19 @@ fn sql_wire_value(field: &FieldRegistration, value: &serde_json::Value) -> serde
     }
 }
 
-fn has_required_insert_columns(
-    required_insert_columns: &HashMap<u32, HashSet<String>>,
-    table_reg: &TableRegistration,
-    data: &serde_json::Value,
-) -> bool {
-    let object = data
-        .as_object()
-        .unwrap_or_else(|| pgrx::error!("push insert payload is not an object"));
-    let required = required_insert_columns
-        .get(&table_reg.physical_relation_oid)
-        .unwrap_or_else(|| pgrx::error!("required insert metadata is missing"));
-    for name in required {
-        if name == &table_reg.pk_column {
-            continue;
-        }
-        if !object.contains_key(name) {
-            return false;
-        }
-    }
-    true
-}
-
 fn push_insert(
     client: &mut SpiClient<'_>,
     mutation_id: &str,
     record_id: &str,
     table_reg: &TableRegistration,
     data: &serde_json::Value,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let object = data
         .as_object()
         .unwrap_or_else(|| pgrx::error!("push insert payload is not an object"));
     let mut columns = object.keys().cloned().collect::<Vec<_>>();
     columns.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    if columns.is_empty() {
-        pgrx::error!("push insert has no writable fields")
-    }
     let col_list = std::iter::once(pg_quote_ident(&table_reg.pk_column))
         .chain(columns.iter().map(|column| pg_quote_ident(column)))
         .collect::<Vec<_>>()
@@ -2357,7 +2911,14 @@ fn push_insert(
         table = qualified_relation_name(&table_reg.physical_schema, &table_reg.physical_relation),
         pk = pg_quote_ident(&table_reg.pk_column),
     );
-    execute_push_dml(client, mutation_id, &sql, data, record_id)
+    execute_push_dml(
+        client,
+        mutation_id,
+        &sql,
+        data,
+        record_id,
+        mutation_is_push_unit,
+    )
 }
 
 fn push_update(
@@ -2366,6 +2927,7 @@ fn push_update(
     record_id: &str,
     table_reg: &TableRegistration,
     data: &serde_json::Value,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let object = data
         .as_object()
@@ -2395,7 +2957,14 @@ fn push_update(
         pk = pg_quote_ident(&table_reg.pk_column),
         pk_type = table_reg.pk_type,
     );
-    execute_push_dml(client, mutation_id, &sql, data, record_id)
+    execute_push_dml(
+        client,
+        mutation_id,
+        &sql,
+        data,
+        record_id,
+        mutation_is_push_unit,
+    )
 }
 
 fn push_soft_delete(
@@ -2403,6 +2972,7 @@ fn push_soft_delete(
     mutation_id: &str,
     record_id: &str,
     table_reg: &TableRegistration,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let updated_at = if table_reg.has_updated_at {
         format!(", {} = now()", pg_quote_ident(&table_reg.updated_at_col))
@@ -2424,6 +2994,7 @@ fn push_soft_delete(
         &sql,
         &serde_json::Value::Object(serde_json::Map::new()),
         record_id,
+        mutation_is_push_unit,
     )
 }
 
@@ -2432,6 +3003,7 @@ fn push_hard_delete(
     mutation_id: &str,
     record_id: &str,
     table_reg: &TableRegistration,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     let sql = format!(
         "DELETE FROM {} WHERE {} = $2::{} RETURNING true AS applied",
@@ -2445,6 +3017,7 @@ fn push_hard_delete(
         &sql,
         &serde_json::Value::Object(serde_json::Map::new()),
         record_id,
+        mutation_is_push_unit,
     )
 }
 
@@ -2454,17 +3027,19 @@ fn execute_push_dml(
     sql: &str,
     data: &serde_json::Value,
     record_id: &str,
+    mutation_is_push_unit: bool,
 ) -> DmlOutcome {
     set_push_mutation_id(client, mutation_id);
     let outcome = client
         .update(
-            "SELECT applied, validation_failed
-             FROM synchro_execute_push_dml($1, $2::jsonb, $3)",
+            "SELECT applied, validation_failed, policy_rejected
+             FROM synchro_execute_push_dml($1, $2::jsonb, $3, $4)",
             None,
             &[
                 sql.into(),
                 pgrx::JsonB(data.clone()).into(),
                 record_id.into(),
+                mutation_is_push_unit.into(),
             ],
         )
         .unwrap_or_else(|_| pgrx::error!("executing push source DML failed"))
@@ -2477,12 +3052,17 @@ fn execute_push_dml(
         .get_by_name::<bool, &str>("validation_failed")
         .unwrap_or_else(|_| pgrx::error!("reading push source DML validation result failed"))
         .unwrap_or_else(|| pgrx::error!("push source DML validation result is missing"));
+    let policy_rejected = outcome
+        .get_by_name::<bool, &str>("policy_rejected")
+        .unwrap_or_else(|_| pgrx::error!("reading push source DML policy result failed"))
+        .unwrap_or_else(|| pgrx::error!("push source DML policy result is missing"));
     clear_push_mutation_id(client);
-    match (applied, validation_failed) {
-        (true, false) => DmlOutcome::Applied,
-        (false, false) => DmlOutcome::NotApplied,
-        (false, true) => DmlOutcome::ValidationFailed,
-        (true, true) => pgrx::error!("push source DML returned an invalid disposition"),
+    match (applied, validation_failed, policy_rejected) {
+        (true, false, false) => DmlOutcome::Applied,
+        (false, false, false) => DmlOutcome::NotApplied,
+        (false, true, false) => DmlOutcome::ValidationFailed,
+        (false, false, true) => DmlOutcome::PolicyRejected,
+        _ => pgrx::error!("push source DML returned an invalid disposition"),
     }
 }
 

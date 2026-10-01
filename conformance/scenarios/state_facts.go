@@ -1,9 +1,13 @@
 package scenarios
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 )
 
 // NormalizeStateFacts returns the canonical form used for authored projection comparison.
@@ -465,4 +469,34 @@ func stateClientKey(value ClientDurabilityFact) string {
 
 func stateProvenanceKey(value ProvenanceFact) string {
 	return value.TableID + "\x00" + value.CanonicalWireJSON
+}
+
+// StateFactsDifferences names each top-level fact family that differs between
+// two state captures, with both encoded values. A freeze check reports it so
+// one failed run shows which fact changed.
+func StateFactsDifferences(before, after StateFacts) string {
+	encode := func(facts StateFacts) map[string]json.RawMessage {
+		encoded, _ := json.Marshal(facts)
+		families := make(map[string]json.RawMessage)
+		_ = json.Unmarshal(encoded, &families)
+		return families
+	}
+	left, right := encode(before), encode(after)
+	names := make([]string, 0, len(left)+len(right))
+	for name := range left {
+		names = append(names, name)
+	}
+	for name := range right {
+		if _, found := left[name]; !found {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	differences := make([]string, 0)
+	for _, name := range names {
+		if !bytes.Equal(left[name], right[name]) {
+			differences = append(differences, fmt.Sprintf("%s: before=%s after=%s", name, left[name], right[name]))
+		}
+	}
+	return strings.Join(differences, "; ")
 }

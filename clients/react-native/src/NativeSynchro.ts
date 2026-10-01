@@ -94,6 +94,7 @@ export interface Spec extends TurboModule {
 
   // Transactions
   beginWriteTransaction(): Promise<string>;
+  beginAtomicWriteTransaction(): Promise<string>;
   beginReadTransaction(): Promise<string>;
   txQuery(
     txID: string,
@@ -151,8 +152,12 @@ export interface Spec extends TurboModule {
   getSyncStatus(): Promise<string>;
   inspectPendingMutations(): Promise<string>;
   inspectRetainedMutations(): Promise<string>;
+  inspectRetainedMutationRecords(): Promise<string>;
   inspectRejectedMutations(): Promise<string>;
-  inspectClientState(): Promise<string>;
+  inspectRejectedMutationRecords(): Promise<string>;
+  inspectClientStateSnapshot(
+    rowStatements: ReadonlyArray<NativeSQLStatement>
+  ): Promise<{ inspection: string; applicationRows: ReadonlyArray<NativeRow> }>;
   inspectDurableState(tableName: string, recordID: string): Promise<string>;
   inspectTransportObservations(): Promise<string>;
   armTransportPause(operationClass: string): Promise<void>;

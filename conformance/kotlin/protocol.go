@@ -103,6 +103,7 @@ type Result struct {
 	DurableStateFingerprint         string                        `json:"durable_state_fingerprint"`
 	Schema                          json.RawMessage               `json:"schema"`
 	ApplicationRows                 json.RawMessage               `json:"application_rows"`
+	ApplicationRowStorageClasses    json.RawMessage               `json:"application_row_storage_classes"`
 	RetainedMutations               json.RawMessage               `json:"retained_mutations"`
 	RejectedMutations               json.RawMessage               `json:"rejected_mutations"`
 	ScopeStates                     json.RawMessage               `json:"scope_states"`
@@ -801,7 +802,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 		OperationClass             *string                        `json:"operation_class"`
 		StatusCode                 *int                           `json:"status_code"`
 		ErrorCode                  json.RawMessage                `json:"error_code"`
-		Retryable                  *bool                          `json:"retryable"`
+		Retryable                  json.RawMessage                `json:"retryable"`
 		DurationNanoseconds        *uint64                        `json:"duration_nanoseconds"`
 		CursorFingerprints         *[]string                      `json:"cursor_fingerprints"`
 		CursorFingerprintsComplete *bool                          `json:"cursor_fingerprints_complete"`
@@ -809,7 +810,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 		RebuildResponseFacts       *TransportRebuildResponseFacts `json:"rebuild_response_facts"`
 		PullResponseFacts          *TransportPullResponseFacts    `json:"pull_response_facts"`
 	}
-	if err := decodeStrict(data, &raw); err != nil || raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || len(raw.ErrorCode) == 0 || raw.Retryable == nil || raw.DurationNanoseconds == nil {
+	if err := decodeStrict(data, &raw); err != nil || raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || len(raw.ErrorCode) == 0 || len(raw.Retryable) == 0 || raw.DurationNanoseconds == nil {
 		return errors.New("decode Kotlin transport observation failed")
 	}
 	var errorCode *string
@@ -820,14 +821,18 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 		}
 		errorCode = &decoded
 	}
+	var retryable *bool
+	if err := json.Unmarshal(raw.Retryable, &retryable); err != nil {
+		return errors.New("decode Kotlin transport retryability failed")
+	}
 	o.Sequence = *raw.Sequence
 	o.OperationClass = *raw.OperationClass
 	o.StatusCode = *raw.StatusCode
 	o.ErrorCode = errorCode
-	o.Retryable = clonePointer(raw.Retryable)
+	o.Retryable = retryable
 	o.DurationNanoseconds = *raw.DurationNanoseconds
 	if raw.CursorFingerprints != nil {
-		o.CursorFingerprints = append([]string(nil), (*raw.CursorFingerprints)...)
+		o.CursorFingerprints = cloneFingerprintSet(*raw.CursorFingerprints)
 	}
 	o.CursorFingerprintsComplete = clonePointer(raw.CursorFingerprintsComplete)
 	o.RequestFacts = raw.RequestFacts
@@ -936,11 +941,11 @@ func validateTransportObservation(observation TransportObservation) error {
 	if observation.DurationNanoseconds == 0 || observation.StatusCode != 0 && (observation.StatusCode < 100 || observation.StatusCode > 599) || len(observation.CursorFingerprints) > 16 {
 		return errors.New("Kotlin transport observation is out of bounds")
 	}
-	if observation.Retryable == nil || observation.StatusCode == 0 && (observation.ErrorCode != nil || !*observation.Retryable) || observation.StatusCode >= 200 && observation.StatusCode < 300 && (observation.ErrorCode != nil || *observation.Retryable) {
+	if (observation.StatusCode == 0 || observation.StatusCode >= 200 && observation.StatusCode < 300) && (observation.ErrorCode != nil || observation.Retryable != nil) {
 		return errors.New("Kotlin transport outcome facts are invalid")
 	}
 	if observation.StatusCode != 0 && (observation.StatusCode < 200 || observation.StatusCode >= 300) {
-		if observation.ErrorCode == nil || !validTransportErrorCode(*observation.ErrorCode) || *observation.Retryable && !transportErrorRetryable(*observation.ErrorCode) {
+		if observation.ErrorCode == nil || !validTransportErrorCode(*observation.ErrorCode) || observation.Retryable == nil || *observation.Retryable && !transportErrorRetryable(*observation.ErrorCode) {
 			return errors.New("Kotlin transport failure facts are invalid")
 		}
 	}
@@ -968,6 +973,13 @@ func validTransportErrorCode(code string) bool {
 	}
 }
 
+// wireRetryable states one observation in wire contract terms. A status of
+// zero is the retryable transport_failure case, and a success has no server
+// retryability.
+func wireRetryable(observation TransportObservation) bool {
+	return observation.StatusCode == 0 || observation.Retryable != nil && *observation.Retryable
+}
+
 func transportErrorRetryable(code string) bool {
 	switch code {
 	case "retry_later", "capture_pending", "temporary_unavailable":
@@ -985,7 +997,7 @@ func validateTransportRequestAndResponseFacts(observation TransportObservation) 
 			return errors.New("Kotlin connect request facts are invalid")
 		}
 	case "pull":
-		if !validTransportRequestCommon(facts) || facts.ProtocolVersion != nil || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion < 0 || facts.ScopeCount == nil || *facts.ScopeCount <= 0 || facts.Limit == nil || *facts.Limit <= 0 || facts.ScopeFingerprint != nil || facts.RebuildIDFingerprint != nil || facts.CursorFingerprint != nil || facts.CursorPresent != nil || facts.MutationCount != nil {
+		if !validTransportRequestCommon(facts) || facts.ProtocolVersion != nil || facts.ScopeSetVersion == nil || *facts.ScopeSetVersion < 0 || facts.ScopeCount == nil || *facts.ScopeCount < 0 || facts.Limit == nil || *facts.Limit <= 0 || facts.ScopeFingerprint != nil || facts.RebuildIDFingerprint != nil || facts.CursorFingerprint != nil || facts.CursorPresent != nil || facts.MutationCount != nil {
 			return errors.New("Kotlin pull request facts are invalid")
 		}
 	case "push":
@@ -1121,11 +1133,12 @@ func cloneObservation(value TransportObservation) TransportObservation {
 	copy := value
 	copy.ErrorCode = clonePointer(value.ErrorCode)
 	copy.Retryable = clonePointer(value.Retryable)
-	copy.CursorFingerprints = append([]string(nil), value.CursorFingerprints...)
+	copy.CursorFingerprints = cloneFingerprintSet(value.CursorFingerprints)
 	copy.CursorFingerprintsComplete = clonePointer(value.CursorFingerprintsComplete)
 	if value.RebuildResponseFacts != nil {
 		response := *value.RebuildResponseFacts
 		response.FinalScopeCursorFingerprint = clonePointer(response.FinalScopeCursorFingerprint)
+		response.ResponseBodySHA256 = clonePointer(response.ResponseBodySHA256)
 		copy.RebuildResponseFacts = &response
 	}
 	if value.PullResponseFacts != nil {
@@ -1140,6 +1153,7 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		facts.ScopeSetVersion = clonePointer(facts.ScopeSetVersion)
 		facts.ScopeCount = clonePointer(facts.ScopeCount)
 		facts.Limit = clonePointer(facts.Limit)
+		facts.ScopeFingerprint = clonePointer(facts.ScopeFingerprint)
 		facts.RebuildIDFingerprint = clonePointer(facts.RebuildIDFingerprint)
 		facts.CursorFingerprint = clonePointer(facts.CursorFingerprint)
 		facts.CursorPresent = clonePointer(facts.CursorPresent)
@@ -1147,6 +1161,15 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		copy.RequestFacts = &facts
 	}
 	return copy
+}
+
+// cloneFingerprintSet keeps an empty set distinct from an absent set. A pull
+// with no known scope reports an empty set, and an absent set is incomplete.
+func cloneFingerprintSet(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 func clonePointer[T any](value *T) *T {

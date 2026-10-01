@@ -216,10 +216,10 @@ class SchemaIntegrationTests {
         return output.toString()
     }
 
-    // -- 1. testAdditiveSchemaChangePreservesData --
+    // -- 1. testSameSchemaReconnectPreservesPushedData --
 
     @Test
-    fun testAdditiveSchemaChangePreservesData() = runBlocking {
+    fun testSameSchemaReconnectPreservesPushedData() = runBlocking {
         val serverSchema = fetchServerSchema()
         val userID = UUID.randomUUID().toString().lowercase()
         val clientID = UUID.randomUUID().toString()
@@ -243,7 +243,7 @@ class SchemaIntegrationTests {
             "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
             arrayOf(orderID, custID, userID, """{"street":"123 Main St"}""", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
         )
-        client1.syncNow()
+        syncNowRetryingCapturePending(client1)
 
         client1.stop()
         client1.close()
@@ -453,7 +453,7 @@ class SchemaIntegrationTests {
             context
         )
         onlineClient.start()
-        onlineClient.syncNow()
+        syncNowRetryingCapturePending(onlineClient)
 
         val pendingAfterConnect = onlineClient.pendingChangeCount()
         val localRow = onlineClient.queryOne(
@@ -653,7 +653,7 @@ class SchemaIntegrationTests {
             "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
             arrayOf(orderID, customerID, userID, """{"street":"User Scope Row"}""", "2026-01-06T00:00:00.000Z", "2026-01-06T00:00:00.000Z")
         )
-        bootstrap.syncNow()
+        syncNowRetryingCapturePending(bootstrap)
         bootstrap.stop()
         bootstrap.close()
 
@@ -720,7 +720,7 @@ class SchemaIntegrationTests {
             "INSERT INTO orders (id, customer_id, user_id, status, total_price, currency, ship_address, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, 'USD', ?, ?, ?)",
             arrayOf(orderID, customerID, userID, """{"street":"User Scoped Order"}""", "2026-01-07T00:00:00.000Z", "2026-01-07T00:00:00.000Z")
         )
-        client.syncNow()
+        syncNowRetryingCapturePending(client)
 
         val categoryScopes = internalQuery(
             dbPath,

@@ -1,0 +1,104 @@
+//go:build reactnativeintegration
+
+package reactnative
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRealReactNativeScopeEmptyPullIOS(t *testing.T) { runRealReactNativeScopeEmptyPull(t, "ios") }
+func TestRealReactNativeScopeEmptyPullAndroid(t *testing.T) {
+	runRealReactNativeScopeEmptyPull(t, "android")
+}
+
+func runRealReactNativeScopeEmptyPull(t *testing.T, platform string) {
+	t.Helper()
+	if !*warmConnectProvision || !*warmConnectInstall {
+		t.Fatalf("React Native %s scope-empty-pull requires --provision --install", platform)
+	}
+	detoxConfiguration := os.Getenv("SYNCHRO_RN_DETOX_CONFIGURATION")
+	if detoxConfiguration == "" {
+		t.Fatal("SYNCHRO_RN_DETOX_CONFIGURATION is required")
+	}
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	runContext, cancelRun := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancelRun()
+	scenario, err := LoadScopeEmptyPullScenario(runContext, repositoryRoot)
+	if err != nil {
+		t.Fatalf("load React Native scope-empty-pull scenario: %v", err)
+	}
+	harness, controller := newReactNativeScenarioHarness(t, runContext)
+	coordinator, err := NewScopeEmptyPullCoordinator(ScopeEmptyPullCoordinatorConfig{Scenario: scenario, Harness: harness, Controller: controller, Platform: platform})
+	if err != nil {
+		t.Fatalf("create React Native %s scope-empty-pull coordinator: %v", platform, err)
+	}
+	t.Cleanup(func() {
+		closeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := coordinator.Close(closeContext); err != nil {
+			t.Errorf("close React Native %s scope-empty-pull coordinator: %v", platform, err)
+		}
+	})
+	if err := coordinator.Prepare(runContext); err != nil {
+		t.Fatalf("prepare React Native %s scope-empty-pull coordinator: %v", platform, err)
+	}
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- coordinator.Serve(runContext) }()
+	t.Run("assertion", func(t *testing.T) {
+		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("react-native-%s-scope-empty-pull.json", platform))
+		command, err := newCorpusDetoxCommand(runContext, "test", "e2e/scope-empty-pull.test.ts", "--config-path", "./.detoxrc.steady-pull.js", "--configuration", detoxConfiguration, "--json", "--outputFile", resultPath)
+		if err != nil {
+			t.Fatalf("create React Native %s scope-empty-pull Detox command: %v", platform, err)
+		}
+		command.Dir = filepath.Join(repositoryRoot, "clients", "react-native", "example")
+		for _, assignment := range os.Environ() {
+			if !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_URL=") && !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_TOKEN=") && !strings.HasPrefix(assignment, "SYNCHRO_RN_COORDINATOR_STAGE_COUNT=") {
+				command.Env = append(command.Env, assignment)
+			}
+		}
+		command.Env = append(command.Env, "SYNCHRO_RN_COORDINATOR_URL="+coordinator.URL(), "SYNCHRO_RN_COORDINATOR_TOKEN="+coordinator.Token(), "SYNCHRO_RN_COORDINATOR_STAGE_COUNT="+strconv.Itoa(coordinator.ExchangeCount()))
+		output, err := command.CombinedOutput()
+		if err != nil {
+			_, coordinatorErr := coordinator.Result()
+			t.Fatalf("run React Native %s scope-empty-pull Detox test: %v; coordinator: %v\n%s", platform, err, coordinatorErr, output)
+		}
+		expectedTestPath := filepath.Join(repositoryRoot, "clients", "react-native", "example", "e2e", "scope-empty-pull.test.ts")
+		if err := validateDetoxSingleTestResult(resultPath, expectedTestPath, "executes the scope-empty-pull coordinator sequence", "scope-empty-pull"); err != nil {
+			t.Fatalf("validate React Native %s scope-empty-pull Detox result: %v\n%s", platform, err, output)
+		}
+		if !coordinator.Completed() {
+			t.Fatalf("React Native %s scope-empty-pull coordinator did not complete", platform)
+		}
+		result, err := coordinator.Result()
+		if err != nil {
+			t.Fatalf("read React Native %s scope-empty-pull result: %v", platform, err)
+		}
+		if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
+			t.Fatalf("React Native %s scope-empty-pull identity resolutions = %d, want %d", platform, len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
+		}
+	})
+	closeContext, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = coordinator.Close(closeContext)
+	closeCancel()
+	if err != nil {
+		t.Fatalf("stop React Native %s scope-empty-pull coordinator: %v", platform, err)
+	}
+	select {
+	case err := <-serveErrors:
+		if err != nil {
+			t.Fatalf("serve React Native %s scope-empty-pull coordinator: %v", platform, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("React Native %s scope-empty-pull coordinator did not stop", platform)
+	}
+}

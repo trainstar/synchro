@@ -1,0 +1,36 @@
+diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/bgworker.rs
+index 6ab84a7..b53cc24 100644
+--- a/extensions/synchro-pg/src/bgworker.rs
++++ b/extensions/synchro-pg/src/bgworker.rs
+@@ -3617,7 +3617,7 @@ fn materialize_transaction(
+     effect_bases.retain(|key, _| existed_before.get(key).copied().unwrap_or(true));
+     crate::materialize::activate_membership_stages(
+         client,
+-        &membership_transitions,
++        &[],
+         active_generation,
+         &effect_bases,
+         &stream_generation,
+@@ -7237,6 +7237,22 @@ fn activate_generations(
+     let Some(final_generation) = activations.last().copied() else {
+         return Ok(active_generation);
+     };
++    let stream_generation =
++        active_stream_generation(client).map_err(|_| failure("validation_failed", commit_lsn))?;
++    let mut source_generation = active_generation;
++    for generation in activations {
++        crate::materialize::activate_membership_stages(
++            client,
++            &[(source_generation, *generation)],
++            *generation,
++            &HashMap::new(),
++            &stream_generation,
++            &format_lsn(commit_lsn),
++            &format_lsn(end_lsn),
++        )
++        .map_err(|_| failure("scope_evaluation_failed", commit_lsn))?;
++        source_generation = *generation;
++    }
+     crate::registry::remove_retired_capture_configuration(
+         client,
+         active_generation,

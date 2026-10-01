@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -77,6 +79,24 @@ func TestCanonicalJSONOrdersKeysByUTF16(t *testing.T) {
 	}
 }
 
+func TestSeedJSONNumbersKeepSafeIntegerCheckSeparateFromFloats(t *testing.T) {
+	for _, text := range []string{"9007199254740992", "-9007199254740992", "1e21"} {
+		if _, err := canonicalJSONNumber(text); err == nil {
+			t.Fatalf("seed JSON number accepted unsafe integer %q", text)
+		}
+	}
+	for text, want := range map[string]string{"9007199254740991": "9007199254740991", "-0": "0", "0.0000001": "1e-7"} {
+		if got, err := canonicalJSONNumber(text); err != nil || got != want {
+			t.Fatalf("seed JSON number %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+	for text, want := range map[string]string{"9007199254740992": "9007199254740992", "1e21": "1e+21"} {
+		if got, err := canonicalFloatNumber(text); err != nil || got != want {
+			t.Fatalf("seed float %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+}
+
 func TestChecksumObjectRejectsMissingStructuredChecksum(t *testing.T) {
 	if err := (checksumObject{}).validate(); err == nil {
 		t.Fatal("empty structured checksum was accepted")
@@ -140,12 +160,6 @@ func TestVerifySQLiteInternalSchemaRejectsCorruption(t *testing.T) {
 			},
 		},
 		{
-			name: "scope row index SQL shape changed",
-			mutate: func(t *testing.T, db *sql.DB) {
-				recreateScopeRowsIndex(t, db, `("table_name", "record_id")`)
-			},
-		},
-		{
 			name: "scope checksum type changed",
 			mutate: func(t *testing.T, db *sql.DB) {
 				_, err := db.Exec(`
@@ -174,6 +188,14 @@ func TestVerifySQLiteInternalSchemaRejectsCorruption(t *testing.T) {
 				t.Fatal("accepted corrupt internal schema")
 			}
 		})
+	}
+}
+
+func TestVerifySQLiteInternalSchemaAcceptsEquivalentIndexSQL(t *testing.T) {
+	db := newCanonicalInternalSQLiteDatabase(t)
+	recreateScopeRowsIndex(t, db, `("table_name", "record_id")`)
+	if err := verifySQLiteSchema(context.Background(), db, nil); err != nil {
+		t.Fatalf("rejected an index with equivalent quoted column names: %v", err)
 	}
 }
 
@@ -293,16 +315,6 @@ func TestSchemaManifestRejectsRehashedSemanticMutants(t *testing.T) {
 				env.SchemaVersion = 2
 				env.Manifest.SchemaVersion = 2
 				env.Manifest.CompatibilityFloor = 1
-			},
-		},
-		{
-			name: "class-2 compatibility floor does not extend parent lineage",
-			mutate: func(env *manifestEnvelope) {
-				env.SchemaVersion = 2
-				env.Manifest.SchemaVersion = 2
-				env.Manifest.TransitionClass = "class_2"
-				env.Manifest.CompatibilityFloor = 2
-				env.Manifest.ParentSchema = &schemaRef{Version: 1, Hash: strings.Repeat("1", 64)}
 			},
 		},
 		{
@@ -427,6 +439,43 @@ func TestManifestHashCanonicalizesSemanticallyUnorderedCollections(t *testing.T)
 			t.Fatal("export manifest accepted noncanonical scope order")
 		}
 	})
+}
+
+func TestSchemaManifestCompatibilityFloorFollowsAuthoredLineageCases(t *testing.T) {
+	data, err := os.ReadFile("../../../conformance/schema/manifest-lineage-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Cases []struct {
+			Case               string `json:"case"`
+			SchemaVersion      int64  `json:"schema_version"`
+			ParentVersion      *int64 `json:"parent_version"`
+			TransitionClass    string `json:"transition_class"`
+			CompatibilityFloor int64  `json:"compatibility_floor"`
+			Valid              bool   `json:"valid"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil || len(document.Cases) == 0 {
+		t.Fatalf("decode authored lineage cases: cases=%d err=%v", len(document.Cases), err)
+	}
+	for _, test := range document.Cases {
+		t.Run(test.Case, func(t *testing.T) {
+			env := validManifestEnvelope(t)
+			env.SchemaVersion = test.SchemaVersion
+			env.Manifest.SchemaVersion = test.SchemaVersion
+			env.Manifest.TransitionClass = test.TransitionClass
+			env.Manifest.CompatibilityFloor = test.CompatibilityFloor
+			env.Manifest.ParentSchema = nil
+			if test.ParentVersion != nil {
+				env.Manifest.ParentSchema = &schemaRef{Version: *test.ParentVersion, Hash: strings.Repeat("1", 64)}
+			}
+			rehashSchemaManifest(t, &env)
+			if err := env.validate(); (err == nil) != test.Valid {
+				t.Fatalf("valid=%t, want %t: %v", err == nil, test.Valid, err)
+			}
+		})
+	}
 }
 
 func validManifestEnvelope(t *testing.T) manifestEnvelope {

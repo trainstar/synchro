@@ -129,6 +129,12 @@ normalized_mutation_scope = [
 ]
 ```
 
+A request with `atomic: true` uses the tag `"atomic-batch-v1"` in place of
+`"batch-v1"` as the first element of `normalized_batch`. Every other element,
+the batch fingerprint domain, and the mutation fingerprint are unchanged. A
+non-atomic request keeps the `"batch-v1"` preimage, so stored fingerprints stay
+byte-identical.
+
 The mutation array preserves request member meaning in the fixed order above.
 The batch mutation array preserves request order. A present columns list is
 sorted by unsigned UTF-8 bytes of `field_id`; duplicate field IDs are invalid.
@@ -163,7 +169,7 @@ Fingerprints are stored as the 32-byte SHA-256 result together with fingerprint
 version and domain. A later normalization revision requires a new version and
 domain and must not reinterpret an existing ledger entry. Fixed authored vectors
 must cover every presence form, operation, schema, opaque version, portable
-wire value, field order, and multi-mutation order.
+wire value, field order, multi-mutation order, and the atomic batch tag.
 
 ### Exact replay
 
@@ -213,7 +219,7 @@ All work for a first execution occurs in one database transaction. That transact
 - one increment of the client's durable `accepted_write_epoch` when the batch accepts at least one source write
 - deterministic policy and validation effects that are part of the accepted source write
 
-The transaction commits all of those records together or rolls all of them back together. A semantic rejection of one mutation does not roll back accepted mutations in the same batch. An operational failure does roll back the entire first execution and returns no per-mutation outcomes.
+The transaction commits all of those records together or rolls all of them back together. In a non-atomic batch, a semantic rejection of one mutation does not roll back accepted mutations in the same batch. An operational failure does roll back the entire first execution and returns no per-mutation outcomes.
 
 The transaction must not append a pull-visible changelog record, advance a pull cursor, or synchronously publish scope effects. Source writes and their version fences produce WAL in the same transaction. The WAL pipeline later materializes pull-visible changes in commit-safe stream order and reuses the version allocated by the source transaction.
 
@@ -225,9 +231,103 @@ semantic rejection, or exact replay does not advance it. Every rebuild session
 binds the epoch observed at creation, and any later accepted write makes that
 session non-replayable even after WAL materialization catches up.
 
+### Atomic mutation groups
+
+A request with `atomic: true` asks for all-or-nothing semantic acceptance of
+its mutations. The value `false` is invalid. The request has the ordinary
+limits. A request that repeats one `table` and canonical `pk` pair, or that
+contains a `mutation_id` with a ledger row from a different batch, returns
+`400 invalid_request` before ledger allocation, policy execution, or source DML.
+
+First execution of an atomic batch occurs inside the first-execution
+transaction:
+
+1. The server opens one internal subtransaction after the batch ledger claim
+   and before the first mutation evaluation. The subtransaction starts with
+   every deferrable constraint deferred.
+2. It evaluates each mutation in request order with the ordinary evaluation.
+3. It stops at the first outcome that is not `applied`.
+4. If every outcome is `applied`, it checks every deferrable constraint. If the
+   check passes, it releases the subtransaction. The response is the ordinary
+   all-applied response.
+5. Otherwise, it rolls back and releases the subtransaction, and then builds
+   the failed-group response. A failed check at step 4 gives
+   `validation_failed` to the last mutation.
+
+The failed-group response has these outcomes:
+
+- The failing mutation keeps its evaluated status and code.
+- If that status is `conflict`, the server reads the row again after the
+  rollback and builds the conflict outcome from that committed state with the
+  same code and message. An earlier group write, such as a cascaded delete,
+  therefore never appears in the outcome.
+- Every other mutation has `rejected_terminal`, code `atomic_batch_rejected`,
+  and message `atomic batch rejected`. It has no `server_row`, `row_checksum`,
+  `server_version`, or `retryable`. Its `outcome_schema` is the request schema.
+- `accepted` is empty, and `rejected` contains every outcome in request order.
+
+`atomic_batch_rejected` is a terminal code. A non-atomic response never
+contains it. Every response validator requires that an atomic response either
+accepts every mutation with `applied`, or has an empty `accepted` array and
+exactly one outcome with a code other than `atomic_batch_rejected`.
+
+An operational error inside the subtransaction aborts the complete request as
+for every batch. The ledger stores every outcome of a completed atomic batch,
+and exact replay returns its stored response. The accepted-write epoch
+advances only when the subtransaction is released with applied writes.
+
+### Push unit constraint checks
+
+A push unit is one mutation of a non-atomic request. The push unit of an
+atomic request is its complete group. PostgreSQL runs the check of a deferred
+constraint when the transaction commits. The adapter runs `synchro_push` as
+one statement in its own transaction. Without a unit boundary, a failed
+deferred check fails the complete request after every mutation outcome exists.
+
+The server applies these rules in the first-execution transaction:
+
+1. Before the first unit, the server verifies that no relation with a
+   deferrable trigger has a pending trigger event in the calling transaction.
+   If one has, the call fails with SQLSTATE `25000` before the batch ledger
+   claim. The server never fires that event. A trigger function runs with the
+   authority of the current user, and the current user in `synchro_push` is
+   `synchro_owner`. ADR 005 gives that authority to no runtime role.
+2. Each unit starts with `SET CONSTRAINTS ALL DEFERRED` in its
+   subtransaction. Each unit therefore has the same constraint mode at each
+   position in the request.
+3. Each unit ends with `SET CONSTRAINTS ALL IMMEDIATE` in its subtransaction,
+   after all of its source writes. A data exception or an integrity
+   constraint violation at this point rolls back the unit. The unit then gets
+   `rejected_terminal` with `validation_failed`, as for a failed immediate
+   constraint.
+4. In an atomic request, a failed check at the unit end gives
+   `validation_failed` to the last mutation of the group. Every other
+   mutation gets `atomic_batch_rejected`.
+5. A deferred trigger can write synced rows during the check at the unit
+   end. The last mutation of the unit owns each of these writes, as it owns
+   the check. Each write fence of the check carries its `mutation_id`, so a
+   pull of that client waits for these writes as for other push writes.
+6. Each accepted outcome reports the row state after the check at the unit
+   end. In an atomic request, the server reads each accepted row again after
+   the check. A later mutation of the group or a deferred trigger can change
+   the row after its own mutation writes it. The outcome therefore shows the
+   version that the unit commits. If a later write of the unit removes the
+   row, the outcome has the version of that write and no row or checksum.
+
+Thus, every constraint holds at the end of each unit. A
+`DEFERRABLE INITIALLY IMMEDIATE` constraint is also checked at the unit end,
+not at the end of each statement. A constraint that is not deferrable is
+checked at each statement, as before. An error of another class at a unit end
+is an operational failure of the complete request.
+
+After a first execution of `synchro_push`, every deferrable constraint of the
+calling transaction is in `IMMEDIATE` mode. PostgreSQL has no statement that
+restores the declared initial mode in a transaction. The adapter commits each
+call immediately, so this mode has no effect on an adapter request.
+
 ### Exact mutation shapes
 
-The push envelope contains the bound `client_id`, positive `client_generation`, UUID `batch_id`, request `schema`, and an ordered `mutations` array containing `1..1000` entries. The decoded JSON request body is at most 1,048,576 octets. The RFC 8785 form of the parsed request is also at most 1,048,576 octets. Each normalized mutation is at most 65,536 octets and contains at most 256 authored columns. The server enforces byte limits while reading and before ledger allocation, fingerprinting, policy execution, or source DML. Unknown envelope members and any missing, nonpositive, or exceeded limit are invalid. First execution requires the exact current client generation and schema; exact replay uses the sealed values stored with the completed batch.
+The push envelope contains the bound `client_id`, positive `client_generation`, UUID `batch_id`, request `schema`, an ordered `mutations` array containing `1..1000` entries, and an optional `atomic` member whose only valid value is `true`. The decoded JSON request body is at most 1,048,576 octets. The RFC 8785 form of the parsed request is also at most 1,048,576 octets. Each normalized mutation is at most 65,536 octets and contains at most 256 authored columns. The server enforces byte limits while reading and before ledger allocation, fingerprinting, policy execution, or source DML. Unknown envelope members and any missing, nonpositive, or exceeded limit are invalid. First execution requires the exact current client generation and schema; exact replay uses the sealed values stored with the completed batch.
 
 Every mutation contains a UUID `mutation_id`, immutable logical table ID, one-field typed `pk`, immutable `authored_schema` version and hash, one of the three push operations, and `client_version`. Authored column entries use immutable field IDs and retain their values.
 
@@ -237,11 +337,11 @@ The operation-specific shapes are:
 
 | Operation | `base_version` | `columns` | `client_version` |
 | --- | --- | --- | --- |
-| `insert` | absent | required nonempty set of authored writable field IDs and values | required |
+| `insert` | absent | required set of authored writable field IDs and values, which can be empty | required |
 | `update` | required nonempty opaque token | required nonempty patch of authored writable field IDs and values | required |
 | `delete` | required nonempty opaque token | absent | required |
 
-Present `null` does not satisfy an absent or required field rule. An empty object is not a nonempty patch. Unknown operations, missing common fields, invalid UUIDs, duplicate mutation IDs, and violations of this presence matrix make the whole request `400 invalid_request`.
+Present `null` does not satisfy an absent or required field rule. An empty object is a valid insert set and is not a nonempty update patch. Unknown operations, missing common fields, invalid UUIDs, duplicate mutation IDs, and violations of this presence matrix make the whole request `400 invalid_request`.
 
 `client_version` is a required client-authored RFC 3339 UTC diagnostic timestamp. It records which local intent produced the mutation. It is not a row precondition, server version, source-row timestamp, ordering key, or conflict input. A client timestamp that is equal to, behind, or ahead of server time has exactly the same conflict authority: none.
 
@@ -308,8 +408,7 @@ Canonical field rules are:
 
 | Outcome | Status and code | Authoritative fields |
 | --- | --- | --- |
-| Accepted insert or update | `applied`, no rejection code | full canonical `server_row`, matching `row_checksum`, and new `server_version` are required |
-| Accepted delete | `applied`, no rejection code | new `server_version` is required; `server_row` and matching `row_checksum` are required for a source tombstone and both are absent for a fence-only delete |
+| Accepted insert, update, or delete | `applied`, no rejection code | new `server_version` is required; the outcome reports the row state after the push unit; full canonical `server_row` and matching `row_checksum` are required for a live row or source tombstone, and both are absent when the row does not exist after the unit |
 | State or version conflict | `conflict` with `version_conflict`, `row_already_exists`, `row_deleted`, or `row_not_found` | live row or source tombstone, matching `row_checksum`, and current version are required; a fence-only delete returns the current version without a row or checksum; true absence returns neither |
 | Terminal semantic rejection | `rejected_terminal` and one terminal code | no server row or server version is returned |
 
@@ -321,6 +420,7 @@ Terminal rejection codes are:
 - `validation_failed`: known current shape has a non-writable field, invalid value, or failed domain constraint
 - `table_not_synced`: target has never been a synced table for this contract
 - `schema_incompatible`: retained authored intent cannot be represented by the current synced schema; the outcome requires `retryable: false`, `authored_schema`, `current_schema`, and sorted `incompatible_field_ids`
+- `atomic_batch_rejected`: another mutation in the same atomic batch did not apply
 
 The per-mutation statuses `rejected_retryable` and the code `server_retryable` are not valid in protocol version 3. `unknown_scope_effect` is not a push outcome because pull-visible scope effects are not computed synchronously in the push transaction.
 
@@ -345,7 +445,7 @@ Protocol version 3 push uses this exact dispatch:
 | HTTP | Error code | Retryable | Condition |
 | --- | --- | --- | --- |
 | 200 | none | no error body | complete terminal mutation partition, including mixed semantic outcomes, or exact replay of one |
-| 400 | `invalid_request` | false | malformed JSON, invalid envelope or UUID, duplicate ID, unsupported operation, or operation-shape violation |
+| 400 | `invalid_request` | false | malformed JSON, invalid envelope or UUID, duplicate ID, unsupported operation, operation-shape violation, or atomic request rule violation |
 | 401 | `auth_required` | false | authentication is absent or invalid, or the client is not bound to the authenticated user |
 | 409 | `idempotency_conflict` | false | an existing batch or mutation identity has a different canonical fingerprint |
 | 409 | `client_retired` | false | the scoped client identity was irreversibly retired |
@@ -441,7 +541,14 @@ Rejected because whitespace and object order are transport details, while omitti
 
 ### All-or-nothing semantic acceptance
 
-Rejected because independent valid mutations must commit beside terminal semantic rejections. The atomic guarantee is durability of writes and outcomes, not uniform semantic success.
+Rejected as the default because independent valid mutations must commit beside terminal semantic rejections. The default atomic guarantee is durability of writes and outcomes, not uniform semantic success. A client requests uniform semantic success only with an explicit atomic batch.
+
+### One top-level transaction for each push unit
+
+A separate top-level transaction for each push unit keeps the declared
+constraint modes exactly. It needs procedure transaction control. It also
+breaks the first-execution transaction boundary, because the request ledger
+and every outcome must commit in one transaction.
 
 ### Per-mutation retryable outcomes
 

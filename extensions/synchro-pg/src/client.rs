@@ -29,9 +29,11 @@ struct StoredClientState {
 }
 
 #[derive(Debug)]
-struct EnsuredClientState {
+struct ClientConnectProposal {
     state: ClientConnectState,
     generation_renewed: bool,
+    assigned_history: Vec<String>,
+    removed_history: Vec<String>,
 }
 
 struct ScopeCursorUpdateInput<'a> {
@@ -85,9 +87,11 @@ pub(crate) fn load_client_connect_state(
 
     let rows = client
         .select(
-            "SELECT bucket_subs, scope_set_version, client_generation
+            "SELECT bucket_subs, scope_set_version, client_generation,
+                    is_active AND (generation_expires_at IS NULL OR generation_expires_at > now())
+                        AS current
              FROM sync_clients
-             WHERE user_id = $1 AND client_id = $2 AND is_active = true",
+             WHERE user_id = $1 AND client_id = $2",
             None,
             &[user_id.into(), client_id.into()],
         )
@@ -107,6 +111,11 @@ pub(crate) fn load_client_connect_state(
             .get_by_name::<i64, &str>("client_generation")
             .unwrap_or(None)
             .unwrap_or(1);
+        // A bound client that compaction deactivated or whose generation
+        // expired renews through connect, like push.
+        if row.get_by_name::<bool, &str>("current").unwrap_or(None) != Some(true) {
+            return Err(client_generation_expired_response(client_generation));
+        }
 
         Ok(ClientConnectState {
             bucket_subs,
@@ -115,8 +124,8 @@ pub(crate) fn load_client_connect_state(
         })
     } else {
         Err(protocol_error_response(
-            ProtocolErrorCode::InvalidRequest,
-            "client is not registered",
+            ProtocolErrorCode::AuthRequired,
+            "authentication is required",
             false,
         ))
     }
@@ -184,7 +193,21 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             return invalid_schema_reference_response(request.schema.clone());
         }
 
+        // Manifest publication is lazy shared initialization. It does not depend
+        // on this request, so it can precede a rejection.
         crate::schema::ensure_schema_manifest(client);
+        // The runtime fence orders connect with reset and projection activation.
+        // The scope and checkpoint fences order it with membership backfill.
+        // Publication above takes the registry lock first, so the fence follows it.
+        client
+            .update(
+                "LOCK TABLE synchro.sync_runtime_state, synchro.sync_scope_state,
+                            synchro.sync_client_checkpoints
+                 IN ROW EXCLUSIVE MODE",
+                None,
+                &[],
+            )
+            .unwrap_or_else(|err| pgrx::error!("locking connect decision state: {}", err));
         let current_manifest = crate::schema::load_latest_schema_manifest(client);
         let server_scopes = load_authoritative_scopes(client, p_user_id);
         if prior.is_none()
@@ -225,6 +248,73 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 }
             }
         };
+        let receipts_validated = request.seed_receipts.is_some()
+            && prior.is_none()
+            && request.client_generation.is_none();
+        let parses_cursors = !request.schema.is_fresh_sentinel()
+            && request.schema_reset != Some(true)
+            && matches!(
+                schema_action,
+                SchemaAction::Replace | SchemaAction::RebuildLocal
+            );
+        // Prevalidation parses every assigned cursor of the presented generation.
+        // A first connect's reconciliation parses the assigned cursors outside the
+        // affected scopes.
+        let mut protected_scope_ids: Vec<String> = request
+            .known_scopes
+            .iter()
+            .filter(|(scope_id, cursor_ref)| {
+                parses_cursors
+                    && cursor_ref.cursor.is_some()
+                    && server_scopes.contains(scope_id)
+                    && match prior.as_ref() {
+                        Some(prior) => request.client_generation == Some(prior.client_generation),
+                        None => {
+                            request.client_generation.is_none()
+                                && !affected_scopes
+                                    .as_ref()
+                                    .is_some_and(|affected| affected.contains(scope_id))
+                        }
+                    }
+            })
+            .map(|(scope_id, _)| scope_id.clone())
+            .collect();
+        // Seed issuance uses only receipted scopes in these loaded assignments.
+        // Their rows stay locked even while a declaration is not portable.
+        if let Some(receipts) = request
+            .seed_receipts
+            .as_ref()
+            .filter(|_| receipts_validated)
+        {
+            protected_scope_ids.extend(
+                receipts
+                    .keys()
+                    .filter(|scope_id| server_scopes.contains(scope_id))
+                    .cloned(),
+            );
+        }
+        sort_scope_ids(&mut protected_scope_ids);
+        // Validation, replacement issuance, and seed issuance read these bindings
+        // and floors. The shared locks keep them fixed until transaction end.
+        // A receipt set is validated against every portable scope.
+        if !protected_scope_ids.is_empty() || receipts_validated {
+            client
+                .update(
+                    "SELECT state.scope_id
+                     FROM synchro.sync_scope_state AS state
+                     WHERE state.scope_id = ANY($1::text[])
+                        OR ($2 AND state.scope_id IN (
+                            SELECT shared.scope_id
+                            FROM synchro.sync_shared_scopes AS shared
+                            WHERE shared.portable
+                        ))
+                     ORDER BY state.scope_id
+                     FOR SHARE OF state",
+                    None,
+                    &[protected_scope_ids.into(), receipts_validated.into()],
+                )
+                .unwrap_or_else(|err| pgrx::error!("locking validated scope state: {}", err));
+        }
         if let Err(response) = prevalidate_scope_cursor_replacements(
             client,
             p_user_id,
@@ -255,26 +345,19 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             }
             None => BTreeMap::new(),
         };
-        let ensured =
-            match ensure_client_connect_state(client, p_user_id, &request, prior, &server_scopes) {
-                Ok(state) => state,
-                Err(response) => return response,
-            };
+        let proposal = match propose_client_connect_state(&request, prior, &server_scopes) {
+            Ok(proposal) => proposal,
+            Err(response) => return response,
+        };
 
-        if request.scope_set_version > ensured.state.scope_set_version {
+        if request.scope_set_version > proposal.state.scope_set_version {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
                 "invalid connect request",
                 false,
             );
         }
-        if !scopes_were_assigned(
-            client,
-            p_user_id,
-            &request.client_id,
-            ensured.state.client_generation,
-            request.known_scopes.keys(),
-        ) {
+        if !known_scopes_were_assigned(client, p_user_id, &request, &proposal) {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
                 "connect contains an unknown scope",
@@ -282,7 +365,7 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
             );
         }
 
-        let assigned_scopes = &ensured.state.bucket_subs;
+        let assigned_scopes = &proposal.state.bucket_subs;
 
         let mut scopes = build_scope_delta(&request.known_scopes, assigned_scopes);
         // The wire contract places a receipted but unassigned scope in
@@ -300,20 +383,6 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 .remove
                 .sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         }
-        for scope in &mut scopes.add {
-            let Some(position) = seed_positions.get(&scope.id) else {
-                continue;
-            };
-            scope.cursor = Some(issue_seed_scope_cursor(
-                client,
-                p_user_id,
-                &request.client_id,
-                ensured.state.client_generation,
-                &scope.id,
-                &current_manifest.schema_hash,
-                position,
-            ));
-        }
         let mut scope_cursor_updates = match build_scope_cursor_updates(
             client,
             ScopeCursorUpdateInput {
@@ -323,14 +392,32 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                 delta: &scopes,
                 schema_action,
                 affected_scopes: affected_scopes.as_deref(),
-                generation_renewed: ensured.generation_renewed,
-                client_generation: ensured.state.client_generation,
+                generation_renewed: proposal.generation_renewed,
+                client_generation: proposal.state.client_generation,
                 current_schema_hash: &current_manifest.schema_hash,
             },
         ) {
             Ok(updates) => updates,
             Err(response) => return response,
         };
+
+        // Every result-valued rejection precedes this first request-dependent write.
+        persist_client_connect_state(client, p_user_id, &request, &proposal);
+
+        for scope in &mut scopes.add {
+            let Some(position) = seed_positions.get(&scope.id) else {
+                continue;
+            };
+            scope.cursor = Some(issue_seed_scope_cursor(
+                client,
+                p_user_id,
+                &request.client_id,
+                proposal.state.client_generation,
+                &scope.id,
+                &current_manifest.schema_hash,
+                position,
+            ));
+        }
         for (scope_id, position) in &seed_positions {
             if !request.known_scopes.contains_key(scope_id) || !assigned_scopes.contains(scope_id) {
                 continue;
@@ -341,7 +428,7 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
                     client,
                     p_user_id,
                     &request.client_id,
-                    ensured.state.client_generation,
+                    proposal.state.client_generation,
                     scope_id,
                     &current_manifest.schema_hash,
                     position,
@@ -364,8 +451,8 @@ fn synchro_connect(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB {
         let response = ConnectResponse {
             server_time: canonical_server_time(),
             protocol_version: PROTOCOL_VERSION,
-            client_generation: ensured.state.client_generation,
-            scope_set_version: ensured.state.scope_set_version,
+            client_generation: proposal.state.client_generation,
+            scope_set_version: proposal.state.scope_set_version,
             schema: SchemaDescriptor {
                 version: current_manifest.schema_version,
                 hash: current_manifest.schema_hash.clone(),
@@ -673,7 +760,7 @@ fn load_stored_client_state(
     })
 }
 
-fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<String> {
+pub(crate) fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<String> {
     let rows = client
         .select("SELECT scope_id FROM sync_shared_scopes", None, &[])
         .unwrap_or_else(|err| pgrx::error!("loading authoritative client scopes: {}", err));
@@ -706,8 +793,8 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
             .unwrap_or_else(|| pgrx::error!("authoritative client scope is missing"));
         scopes.push(scope_id);
     }
-    // A granted scope is the only assignment a user can gain and lose. The
-    // identity scope is unconditional and a shared scope belongs to every user.
+    // Grants and assignment function results are the per-user assignments a
+    // user can gain and lose. A shared scope belongs to every user.
     let granted = client
         .select(
             "SELECT scope_id FROM sync_user_scopes
@@ -726,17 +813,22 @@ fn load_authoritative_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec<Strin
             scopes.push(scope_id);
         }
     }
+    for scope_id in crate::portable_seed::load_assigned_scopes(client, user_id) {
+        if !scopes.contains(&scope_id) {
+            scopes.push(scope_id);
+        }
+    }
     sort_scope_ids(&mut scopes);
     scopes
 }
 
-fn ensure_client_connect_state(
-    client: &mut SpiClient<'_>,
-    user_id: &str,
+/// Computes the client state that a connect claims without a durable write.
+/// The caller rejects the request or persists this one proposal.
+fn propose_client_connect_state(
     request: &ConnectRequest,
     prior: Option<StoredClientState>,
     server_scopes: &[String],
-) -> Result<EnsuredClientState, pgrx::JsonB> {
+) -> Result<ClientConnectProposal, pgrx::JsonB> {
     let (
         client_generation,
         generation_renewed,
@@ -789,15 +881,54 @@ fn ensure_client_connect_state(
 
     let scope_set_version = if client_was_new {
         1
-    } else if prior_scopes != server_scopes {
-        prior_scope_set_version
-            .checked_add(1)
-            .filter(|version| *version <= MAX_SAFE_INTEGER)
-            .unwrap_or_else(|| pgrx::error!("scope set version allocation overflow"))
     } else {
-        prior_scope_set_version
+        next_scope_set_version(&prior_scopes, prior_scope_set_version, server_scopes)
     };
+    let (assigned_history, removed_history) = scope_history_changes(
+        &prior_scopes,
+        server_scopes,
+        client_was_new || generation_renewed,
+    );
 
+    Ok(ClientConnectProposal {
+        state: ClientConnectState {
+            bucket_subs: server_scopes.to_vec(),
+            scope_set_version,
+            client_generation,
+        },
+        generation_renewed,
+        assigned_history,
+        removed_history,
+    })
+}
+
+/// A known scope is valid when the durable history of the presented generation
+/// records it or when this proposal records it. An expired generation still
+/// names the history that assigned its revoked scopes, so they are removed.
+fn known_scopes_were_assigned(
+    client: &SpiClient<'_>,
+    user_id: &str,
+    request: &ConnectRequest,
+    proposal: &ClientConnectProposal,
+) -> bool {
+    let mut unrecorded = request.known_scopes.keys().filter(|scope| {
+        !proposal.assigned_history.contains(scope) && !proposal.removed_history.contains(scope)
+    });
+    match request.client_generation {
+        Some(generation) => {
+            scopes_were_assigned(client, user_id, &request.client_id, generation, unrecorded)
+        }
+        None => unrecorded.next().is_none(),
+    }
+}
+
+fn persist_client_connect_state(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    request: &ConnectRequest,
+    proposal: &ClientConnectProposal,
+) {
+    let server_scopes = &proposal.state.bucket_subs;
     client
         .update(
             "INSERT INTO sync_clients (
@@ -836,13 +967,13 @@ fn ensure_client_connect_state(
                 request.platform.as_str().into(),
                 request.app_version.as_str().into(),
                 server_scopes.to_vec().into(),
-                scope_set_version.into(),
-                client_generation.into(),
+                proposal.state.scope_set_version.into(),
+                proposal.state.client_generation.into(),
             ],
         )
         .unwrap_or_else(|err| pgrx::error!("persisting sync client state: {}", err));
 
-    if generation_renewed {
+    if proposal.generation_renewed {
         client
             .update(
                 "DELETE FROM sync_client_checkpoints
@@ -852,6 +983,103 @@ fn ensure_client_connect_state(
             )
             .unwrap_or_else(|err| pgrx::error!("invalidating expired client checkpoints: {}", err));
     }
+    persist_scope_transition(
+        client,
+        user_id,
+        &request.client_id,
+        proposal.state.client_generation,
+        proposal.state.scope_set_version,
+        server_scopes,
+        &proposal.assigned_history,
+        &proposal.removed_history,
+    );
+}
+
+/// Returns the scopes that a transition assigns and removes. A full history
+/// records every new scope as assigned, for a new or renewed generation.
+fn scope_history_changes(
+    prior_scopes: &[String],
+    new_scopes: &[String],
+    full_history: bool,
+) -> (Vec<String>, Vec<String>) {
+    if full_history {
+        return (new_scopes.to_vec(), Vec::new());
+    }
+    (
+        new_scopes
+            .iter()
+            .filter(|scope| !prior_scopes.contains(scope))
+            .cloned()
+            .collect(),
+        prior_scopes
+            .iter()
+            .filter(|scope| !new_scopes.contains(scope))
+            .cloned()
+            .collect(),
+    )
+}
+
+pub(crate) fn next_scope_set_version(
+    prior_scopes: &[String],
+    prior_version: i64,
+    new_scopes: &[String],
+) -> i64 {
+    if prior_scopes == new_scopes {
+        return prior_version;
+    }
+    prior_version
+        .checked_add(1)
+        .filter(|version| *version <= MAX_SAFE_INTEGER)
+        .unwrap_or_else(|| pgrx::error!("scope set version allocation overflow"))
+}
+
+pub(crate) fn persist_pull_scope_transition(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    prior_scopes: &[String],
+    new_scopes: &[String],
+    scope_set_version: i64,
+) {
+    client
+        .update(
+            "UPDATE sync_clients
+             SET bucket_subs = $3, scope_set_version = $4, updated_at = now()
+             WHERE user_id = $1 AND client_id = $2",
+            None,
+            &[
+                user_id.into(),
+                client_id.into(),
+                new_scopes.to_vec().into(),
+                scope_set_version.into(),
+            ],
+        )
+        .unwrap_or_else(|err| pgrx::error!("persisting reconciled client scopes: {}", err));
+    let (assigned, removed) = scope_history_changes(prior_scopes, new_scopes, false);
+    persist_scope_transition(
+        client,
+        user_id,
+        client_id,
+        client_generation,
+        scope_set_version,
+        new_scopes,
+        &assigned,
+        &removed,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_scope_transition(
+    client: &mut SpiClient<'_>,
+    user_id: &str,
+    client_id: &str,
+    client_generation: i64,
+    scope_set_version: i64,
+    new_scopes: &[String],
+    assigned: &[String],
+    removed: &[String],
+) {
     client
         .update(
             "INSERT INTO sync_scope_state (scope_id, stream_generation)
@@ -861,41 +1089,25 @@ fn ensure_client_connect_state(
              WHERE rs.singleton = true
              ON CONFLICT (scope_id) DO NOTHING",
             None,
-            &[server_scopes.to_vec().into()],
+            &[new_scopes.to_vec().into()],
         )
         .unwrap_or_else(|err| pgrx::error!("persisting scope generation state: {}", err));
-    let (assigned, removed) = if client_was_new || generation_renewed {
-        (server_scopes.to_vec(), Vec::new())
-    } else {
-        (
-            server_scopes
-                .iter()
-                .filter(|scope| !prior_scopes.contains(scope))
-                .cloned()
-                .collect(),
-            prior_scopes
-                .iter()
-                .filter(|scope| !server_scopes.contains(scope))
-                .cloned()
-                .collect(),
-        )
-    };
     persist_scope_history(
         client,
         user_id,
-        &request.client_id,
+        client_id,
         client_generation,
         scope_set_version,
-        &assigned,
+        assigned,
         true,
     );
     persist_scope_history(
         client,
         user_id,
-        &request.client_id,
+        client_id,
         client_generation,
         scope_set_version,
-        &removed,
+        removed,
         false,
     );
     client
@@ -909,22 +1121,9 @@ fn ensure_client_connect_state(
              WHERE rs.singleton = true
              ON CONFLICT (user_id, client_id, bucket_id) DO NOTHING",
             None,
-            &[
-                user_id.into(),
-                request.client_id.as_str().into(),
-                server_scopes.to_vec().into(),
-            ],
+            &[user_id.into(), client_id.into(), new_scopes.to_vec().into()],
         )
         .unwrap_or_else(|err| pgrx::error!("persisting sync client checkpoints: {}", err));
-
-    Ok(EnsuredClientState {
-        state: ClientConnectState {
-            bucket_subs: server_scopes.to_vec(),
-            scope_set_version,
-            client_generation,
-        },
-        generation_renewed,
-    })
 }
 
 fn persist_scope_history(
@@ -953,7 +1152,11 @@ fn persist_scope_history(
                              WHERE granted.user_id = $1
                                AND granted.scope_id = scope.scope_id
                          ) THEN 'assignment_rule'
-                         ELSE 'shared' END,
+                         WHEN EXISTS (
+                             SELECT 1 FROM sync_shared_scopes shared
+                             WHERE shared.scope_id = scope.scope_id
+                         ) THEN 'shared'
+                         ELSE 'assignment_rule' END,
                     state.membership_generation, state.retention_generation
              FROM unnest($6::text[]) AS scope(scope_id)
              JOIN sync_scope_state state ON state.scope_id = scope.scope_id",

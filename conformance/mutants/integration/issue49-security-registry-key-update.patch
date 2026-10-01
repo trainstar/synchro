@@ -1,8 +1,32 @@
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+@@ -1751,10 +1751,7 @@
+ SET search_path = pg_catalog, synchro, pg_temp
+ AS $$
+ BEGIN
+-    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
+-        RAISE EXCEPTION 'registered primary key cannot change'
+-            USING ERRCODE = '23514';
+-    END IF;
++    -- Mutant: permit a registered primary-key value update.
+     RETURN NEW;
+ END;
+ $$;
+@@ -2567,7 +2564,7 @@
+ /* </end connected objects> */
+ 
+ /* <begin connected objects> */
+--- synchro-pg/src/lib.rs:2016
++-- synchro-pg/src/lib.rs:2013
+ -- finalize
+ 
+ DO $roles$
 diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
 --- a/extensions/synchro-pg/src/lib.rs
 +++ b/extensions/synchro-pg/src/lib.rs
-@@ -1693,10 +1693,7 @@ SECURITY DEFINER
- SET search_path = pg_catalog, synchro
+@@ -1780,10 +1780,7 @@
+ SET search_path = pg_catalog, synchro, pg_temp
  AS $$
  BEGIN
 -    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
@@ -13,23 +37,3 @@ diff --git a/extensions/synchro-pg/src/lib.rs b/extensions/synchro-pg/src/lib.rs
      RETURN NEW;
  END;
  $$;
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2.sql
-@@ -1665,10 +1665,7 @@ SECURITY DEFINER
- SET search_path = pg_catalog, synchro
- AS $$
- BEGIN
--    IF to_jsonb(OLD) -> TG_ARGV[0] IS DISTINCT FROM to_jsonb(NEW) -> TG_ARGV[0] THEN
--        RAISE EXCEPTION 'registered primary key cannot change'
--            USING ERRCODE = '23514';
--    END IF;
-+    -- Mutant: permit a registered primary-key value update.
-     RETURN NEW;
- END;
- $$;
-@@ -2462,3 +2459,3 @@
- /* <begin connected objects> */
---- synchro-pg/src/lib.rs:1930
-+-- synchro-pg/src/lib.rs:1927
- -- finalize

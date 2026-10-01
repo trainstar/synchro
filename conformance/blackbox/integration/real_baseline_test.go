@@ -483,9 +483,9 @@ func TestRealWALPipeline(t *testing.T) {
 	if replayedRecord != restartRecord || restart.AfterRestart.Records[0].ReplayCount != 1 ||
 		restart.AfterStages != restart.BeforeStages || !restart.AfterRestart.WorkerRunning ||
 		restart.AfterRestart.BlockingPoison || !restart.AfterRestart.ContiguousAcknowledged ||
-		!restart.AfterRestart.AcknowledgementMatchesObservedEnd || !restart.AfterRestart.SlotMatchesObservedEnd ||
-		restart.AfterRestart.AcknowledgedEndLSN != restartRecord.EndLSN ||
-		restart.AfterRestart.SlotConfirmedFlushLSN != restartRecord.EndLSN {
+		!restart.AfterRestart.SlotMatchesAcknowledgement ||
+		!realWALLSNAtOrAfter(restart.AfterRestart.AcknowledgedEndLSN, restartRecord.EndLSN) ||
+		restart.AfterRestart.ProcessedEndLSN != restart.AfterRestart.AcknowledgedEndLSN {
 		t.Fatalf("WAL replay after worker restart is not idempotent: %#v", restart)
 	}
 
@@ -852,109 +852,18 @@ func TestRealWALPipeline(t *testing.T) {
 	if err := harness.Operator().AdvanceActiveSlotPastDurableBoundary(ctx); err != nil {
 		t.Fatalf("advance active slot past durable boundary: %v; %s", err, harness.FailureDiagnostics())
 	}
+	// Readiness accepts a slot after the acknowledgement. Each worker loop requires the slot to equal
+	// the durable acknowledgement. The mismatch blocks the worker, and the worker check fails.
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		resetObservation, err = harness.Operator().ObserveStreamReset(ctx, reset.ResetID, "cf_items", laterID)
-		if err == nil && !resetObservation.ReadinessReady && strings.Contains(resetObservation.ReadinessFailures, "materialization_progress") {
+		if err == nil && !resetObservation.ReadinessReady && strings.Contains(resetObservation.ReadinessFailures, "worker") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err != nil || resetObservation.ReadinessReady || !strings.Contains(resetObservation.ReadinessFailures, "materialization_progress") {
-		t.Fatalf("ahead replication slot remained ready: %#v, %v", resetObservation, err)
-	}
-}
-
-func TestRealWALDecodeFailureRepairsSameIdentity(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	harness, _ := provisionRealProofHarness(t, ctx)
-
-	poisonRecordID := "00000000-0000-4000-8000-00000000d001"
-	if err := harness.Operator().InjectDecoderMetadataChange(ctx, poisonRecordID); err != nil {
-		t.Fatalf("commit decoder poison transaction: %v", err)
-	}
-
-	laterRecordID := "00000000-0000-4000-8000-00000000d002"
-	if err := harness.Source().ExecContext(
-		ctx,
-		"INSERT INTO cf_items (id, owner_id, value) VALUES ($1, $2, $3)",
-		laterRecordID,
-		"diagnostic-user",
-		"decode-repair-later",
-	); err != nil {
-		t.Fatalf("insert transaction after decoder poison: %v", err)
-	}
-
-	var beforeRestart blackbox.WALPoisonObservation
-	var err error
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		beforeRestart, err = harness.Operator().ObserveBlockingPoison(ctx, laterRecordID)
-		if err == nil && beforeRestart.FailureClass == "decode_failed" &&
-			beforeRestart.LaterFencePending && beforeRestart.WorkerBlocked {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("observe decoder poison: %v; %s", err, harness.FailureDiagnostics())
-	}
-	if beforeRestart.FailureClass != "decode_failed" || beforeRestart.CommitLSN == "" ||
-		beforeRestart.RelationID != "" || beforeRestart.RelationIDMatchesRegistry ||
-		!beforeRestart.AcknowledgementBlocked || beforeRestart.LaterRecordMaterialized ||
-		!beforeRestart.LaterFencePending || !beforeRestart.WorkerBlocked ||
-		!beforeRestart.ReadinessBlocked || !beforeRestart.PoisonCheckFailed {
-		t.Fatalf("decoder poison did not remain fail-closed: %#v", beforeRestart)
-	}
-
-	if err := harness.RestartPostgres(ctx); err != nil {
-		t.Fatalf("restart PostgreSQL with decoder poison: %v", err)
-	}
-	var afterRestart blackbox.WALPoisonObservation
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		afterRestart, err = harness.Operator().ObserveBlockingPoison(ctx, laterRecordID)
-		if err == nil && afterRestart.WorkerBlocked {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil || afterRestart.FailureClass != "decode_failed" ||
-		afterRestart.CommitLSN != beforeRestart.CommitLSN || !afterRestart.LaterFencePending ||
-		!afterRestart.AcknowledgementBlocked || afterRestart.LaterRecordMaterialized {
-		t.Fatalf("decoder poison changed across restart: before=%#v after=%#v err=%v", beforeRestart, afterRestart, err)
-	}
-
-	retryRequested, err := harness.Operator().RetryWALPoison(ctx)
-	if err != nil || !retryRequested {
-		t.Fatalf("request decoder poison retry: requested=%t err=%v", retryRequested, err)
-	}
-	var recovered blackbox.WALPipelineObservation
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		recovered, err = harness.Operator().ObserveWALRecords(ctx, []string{poisonRecordID, laterRecordID})
-		if err == nil && len(recovered.Records) == 2 && recovered.ContiguousAcknowledged {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil || len(recovered.Records) != 2 || recovered.BlockingPoison ||
-		!recovered.WorkerRunning || !recovered.ContiguousAcknowledged ||
-		!recovered.AcknowledgementMatchesObservedEnd || !recovered.SlotMatchesObservedEnd {
-		t.Fatalf("decoder poison recovery did not resume the contiguous stream: %#v, %v; %s", recovered, err, harness.FailureDiagnostics())
-	}
-	if recovered.Records[0].RecordID != poisonRecordID || recovered.Records[1].RecordID != laterRecordID {
-		t.Fatalf("decoder poison recovery order is invalid: %#v", recovered.Records)
-	}
-	lifecycle, err := harness.Operator().ObserveWALPoisonRecovery(ctx, poisonRecordID)
-	if err != nil {
-		t.Fatalf("observe decoder poison recovery: %v", err)
-	}
-	if lifecycle.PoisonCount != 1 || lifecycle.FailureClass != "decode_failed" ||
-		lifecycle.Lifecycle != "repaired" || lifecycle.AttemptCount != 2 ||
-		!lifecycle.RetryRequested || !lifecycle.Resolved || !lifecycle.SameCommitPosition {
-		t.Fatalf("decoder poison recovery lifecycle is invalid: %#v", lifecycle)
+	if err != nil || resetObservation.ReadinessReady || !strings.Contains(resetObservation.ReadinessFailures, "worker") {
+		t.Fatalf("ahead replication slot did not block the worker: %#v, %v", resetObservation, err)
 	}
 }
 

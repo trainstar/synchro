@@ -9,8 +9,8 @@ import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
 import com.trainstar.synchro.Operation
-import com.trainstar.synchro.PendingMutationInspection
-import com.trainstar.synchro.RejectedMutationInspection
+import com.trainstar.synchro.RetainedMutationInspection
+import com.trainstar.synchro.RetainedRejectionInspection
 import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SynchroClient
 import com.trainstar.synchro.SynchroConfig
@@ -325,7 +325,7 @@ private class ClientSession(private val context: Context) : Closeable {
         require(authoredColumns.size == authoredColumns.toSet().size) { "authored columns repeat" }
         val client = requireClient()
         val retainedMutationIDs = if (operation == "delete") {
-            client.inspectRetainedMutations().mapTo(mutableSetOf()) { it.mutationID }
+            client.inspectRetainedMutationRecords().mapTo(mutableSetOf()) { it.mutationID }
         } else {
             emptySet()
         }
@@ -370,7 +370,7 @@ private class ClientSession(private val context: Context) : Closeable {
             is Float, is Double -> (primaryKey as Number).toDouble().toString()
             else -> throw IllegalArgumentException("primary key record identity is unsupported")
         }
-        val retainedDelete = operation == "delete" && rowsAffected == 0 && client.inspectRetainedMutations().any {
+        val retainedDelete = operation == "delete" && rowsAffected == 0 && client.inspectRetainedMutationRecords().any {
             it.mutationID !in retainedMutationIDs && it.tableName == tableName && it.recordID == recordID && it.operation == Operation.DELETE
         }
         check(rowsAffected == 1 || retainedDelete) { "local action affected an unexpected row count" }
@@ -471,12 +471,12 @@ private class ClientSession(private val context: Context) : Closeable {
         val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
         val durableStateFingerprint = durableStateFingerprint()
         val retainedMutations = if (retainedMutationCount <= MAXIMUM_RECORDS) {
-            client.inspectRetainedMutations()
+            client.inspectRetainedMutationRecords()
         } else {
             null
         }
         val rejectedMutations = if (capture.rejectedMutationCount <= MAXIMUM_RECORDS) {
-            client.inspectRejectedMutations()
+            client.inspectRejectedMutationRecords()
         } else {
             null
         }
@@ -485,42 +485,42 @@ private class ClientSession(private val context: Context) : Closeable {
             ?.map { it.tableName }
             ?.toSet()
             ?: emptySet()
-        val rows = buildJsonArray {
-            if (capture.applicationRowCount <= MAXIMUM_ROWS) {
-                selectors.forEach { value ->
-                    val selector = value.requireObject("row selector")
-                    selector.requireOnly("table_name", "primary_key_field", "primary_key")
-                    val table = selector.requiredIdentifier("table_name")
-                    val field = selector.requiredIdentifier("primary_key_field")
-                    require(!isReservedTable(table)) { "reserved table is unavailable" }
-                    if (table in scopedTables) return@forEach
-                    val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
-                    require(primaryKey != null) { "primary key is null" }
-                    val selected = try {
-                        client.query(
-                            "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
-                            arrayOf(primaryKey),
-                        )
-                    } catch (_: Throwable) {
-                        throw CaptureQueryException()
-                    }
-                    if (selected.size > 1) throw CaptureCardinalityException()
-                    selected.firstOrNull()?.let { add(normalizeRow(it)) }
+        val capturedRows = mutableListOf<Map<String, Any?>>()
+        if (capture.applicationRowCount <= MAXIMUM_ROWS) {
+            selectors.forEach { value ->
+                val selector = value.requireObject("row selector")
+                selector.requireOnly("table_name", "primary_key_field", "primary_key")
+                val table = selector.requiredIdentifier("table_name")
+                val field = selector.requiredIdentifier("primary_key_field")
+                require(!isReservedTable(table)) { "reserved table is unavailable" }
+                if (table in scopedTables) return@forEach
+                val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
+                require(primaryKey != null) { "primary key is null" }
+                val selected = try {
+                    client.query(
+                        "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
+                        arrayOf(primaryKey),
+                    )
+                } catch (_: Throwable) {
+                    throw CaptureQueryException()
                 }
-                scopedTables.sorted().forEach { table ->
-                    require(!isReservedTable(table)) { "reserved table is unavailable" }
-                    val selected = try {
-                        client.query("SELECT * FROM ${quoteIdentifier(table)}")
-                    } catch (_: Throwable) {
-                        throw CaptureQueryException()
-                    }
-                    selected.forEach { add(normalizeRow(it)) }
+                if (selected.size > 1) throw CaptureCardinalityException()
+                selected.firstOrNull()?.let { capturedRows.add(it) }
+            }
+            scopedTables.sorted().forEach { table ->
+                require(!isReservedTable(table)) { "reserved table is unavailable" }
+                val selected = try {
+                    client.query("SELECT * FROM ${quoteIdentifier(table)}")
+                } catch (_: Throwable) {
+                    throw CaptureQueryException()
                 }
+                capturedRows.addAll(selected)
             }
         }
-        require(rows.size <= MAXIMUM_ROWS) { "too many captured rows" }
+        require(capturedRows.size <= MAXIMUM_ROWS) { "too many captured rows" }
         return stateResult(
-            applicationRows = rows,
+            applicationRows = buildJsonArray { capturedRows.forEach { add(normalizeRow(it)) } },
+            applicationRowStorageClasses = buildJsonArray { capturedRows.forEach { add(storageClasses(it)) } },
             captureState = capture,
             retainedMutations = retainedMutations,
             retainedMutationCount = retainedMutationCount,
@@ -532,10 +532,11 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun stateResult(
         rowsAffected: Int? = null,
         applicationRows: JsonArray? = null,
+        applicationRowStorageClasses: JsonArray? = null,
         captureState: ClientStateCaptureInspection? = null,
-        retainedMutations: List<PendingMutationInspection>? = null,
+        retainedMutations: List<RetainedMutationInspection>? = null,
         retainedMutationCount: Int? = null,
-        rejectedMutations: List<RejectedMutationInspection>? = null,
+        rejectedMutations: List<RetainedRejectionInspection>? = null,
         durableStateFingerprint: String? = null,
     ): JsonObject {
         val client = requireClient()
@@ -544,12 +545,12 @@ private class ClientSession(private val context: Context) : Closeable {
         val retainedCount = retainedMutationCount ?: client.retainedMutationCount()
         val pending = retainedMutations ?: when {
             retainedCount == 0 -> emptyList()
-            retainedCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutations()
+            retainedCount <= MAXIMUM_RECORDS -> client.inspectRetainedMutationRecords()
             else -> null
         }
         val rejected = rejectedMutations ?: when {
             capture.rejectedMutationCount == 0 -> emptyList()
-            capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutations()
+            capture.rejectedMutationCount <= MAXIMUM_RECORDS -> client.inspectRejectedMutationRecords()
             else -> null
         }
         val scopeStates = capture.scopeStates.takeUnless { capture.scopeStatesTruncated }
@@ -562,7 +563,9 @@ private class ClientSession(private val context: Context) : Closeable {
         }
         val rebuildAttempts = capture.rebuildAttempts.takeUnless { capture.rebuildAttemptsTruncated }
         val rebuildReceiptProofs = capture.rebuildReceipts.takeUnless { capture.rebuildReceiptsTruncated }
-        require(pending?.all { it.authoredFields.size <= MAXIMUM_FIELDS } != false) { "inspection fields are too large" }
+        require(pending?.all { it !is RetainedMutationInspection.Current || it.mutation.authoredFields.size <= MAXIMUM_FIELDS } != false) {
+            "inspection fields are too large"
+        }
         return buildJsonObject {
             put("status", client.getSyncStatus().state.wireName)
             rowsAffected?.let { put("rows_affected", it) }
@@ -581,6 +584,7 @@ private class ClientSession(private val context: Context) : Closeable {
             put("rebuild_receipt_count", capture.rebuildReceiptCount)
             put("durable_state_fingerprint", stateFingerprint)
             if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRows?.let { put("application_rows", it) }
+            if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRowStorageClasses?.let { put("application_row_storage_classes", it) }
             pending?.let { put("retained_mutations", normalizePending(it)) }
             rejected?.let { put("rejected_mutations", normalizeRejected(it)) }
             capture.schema?.let { put("schema", normalizeSchema(it)) }
@@ -626,13 +630,12 @@ private class ClientSession(private val context: Context) : Closeable {
         return buildJsonObject {
             put("observations", buildJsonArray {
                 snapshot.observations.forEach { value ->
-                    val (derivedErrorCode, retryable) = transportFailureFacts(value.statusCode, value.operationClass)
                     add(buildJsonObject {
                         put("sequence", value.sequence)
                         put("operation_class", value.operationClass.name.lowercase(Locale.US))
                         put("status_code", value.statusCode)
-                        put("error_code", (value.errorCode ?: derivedErrorCode)?.let(::JsonPrimitive) ?: JsonNull)
-                        put("retryable", retryable)
+                        put("error_code", value.errorCode?.let(::JsonPrimitive) ?: JsonNull)
+                        put("retryable", value.retryable?.let(::JsonPrimitive) ?: JsonNull)
                         put("duration_nanoseconds", value.durationNanoseconds)
                         value.cursorFingerprints?.let { fingerprints ->
                             put("cursor_fingerprints", buildJsonArray {
@@ -651,25 +654,6 @@ private class ClientSession(private val context: Context) : Closeable {
             put("overflowed", snapshot.overflowed)
             put("sequence_checkpoint", snapshot.sequenceCheckpoint)
         }
-    }
-
-    private fun transportFailureFacts(
-        statusCode: Int,
-        operationClass: TransportOperationClass,
-    ): Pair<String?, Boolean> = when {
-        statusCode == 0 -> null to true
-        statusCode in 200..299 -> null to false
-        statusCode == 400 -> "invalid_request" to false
-        statusCode == 401 -> "auth_required" to false
-        statusCode == 409 && operationClass == TransportOperationClass.REBUILD -> "rebuild_restart_required" to false
-        statusCode == 409 && operationClass == TransportOperationClass.PUSH -> "idempotency_conflict" to false
-        statusCode == 409 -> "client_generation_expired" to false
-        statusCode == 422 -> "schema_mismatch" to false
-        statusCode == 426 -> "upgrade_required" to false
-        statusCode == 429 -> "retry_later" to true
-        statusCode == 500 -> "sync_integrity_failure" to false
-        statusCode == 503 -> "capture_pending" to true
-        else -> "invalid_response" to false
     }
 
     private suspend fun dispatchMethod(client: SynchroClient, method: String) {
@@ -692,8 +676,13 @@ private class ClientSession(private val context: Context) : Closeable {
         }
     }
 
-    private fun normalizePending(values: List<PendingMutationInspection>): JsonArray = buildJsonArray {
-        values.sortedBy { it.localOrder }.forEach { value ->
+    // The runner wire has only the current record shape. A legacy record fails
+    // the capture instead of reaching the harness with invented bindings.
+    private fun normalizePending(values: List<RetainedMutationInspection>): JsonArray = buildJsonArray {
+        values.map { value ->
+            (value as? RetainedMutationInspection.Current)?.mutation
+                ?: throw IllegalStateException("legacy retained mutation is outside the runner wire")
+        }.sortedBy { it.localOrder }.forEach { value ->
             add(buildJsonObject {
                 put("mutation_id", value.mutationID)
                 put("local_order", value.localOrder)
@@ -725,8 +714,12 @@ private class ClientSession(private val context: Context) : Closeable {
         }
     }
 
-    private fun normalizeRejected(values: List<RejectedMutationInspection>): JsonArray = buildJsonArray {
-        values.sortedBy { it.mutationID }.forEach { value ->
+    // A legacy rejection has no exact mutation or rejection, so it fails the capture.
+    private fun normalizeRejected(values: List<RetainedRejectionInspection>): JsonArray = buildJsonArray {
+        values.map { value ->
+            (value as? RetainedRejectionInspection.Current)?.rejection
+                ?: throw IllegalStateException("legacy rejected mutation is outside the runner wire")
+        }.sortedBy { it.mutationID }.forEach { value ->
             add(buildJsonObject {
                 put("mutation_id", value.mutationID)
                 put("table_name", value.tableName)
@@ -931,6 +924,22 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun normalizeSchema(value: SchemaRef): JsonObject = buildJsonObject {
         put("version", value.version)
         put("hash", value.hash)
+    }
+
+    // The JSON value of a blob is base64url text, and a real with an integral
+    // value can read as an integer, so the SQLite storage class is reported
+    // apart. The query maps each cursor storage class to one Kotlin type.
+    private fun storageClasses(row: Map<String, Any?>): JsonObject = buildJsonObject {
+        row.toSortedMap().forEach { (key, value) ->
+            put(key, when (value) {
+                null -> "null"
+                is Long -> "integer"
+                is Double -> "real"
+                is String -> "text"
+                is ByteArray -> "blob"
+                else -> throw IllegalArgumentException("captured value has no SQLite storage class")
+            })
+        }
     }
 
     private fun normalizeRow(row: Map<String, Any?>): JsonObject {

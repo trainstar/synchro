@@ -28,7 +28,6 @@ type NativeArtifactConfig struct {
 	Harness          *Harness
 	SeedToolPath     string
 	StagingDirectory string
-	WaitTimeout      time.Duration
 }
 
 // NativeArtifact stages the one closed portable seed through the production tool.
@@ -80,17 +79,11 @@ func NewNativeArtifact(config NativeArtifactConfig) (*NativeArtifact, error) {
 	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("native artifact staging directory must be an existing private directory")
 	}
-	if config.WaitTimeout == 0 {
-		config.WaitTimeout = nativeControllerWaitTimeout
-	}
-	if config.WaitTimeout <= 0 {
-		return nil, errors.New("native artifact wait timeout is invalid")
-	}
 	return &NativeArtifact{
 		harness:          config.Harness,
 		seedToolPath:     tool,
 		stagingDirectory: filepath.Clean(directory),
-		waitTimeout:      config.WaitTimeout,
+		waitTimeout:      nativeControllerWaitTimeout,
 		staged:           make(map[string]*nativeStagedArtifact),
 	}, nil
 }

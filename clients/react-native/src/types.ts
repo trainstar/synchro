@@ -186,7 +186,8 @@ export type MutationRejectionCode =
   | 'schema_incompatible'
   | 'policy_rejected'
   | 'validation_failed'
-  | 'table_not_synced';
+  | 'table_not_synced'
+  | 'atomic_batch_rejected';
 
 export interface SchemaRef {
   version: number;
@@ -199,6 +200,7 @@ export interface AuthoredMutationField {
   value: JSONValue;
 }
 
+/** A retained mutation with its complete ledger binding and authored values. */
 export interface PendingMutationInspection {
   mutationID: string;
   localOrder: number;
@@ -220,6 +222,29 @@ export interface PendingMutationInspection {
   authoredFields: AuthoredMutationField[];
 }
 
+/**
+ * A retained mutation that a queue from before the mutation ledger imported.
+ * It has only the fields that the old queue stored.
+ */
+export interface LegacyMutationInspection {
+  representation: 'legacy';
+  mutationID: string;
+  localOrder: number;
+  tableName: string;
+  recordID: string;
+  operation: MutationOperation;
+  baseVersion: string | null;
+  clientVersion: string;
+  status: LocalMutationStatus;
+  sourceKind: string;
+}
+
+/** One retained mutation in its stored representation. */
+export type RetainedMutationInspection =
+  | (PendingMutationInspection & { representation: 'current' })
+  | LegacyMutationInspection;
+
+/** A retained rejection with its exact mutation and rejection JSON. */
 export interface RejectedMutationInspection {
   mutationID: string;
   tableName: string;
@@ -234,6 +259,29 @@ export interface RejectedMutationInspection {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * A retained rejection that a database from before the mutation ledger stored.
+ * It has only the fields that the old rejection table stored.
+ */
+export interface LegacyRejectionInspection {
+  representation: 'legacy';
+  mutationID: string;
+  tableName: string;
+  recordID: string;
+  status: MutationStatus;
+  code: MutationRejectionCode;
+  message: string | null;
+  serverRowJSON: string | null;
+  serverVersion: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One retained rejection in its stored representation. */
+export type RetainedRejectionInspection =
+  | (RejectedMutationInspection & { representation: 'current' })
+  | LegacyRejectionInspection;
 
 export interface ScopeStateInspection {
   scopeID: string;

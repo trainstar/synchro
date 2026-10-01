@@ -30,7 +30,11 @@ export type {
   SchemaRef,
   AuthoredMutationField,
   PendingMutationInspection,
+  LegacyMutationInspection,
+  RetainedMutationInspection,
   RejectedMutationInspection,
+  LegacyRejectionInspection,
+  RetainedRejectionInspection,
   SchemaAction,
   SyncSchemaEvent,
   SyncMutationEvent,
@@ -71,6 +75,8 @@ export {
   AlreadyStartedError,
   NotStartedError,
   TransactionTimeoutError,
+  AtomicGroupInvalidError,
+  ATOMIC_GROUP_INVALID_REASONS,
   NATIVE_ERROR_CODES,
   mapNativeError,
 } from './errors';
@@ -78,5 +84,6 @@ export {
 export type {
   NativeErrorCode,
   SchemaUnsupportedReason,
+  AtomicGroupInvalidReason,
   PushRejectedMutation,
 } from './errors';

@@ -19,6 +19,7 @@ import {
   AlreadyStartedError,
   NotStartedError,
   TransactionTimeoutError,
+  AtomicGroupInvalidError,
   parseSyncFailure,
 } from '../src/errors';
 
@@ -176,6 +177,27 @@ describe('mapNativeError', () => {
     expect(transition).toBeInstanceOf(InvalidStateTransitionError);
     expect(transition).toMatchObject({ from: 'ready', to: 'connecting' });
   });
+
+  it.each([
+    'deleteFollowedByWrite',
+    'tooManyMutations',
+    'mutationTooLarge',
+    'requestTooLarge',
+  ] as const)('maps atomic_group_invalid with reason %s', (reason) => {
+    const err = mapNativeError({ code: 'atomic_group_invalid', userInfo: { reason } });
+
+    expect(err).toBeInstanceOf(AtomicGroupInvalidError);
+    expect(err).toMatchObject({ code: 'atomic_group_invalid', reason });
+  });
+
+  it.each([undefined, 'DELETE_FOLLOWED_BY_WRITE', 'unknownReason'])(
+    'rejects atomic_group_invalid with reason %s as an invalid response',
+    (reason) => {
+      const err = mapNativeError({ code: 'atomic_group_invalid', userInfo: { reason } });
+
+      expect(err).toBeInstanceOf(InvalidResponseError);
+    }
+  );
 
   it('maps DATABASE_ERROR using userInfo.message (no double prefix)', () => {
     const err = mapNativeError({

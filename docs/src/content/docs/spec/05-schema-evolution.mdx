@@ -109,7 +109,8 @@ only client-visible fields. Server-only physical columns are absent from the
 manifest, pull rows, push rows, rebuild rows, and portable seeds. Every synced
 field has one immutable `field_id`, one canonical portable type, nullability,
 and writability. The primary-key and server-owned lifecycle fields are included
-in the projection and are not writable.
+in the projection and are not writable. A database-generated field is not
+writable. A `BY DEFAULT` identity field is writable.
 
 ### Primary Key And Replica Identity
 
@@ -132,6 +133,7 @@ The registry rejects all of the following:
 - a partial key
 - a non-primary unique index offered as a key
 - a primary-key column type that is not a built-in key type
+- a database-generated primary-key column for a registration with push policy `enabled`
 - a replica identity other than `DEFAULT` backed by the validated primary key
 
 The primary-key field ID and its declared portable type define every typed row
@@ -173,6 +175,15 @@ reevaluate. The impact contract covers old and new dependency state. A
 revocation, deletion, reassignment, or parent change that can remove membership
 must identify removed as well as added members.
 
+A membership function that reads sibling rows from its own projection needs a
+self-impact declaration. The dependency and the target of that declaration are
+the same relation. Its impact function returns every sibling row whose
+membership the old or new row image can change. The declared fields cover every
+own-projection field that the membership function reads. Without a
+self-impact declaration, a membership function reads only its supplied row from
+its own projection. Catalog dependencies do not show which rows a read selects,
+so registration cannot detect an undeclared sibling read.
+
 Membership and impact functions are schema-qualified `LANGUAGE SQL`, `STABLE`,
 and `SECURITY INVOKER`. Impact functions receive captured old
 and new dependency images. Membership functions can access only declared,
@@ -181,6 +192,11 @@ capture-only dependencies in the worker's current materialization transaction.
 They never read live application relations. They cannot depend on volatile
 values, session identity, session settings, temporary objects, sequence state,
 random values, wall-clock time, or dynamic SQL.
+Registration rejects a forbidden dependence that the catalog records, such as a
+call to an application function. PostgreSQL records no catalog dependency on a
+built-in function, so registration cannot detect a call to `random()`,
+`clock_timestamp()`, or `current_setting()`. A function with such a forbidden
+dependence is unsupported even when registration accepts it.
 
 The validator verifies each exact signature and return type, every declared
 dependency, required impact function, privilege, bound, and referenced field.
@@ -359,7 +375,8 @@ server never infers the parent from numeric version order alone.
 from the parent manifest. Class 1 does not mint a manifest. The initial record
 uses `initial`. `compatibility_floor` is the earliest manifest version reachable
 through the current contiguous sequence of Class 2 transitions. It equals the
-manifest's own version after an initial, Class 3, or Class 4 boundary. The
+manifest's own version after an initial, Class 3, or Class 4 boundary. A
+Class 2 floor never names a version newer than its parent manifest. The
 immutable manifest history resolves that version to its exact hash. The server
 evaluates the complete known lineage between a client reference and the current
 reference. It never decides compatibility from `compatibility_floor` or version
@@ -531,11 +548,23 @@ compatible Class 2 transitions for connect to return `replace`.
 Class 2 changes include these changes when they do not require historical
 materialization:
 
-- add a nullable field with no required backfill
+- add a nullable field whose existing source values are all SQL `NULL`
 - add an empty table
 - add a declared local index
 - change `nullable` from `false` to `true` or `writable` from `false` to `true`
   while every earlier field and table contract remains valid
+- widen a `decimal` field so that its scale and its integer digits
+  (`precision` minus `scale`) do not decrease
+
+The server establishes historical nullness from the actual source rows when the
+registry generation becomes validated, under the registry and source write
+gates. Nullable metadata and a column default do not establish it. The server
+records the result once with that generation, bound to its stored parent
+generation and target definition. Bootstrap admission and manifest publication
+read that recorded result. A later source write cannot change the class of an
+admitted generation. A registry generation without a recorded result, such as a
+pending generation from an earlier release, requires verified bootstrap and is
+classified as requiring historical values.
 
 ### Class 3: Compatible Rebuild-Requiring Change
 
@@ -549,7 +578,9 @@ intersection returns `replace` and forbids `affected_scopes`.
 Class 3 changes include:
 
 - add a table that already has authoritative rows
-- add a field whose historical values must be materialized
+- add a field whose historical values must be materialized, including a
+  re-exposed field with a non-null value and an added field with a populated
+  default
 - change `single_scope` to `multi_scope` or `multi_scope` to `single_scope`
 - change membership materialization in a way that changes local provenance or
   requires a new local materialization contract
@@ -585,6 +616,7 @@ Class 4 changes include:
 
 - remove or rename a table or field
 - change a field's portable type
+- narrow a `decimal` field's scale or integer digits
 - tighten a field from nullable to non-null
 - remove writability from a field that earlier manifests accepted as writable
 - change a primary-key field, primary-key type, or primary-key identity
@@ -891,7 +923,9 @@ The client performs these transitions in order:
    accepted write whose fence is satisfied by exact WAL materialization or
    activated verified reset-baseline coverage and cannot overwrite unresolved
    local intent. Rebuild pruning preserves the application-visible local row for
-   such intent outside the rebuilt server-provenance layer.
+   such intent outside the rebuilt server-provenance layer. When the target
+   shape cannot hold that local row, the rebuild installs the server row, and
+   the intent stays unchanged and inspectable.
 9. Clear the migration journal only after the required local DDL, metadata, and
    any required rebuild state, provenance, checksums, and final cursors are
    durable.

@@ -32,12 +32,13 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
         );
     }
 
+    // Parser errors can quote submitted values, so the response keeps only the class.
     let request: PullRequest = match serde_json::from_value(p_request.0) {
         Ok(request) => request,
-        Err(err) => {
+        Err(_) => {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
-                format!("invalid pull request: {err}"),
+                "invalid pull request",
                 false,
             );
         }
@@ -104,9 +105,7 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             );
         }
 
-        let server_scopes = client_state.bucket_subs;
-        let scope_set_version = client_state.scope_set_version;
-        if request.scope_set_version > scope_set_version {
+        if request.scope_set_version > client_state.scope_set_version {
             return protocol_error_response(
                 ProtocolErrorCode::InvalidRequest,
                 "scope_set_version is ahead of the server",
@@ -126,6 +125,12 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
                 false,
             );
         }
+        let server_scopes = crate::client::load_authoritative_scopes(client, p_user_id);
+        let scope_set_version = crate::client::next_scope_set_version(
+            &client_state.bucket_subs,
+            client_state.scope_set_version,
+            &server_scopes,
+        );
         let scope_updates = build_scope_delta(&request.scopes, &server_scopes);
         let active_scopes_before_update = request.scopes.keys().cloned().collect();
         let active_scopes: Vec<String> = server_scopes
@@ -181,6 +186,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
 
             if let Err(err) = response.validate_for_active_scopes(&active_scopes_before_update) {
                 pgrx::error!("invalid pull response: {}", err);
+            }
+
+            if server_scopes != client_state.bucket_subs {
+                crate::client::persist_pull_scope_transition(
+                    client,
+                    p_user_id,
+                    &request.client_id,
+                    client_state.client_generation,
+                    &client_state.bucket_subs,
+                    &server_scopes,
+                    scope_set_version,
+                );
             }
 
             return pgrx::JsonB(serde_json::to_value(response).unwrap());
@@ -302,6 +319,18 @@ fn synchro_pull_contract(p_user_id: &str, p_request: pgrx::JsonB) -> pgrx::JsonB
             &boundary.stream_generation,
         ) {
             pgrx::error!("acknowledging scope positions: {}", error);
+        }
+
+        if server_scopes != client_state.bucket_subs {
+            crate::client::persist_pull_scope_transition(
+                client,
+                p_user_id,
+                &request.client_id,
+                client_state.client_generation,
+                &client_state.bucket_subs,
+                &server_scopes,
+                scope_set_version,
+            );
         }
 
         pgrx::JsonB(serde_json::to_value(response).unwrap())
@@ -797,16 +826,33 @@ fn query_scope_candidates(
                                                                AND projection.image_kind = sync_changelog.projection_image
                                                          )
                                                          OR sync_changelog.projection_image IS NULL
-                                                            AND EXISTS (
-                                                                SELECT 1
-                                                                FROM sync_captured_rows captured
-                                                                WHERE captured.source_stream_generation = sync_changelog.stream_generation
-                                                                  AND captured.source_commit_lsn = sync_changelog.commit_lsn
-                                                                  AND captured.source_event_ordinal = sync_changelog.event_ordinal
-                                                                  AND captured.relation_id = sync_changelog.relation_id
-                                                                  AND captured.record_id = sync_changelog.record_id
-                                                                  AND captured.row_version = sync_changelog.row_version
-                                                                  AND NOT captured.deleted
+                                                            AND (
+                                                                EXISTS (
+                                                                    SELECT 1
+                                                                    FROM sync_captured_rows captured
+                                                                    WHERE captured.source_stream_generation = sync_changelog.stream_generation
+                                                                      AND captured.source_commit_lsn = sync_changelog.commit_lsn
+                                                                      AND captured.source_event_ordinal = sync_changelog.event_ordinal
+                                                                      AND captured.relation_id = sync_changelog.relation_id
+                                                                      AND captured.record_id = sync_changelog.record_id
+                                                                      AND captured.row_version = sync_changelog.row_version
+                                                                      AND NOT captured.deleted
+                                                                )
+                                                                -- A dependency change that removes a live row from a
+                                                                -- scope has no row event at this position. Its evidence
+                                                                -- is the live reevaluation image at the same position.
+                                                                OR EXISTS (
+                                                                    SELECT 1
+                                                                    FROM sync_captured_projections projection
+                                                                    WHERE projection.stream_generation = sync_changelog.stream_generation
+                                                                      AND projection.commit_lsn = sync_changelog.commit_lsn
+                                                                      AND projection.event_ordinal = sync_changelog.event_ordinal
+                                                                      AND projection.relation_id = sync_changelog.relation_id
+                                                                      AND projection.record_id = sync_changelog.record_id
+                                                                      AND projection.row_version = sync_changelog.row_version
+                                                                      AND projection.image_kind = 'after'
+                                                                      AND NOT projection.deleted
+                                                                )
                                                             )
                                                      )
                                               )
@@ -1302,7 +1348,7 @@ pub(crate) fn hydrate_records(
         let data_str: String = row
             .get_by_name::<String, &str>("data")
             .map_err(|error| format!("reading hydrated row data: {error}"))?
-            .ok_or_else(|| format!("row {table_name}.{id} has no hydrated data"))?;
+            .ok_or_else(|| format!("hydrated {table_name} row has no data"))?;
         let updated_at: Option<String> = row
             .get_by_name::<String, &str>("updated_at")
             .map_err(|error| format!("reading hydrated update time: {error}"))?;
@@ -1313,15 +1359,15 @@ pub(crate) fn hydrate_records(
             .get_by_name::<String, &str>("row_version")
             .map_err(|error| format!("reading hydrated row version: {error}"))?
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("row {table_name}.{id} has no server version"))?;
+            .ok_or_else(|| format!("hydrated {table_name} row has no server version"))?;
 
         let mut data: serde_json::Value = serde_json::from_str(&data_str)
-            .map_err(|error| format!("row {table_name}.{id} is invalid JSON: {error}"))?;
+            .map_err(|_| format!("hydrated {table_name} row is invalid JSON"))?;
         canonicalize_synced_row_data(table_reg, &mut data)
-            .map_err(|error| format!("row {table_name}.{id} is not canonical: {error}"))?;
+            .map_err(|_| format!("hydrated {table_name} row is not canonical"))?;
         let digest =
             synced_row_digest_with_schema_hash(table_reg, &data, &id, &row_version, schema_hash)
-                .map_err(|error| format!("row {table_name}.{id} digest failed: {error}"))?;
+                .map_err(|_| format!("hydrated {table_name} row digest failed"))?;
         let row_checksum = ChecksumObject::new(digest);
 
         let mut record = serde_json::json!({
@@ -1374,10 +1420,14 @@ pub(crate) fn synced_row_projection_sql(table_reg: &TableRegistration, row_alias
                 expression
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
 
-    format!("jsonb_build_object({pairs})")
+    // PostgreSQL limits one call to FUNC_MAX_ARGS (100) arguments, so each call takes at most 50 pairs.
+    let objects = pairs
+        .chunks(50)
+        .map(|chunk| format!("jsonb_build_object({})", chunk.join(", ")))
+        .collect::<Vec<_>>();
+    format!("({})", objects.join(" || "))
 }
 
 pub(crate) fn compute_bucket_checksums(

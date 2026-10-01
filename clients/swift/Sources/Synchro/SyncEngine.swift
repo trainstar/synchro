@@ -963,18 +963,7 @@ final class SyncEngine: @unchecked Sendable {
                 lifecycleGeneration: lifecycleGeneration
             )
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            if !(try scopeIDsNeedingRebuild()).isEmpty {
-                try transition(to: .rebuilding, lifecycleGeneration: lifecycleGeneration)
-                try await rebuildAssignedScopesNeedingCursor()
-                try schemaManager.finishAppliedMigrationIfPossible()
-                try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            }
-            try transition(to: .pulling, lifecycleGeneration: lifecycleGeneration)
-            try await runPullLoop(lifecycleGeneration: lifecycleGeneration)
-            if getSyncStatus() == .rebuilding {
-                try schemaManager.finishAppliedMigrationIfPossible()
-            }
-            try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
 
         case .pulling:
             try await runPullLoop(
@@ -985,20 +974,19 @@ final class SyncEngine: @unchecked Sendable {
                 try schemaManager.finishAppliedMigrationIfPossible()
             }
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            // The replayed pull completed the incremental step. The cycle
+            // continues only for work that must precede another pull.
+            if try changeTracker.hasPendingChanges() || !(try scopeIDsNeedingRebuild()).isEmpty {
+                try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
+            }
 
         case .rebuilding:
             let requestBody = Data(backoff.workIdentity.utf8)
             let request = try decodeBackoffRequest(RebuildRequest.self, body: requestBody)
             try await rebuildScope(scopeID: request.scope, replayRequestBody: requestBody)
-            try await rebuildAssignedScopesNeedingCursor()
             try schemaManager.finishAppliedMigrationIfPossible()
             try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
-            try transition(to: .pulling, lifecycleGeneration: lifecycleGeneration)
-            try await runPullLoop(lifecycleGeneration: lifecycleGeneration)
-            if getSyncStatus() == .rebuilding {
-                try schemaManager.finishAppliedMigrationIfPossible()
-            }
-            try transition(to: .ready, lifecycleGeneration: lifecycleGeneration)
+            try await runSyncCycle(lifecycleGeneration: lifecycleGeneration)
         }
     }
 
@@ -1108,9 +1096,6 @@ final class SyncEngine: @unchecked Sendable {
 
         while hasMore {
             let scopes = try loadKnownScopes()
-            if scopes.isEmpty {
-                return
-            }
 
             let request: PullRequest
             if let replayRequestBody {
@@ -1633,6 +1618,11 @@ final class SyncEngine: @unchecked Sendable {
         }
         if !installed {
             observer.cancel()
+            return
+        }
+        // The observer reports only later changes. Schedule the changes that exist before the install.
+        if (try? changeTracker.hasUnsealedChanges()) == true {
+            scheduleDebouncedPush(generation: generation)
         }
     }
 

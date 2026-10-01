@@ -655,7 +655,7 @@
     }
 
     #[pg_test]
-    fn worker_slot_binding_selects_reuse_replace_or_fail() {
+    fn worker_slot_binding_selects_reuse_create_or_fail() {
         let unbound = crate::bgworker::WorkerStartupIdentity {
             runtime: crate::bgworker::WorkerRuntimeIdentity {
                 stream_generation: "unbound-generation".to_string(),
@@ -672,25 +672,16 @@
         };
 
         assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &unbound,
-                crate::bgworker::ExistingWorkerSlot::Inactive,
-            ),
-            crate::bgworker::SlotBindingDecision::Replace,
+            crate::bgworker::slot_binding_decision(&unbound, false),
+            crate::bgworker::SlotBindingDecision::Create,
         );
         assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &bound,
-                crate::bgworker::ExistingWorkerSlot::Inactive,
-            ),
-            crate::bgworker::SlotBindingDecision::Reuse,
-        );
-        assert_eq!(
-            crate::bgworker::slot_binding_decision(
-                &unbound,
-                crate::bgworker::ExistingWorkerSlot::Active,
-            ),
+            crate::bgworker::slot_binding_decision(&unbound, true),
             crate::bgworker::SlotBindingDecision::Fail,
+        );
+        assert_eq!(
+            crate::bgworker::slot_binding_decision(&bound, true),
+            crate::bgworker::SlotBindingDecision::Reuse,
         );
     }
 
@@ -707,6 +698,7 @@
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
+                 processed_end_lsn = NULL,
                  updated_at = now()
              WHERE singleton",
         )
@@ -870,6 +862,17 @@
         assert_eq!(response.0["edges"], json!(2));
     }
 
+    // Materialization records a processed boundary, which requires a generation
+    // start. The test cluster has no slot that sets one.
+    fn bind_test_wal_progress() {
+        Spi::run(
+            "UPDATE synchro.sync_wal_progress
+             SET generation_start_lsn = '0/1', processed_end_lsn = '0/1'
+             WHERE singleton",
+        )
+        .expect("bind test WAL progress");
+    }
+
     fn wal_counting_image(registration: &TableRegistration, record_id: &str) -> TupleImage {
         registration
             .fields
@@ -970,6 +973,7 @@
                 }))
                 .expect("encode WAL counting fence"),
                 message_lsn: commit_lsn,
+                event_boundary: u64::from(offset) + 1,
             });
         }
         WalTransaction {
@@ -996,6 +1000,7 @@
             })
         })
         .expect("load orders WAL counting registration");
+        bind_test_wal_progress();
         let mut measurements = HashMap::new();
         for (start, count, commit_lsn) in [(1, 10, 0x100u64), (100, 100, 0x200), (1_000, 501, 0x300)] {
             let transaction = wal_counting_transaction(&registration, commit_lsn, start, count);
@@ -1031,4 +1036,490 @@
                 && measurements[&501] <= 2 * below_boundary,
             "WAL materialization query count grew beyond its JSONB batch boundary: {measurements:?}"
         );
+    }
+
+    // A SQL entry point lets a PL/pgSQL exception block roll back a failed
+    // materialization, as the worker transaction does.
+    #[pg_extern]
+    fn materialize_test_orders_inserts(start: i32, count: i32, commit_lsn: i64) {
+        let registration = Spi::connect(|client| {
+            crate::registry::load_registry_from_client(client).map(|registry| {
+                registry
+                    .into_iter()
+                    .find(|registration| registration.table_name == "test_orders")
+                    .expect("orders registration")
+            })
+        })
+        .expect("load orders registration");
+        let transaction = wal_counting_transaction(
+            &registration,
+            u64::try_from(commit_lsn).expect("test commit LSN"),
+            u32::try_from(start).expect("test order start"),
+            u32::try_from(count).expect("test order count"),
+        );
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &transaction)
+        })
+        .unwrap_or_else(|class| pgrx::error!("{class}"));
+    }
+
+    #[pg_test]
+    fn wal_self_impact_overflow_fails_the_whole_transaction() {
+        setup_test_tables();
+        bind_test_wal_progress();
+        let (table_id, user_field_id): (String, String) = Spi::connect(|client| {
+            let registry = crate::registry::load_registry_from_client(client)?;
+            let orders = registry
+                .iter()
+                .find(|registration| registration.table_name == "test_orders")
+                .expect("orders registration");
+            let user_field = orders
+                .fields
+                .iter()
+                .find(|field| field.physical_column == "user_id")
+                .expect("orders user field");
+            Ok::<_, pgrx::spi::Error>((orders.table_id.clone(), user_field.field_id.clone()))
+        })
+        .expect("load orders self-impact identity");
+        // Every live order of the changed user is a sibling. The bound admits two.
+        Spi::run(&format!(
+            "CREATE FUNCTION tests.orders_same_user_impact(p_old_row jsonb, p_new_row jsonb)
+             RETURNS SETOF synchro.synchro_row_ref
+             LANGUAGE sql STABLE SECURITY INVOKER
+             SET search_path = pg_catalog, synchro
+             BEGIN ATOMIC
+                 SELECT ROW('{table_id}'::uuid, 'string', pg_catalog.to_jsonb(peer.record_id))::synchro.synchro_row_ref
+                 FROM synchro_projection.test_orders AS peer
+                 WHERE NOT peer.deleted
+                   AND peer.user_id #>> '{{}}' IN (p_old_row ->> '{user_field_id}', p_new_row ->> '{user_field_id}');
+             END;
+             REVOKE ALL ON FUNCTION tests.orders_same_user_impact(jsonb, jsonb) FROM PUBLIC;
+             GRANT USAGE ON SCHEMA tests TO synchro_owner, synchro_worker;
+             GRANT EXECUTE ON FUNCTION tests.orders_same_user_impact(jsonb, jsonb)
+                 TO synchro_owner, synchro_worker;
+             SELECT synchro.synchro_register_membership_dependency(
+                 'test_orders', 'test_orders', 'tests.orders_same_user_impact',
+                 ARRAY['{user_field_id}']::text[], 2
+             )"
+        ))
+        .expect("declare orders self-impact");
+        activate_pending_registry_for_test();
+
+        Spi::run("SELECT tests.materialize_test_orders_inserts(1, 2, 256)")
+            .expect("two sibling orders stay within the impact bound");
+        let durable_state = || {
+            Spi::get_one::<pgrx::JsonB>(
+                "SELECT jsonb_build_object(
+                     'orders', (SELECT count(*) FROM test_orders),
+                     'transactions', (SELECT count(*) FROM synchro.sync_wal_transactions),
+                     'events', (SELECT count(*) FROM synchro.sync_wal_events),
+                     'projections', (SELECT count(*) FROM synchro.sync_captured_projections),
+                     'rows', (SELECT count(*) FROM synchro.sync_captured_rows),
+                     'effects', (SELECT count(*) FROM synchro.sync_changelog),
+                     'edges', (SELECT count(*) FROM synchro.sync_bucket_edges),
+                     'materialized', (
+                         SELECT materialized_commit_lsn::text
+                         FROM synchro.sync_wal_progress
+                         WHERE singleton
+                     )
+                 )",
+            )
+            .expect("read self-impact durable state")
+            .expect("self-impact durable state")
+            .0
+        };
+        let before = durable_state();
+        assert_eq!(before["orders"], json!(2), "{before}");
+        assert_eq!(before["materialized"], json!("0/100"), "{before}");
+
+        // A third sibling makes the impact result exceed its bound.
+        Spi::run(
+            "DO $test$
+             BEGIN
+                 PERFORM tests.materialize_test_orders_inserts(3, 1, 512);
+                 RAISE EXCEPTION 'self-impact overflow was materialized';
+             EXCEPTION WHEN OTHERS THEN
+                 IF SQLERRM <> 'scope_evaluation_failed' THEN
+                     RAISE;
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("self-impact overflow must fail the whole transaction");
+        assert_eq!(durable_state(), before);
+    }
+
+    fn registry_activation_message(generation: i64, event_boundary: u64) -> WalLogicalMessage {
+        WalLogicalMessage {
+            prefix: "synchro_registry".to_string(),
+            content: format!(r#"{{"generation":{generation},"action":"activate"}}"#).into_bytes(),
+            message_lsn: 0,
+            event_boundary,
+        }
+    }
+
+    fn register_orders_with_added_column(column: &str) -> i64 {
+        Spi::run(&format!("ALTER TABLE test_orders ADD COLUMN {column} TEXT")).unwrap();
+        Spi::run(
+            "SELECT tests.register_test_table(
+                 'test_orders',
+                 $$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$,
+                 'single_scope', 'id', 'updated_at', 'deleted_at', 'enabled',
+                 ARRAY['internal_notes']
+             )",
+        )
+        .unwrap();
+        Spi::get_one(
+            "SELECT generation FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC LIMIT 1",
+        )
+        .unwrap()
+        .expect("pending orders generation")
+    }
+
+    fn generation_state(generation: i64) -> String {
+        Spi::get_one_with_args(
+            "SELECT state FROM sync_registry_generations WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap()
+        .expect("registry generation state")
+    }
+
+    /// Build a registration transaction whose activation precedes one insert
+    /// that writes the added column. It writes the source row and its fence in
+    /// the current transaction.
+    fn activation_cutover_transaction(generation: i64, column: &str) -> WalTransaction {
+        let registration = Spi::connect(|client| {
+            crate::registry::load_registry_generation_from_client(client, generation).map(
+                |registry| {
+                    registry
+                        .into_iter()
+                        .find(|registration| registration.table_name == "test_orders")
+                        .expect("target orders registration")
+                },
+            )
+        })
+        .expect("load target orders registration");
+        let xid: String = Spi::get_one("SELECT pg_current_xact_id()::text")
+            .unwrap()
+            .expect("cutover transaction xid");
+        let record_id = "d6000000-0000-4000-8000-000000000001";
+        let fence_id = "d6000000-0000-4000-8000-000000000002";
+        let row_version = "d6000000-0000-4000-8000-000000000003";
+        Spi::run_with_args(
+            &format!(
+                "INSERT INTO test_orders (id, user_id, title, {column})
+                 VALUES ($1::uuid, 'u1', 'WAL query count', 'written after registration')"
+            ),
+            &[record_id.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_write_fences (
+                 fence_id, transaction_xid, dml_ordinal, relation_id,
+                 registration_kind, table_id,
+                 physical_schema, physical_relation, physical_relation_oid,
+                 operation, old_record_id, new_record_id, row_version
+             ) VALUES (
+                 $1::uuid, pg_current_xact_id(), 1, $2::uuid,
+                 'synced', $3::uuid, $4, $5, $6::oid,
+                 'insert', NULL, $7, $8::uuid
+             )",
+            &[
+                fence_id.into(),
+                registration.relation_id.as_str().into(),
+                registration.table_id.as_str().into(),
+                registration.physical_schema.as_str().into(),
+                registration.physical_relation.as_str().into(),
+                i64::from(registration.physical_relation_oid).into(),
+                record_id.into(),
+                row_version.into(),
+            ],
+        )
+        .unwrap();
+        let after: TupleImage = registration
+            .fields
+            .iter()
+            .map(|field| {
+                let value = match field.physical_column.as_str() {
+                    "id" => TupleValue::Text(record_id.as_bytes().to_vec()),
+                    "user_id" => TupleValue::Text(b"u1".to_vec()),
+                    "title" => TupleValue::Text(b"WAL query count".to_vec()),
+                    "amount" => TupleValue::Text(b"0".to_vec()),
+                    "created_at" | "updated_at" => {
+                        TupleValue::Text(b"2000-01-01 00:00:00+00".to_vec())
+                    }
+                    "deleted_at" => TupleValue::Null,
+                    added if added == column => {
+                        TupleValue::Text(b"written after registration".to_vec())
+                    }
+                    column => panic!("unexpected test_orders synced column {column}"),
+                };
+                (field.physical_column.clone(), value)
+            })
+            .collect();
+        WalTransaction {
+            xid: xid.parse().expect("parse cutover transaction xid"),
+            final_lsn: 0x700,
+            commit_lsn: 0x700,
+            end_lsn: 0x701,
+            commit_timestamp: 0,
+            events: vec![WalEvent {
+                operation: ChangeOperation::Insert,
+                relation: RelationKey::new(
+                    registration.physical_schema.clone(),
+                    registration.physical_relation.clone(),
+                    registration.physical_relation_oid,
+                ),
+                event_ordinal: 0,
+                before: None,
+                after: Some(after),
+            }],
+            truncates: Vec::new(),
+            messages: vec![
+                registry_activation_message(generation, 0),
+                WalLogicalMessage {
+                    prefix: "synchro_fence".to_string(),
+                    content: serde_json::to_vec(&json!({
+                        "fence_id": fence_id,
+                        "dml_ordinal": 1,
+                        "registration_kind": "synced",
+                        "relation_id": registration.relation_id,
+                        "table_id": registration.table_id,
+                        "physical_schema": registration.physical_schema,
+                        "physical_relation": registration.physical_relation,
+                        "physical_relation_oid": registration.physical_relation_oid,
+                        "operation": "insert",
+                        "old_record_id": serde_json::Value::Null,
+                        "new_record_id": record_id,
+                        "old_capture_key": serde_json::Value::Null,
+                        "new_capture_key": serde_json::Value::Null,
+                        "row_version": row_version,
+                    }))
+                    .unwrap(),
+                    message_lsn: 0,
+                    event_boundary: 1,
+                },
+            ],
+        }
+    }
+
+    #[pg_test]
+    fn wal_activation_applies_to_later_rows_of_its_transaction() {
+        setup_test_tables();
+        bind_test_wal_progress();
+        let generation = register_orders_with_added_column("cutover_note");
+        let record_id = "d6000000-0000-4000-8000-000000000001";
+        let transaction = activation_cutover_transaction(generation, "cutover_note");
+
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &transaction)
+        })
+        .expect("materialize registration transaction with a later row");
+
+        let captured: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'generation', captured.registry_generation,
+                 'value', captured.row_data -> field.field_id::text
+             )
+             FROM synchro.sync_captured_rows captured
+             JOIN synchro.sync_registry_fields field
+               ON field.registry_generation = $2
+              AND field.relation_id = captured.relation_id
+              AND field.physical_column = 'cutover_note'
+             WHERE captured.record_id = $1",
+            &[record_id.into(), generation.into()],
+        )
+        .unwrap()
+        .expect("captured row after the registry cutover");
+        assert_eq!(generation_state(generation), "active");
+        assert_eq!(
+            captured.0,
+            json!({"generation": generation, "value": "written after registration"})
+        );
+    }
+
+    #[pg_test]
+    fn wal_replay_fingerprint_binds_the_activation_boundary() {
+        setup_test_tables();
+        bind_test_wal_progress();
+        let generation = register_orders_with_added_column("replay_note");
+        let transaction = activation_cutover_transaction(generation, "replay_note");
+        let replay = |transaction: &WalTransaction| {
+            Spi::connect_mut(|client| {
+                crate::bgworker::materialize_transaction_for_test(client, transaction)
+            })
+        };
+        let replay_count = || -> i64 {
+            Spi::get_one("SELECT replay_count FROM synchro.sync_wal_transactions WHERE commit_lsn = '0/700'")
+                .unwrap()
+                .expect("recorded transaction")
+        };
+        let mut moved_activation = transaction.clone();
+        moved_activation.messages[0].event_boundary = 1;
+        let mut changed_fence = transaction.clone();
+        changed_fence.messages[1].message_lsn = 1;
+
+        replay(&transaction).expect("materialize the registration transaction");
+        assert_eq!(replay(&transaction), Ok(()));
+        assert_eq!(replay(&moved_activation), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 1);
+
+        // A record from an earlier release keeps format 1. That release applied
+        // one generation to every row event, so its fingerprint omits the boundary.
+        Spi::run_with_args(
+            "UPDATE synchro.sync_wal_transactions
+             SET content_hash = $1, content_hash_format = 1
+             WHERE commit_lsn = '0/700'",
+            &[crate::bgworker::legacy_transaction_content_hash_for_test(&transaction).into()],
+        )
+        .unwrap();
+        assert_eq!(replay(&moved_activation), Ok(()));
+        assert_eq!(replay(&changed_fence), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 2);
+
+        // A current record never accepts the format 1 fingerprint.
+        Spi::run("UPDATE synchro.sync_wal_transactions SET content_hash_format = 2 WHERE commit_lsn = '0/700'")
+            .unwrap();
+        assert_eq!(replay(&transaction), Err("validation_failed".to_string()));
+        assert_eq!(replay_count(), 2);
+    }
+
+    #[pg_test]
+    fn wal_ignores_only_a_repeated_activation_of_the_active_chain() {
+        setup_test_tables();
+        bind_test_wal_progress();
+        let marker_only = |generation: i64, commit_lsn: u64| WalTransaction {
+            xid: 1,
+            final_lsn: commit_lsn,
+            commit_lsn,
+            end_lsn: commit_lsn + 1,
+            commit_timestamp: 0,
+            events: Vec::new(),
+            truncates: Vec::new(),
+            messages: vec![registry_activation_message(generation, 0)],
+        };
+        let materialize = |transaction: &WalTransaction| {
+            Spi::connect_mut(|client| {
+                crate::bgworker::materialize_transaction_for_test(client, transaction)
+            })
+        };
+        let progress = || -> Option<i64> {
+            Spi::get_one("SELECT registry_generation FROM synchro.sync_wal_progress WHERE singleton")
+                .unwrap()
+        };
+        let first = register_orders_with_added_column("repeat_first");
+        assert_eq!(materialize(&marker_only(first, 0xa00)), Ok(()));
+        let second = register_orders_with_added_column("repeat_second");
+        assert_eq!(materialize(&marker_only(second, 0xb00)), Ok(()));
+
+        // The binding replay repeats activations that the slot already applied.
+        assert_eq!(materialize(&marker_only(second, 0xc00)), Ok(()));
+        assert_eq!(materialize(&marker_only(first, 0xd00)), Ok(()));
+        assert_eq!(generation_state(first), "superseded");
+        assert_eq!(generation_state(second), "active");
+        assert_eq!(progress(), Some(second));
+
+        // A generation that committed before the slot started waits for the
+        // replay. Its decoded child activates it first.
+        let queued = register_orders_with_added_column("repeat_queued");
+        let queued_requests: Option<i64> = Spi::get_one_with_args(
+            "SELECT count(*) FROM synchro.sync_registry_activation_requests WHERE registry_generation = $1",
+            &[queued.into()],
+        )
+        .unwrap();
+        assert_eq!(queued_requests, Some(1), "the unbound test runtime queues each registration");
+        let child = register_orders_with_added_column("repeat_child");
+        assert_eq!(materialize(&marker_only(child, 0xd80)), Ok(()));
+        let chain: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT jsonb_agg(jsonb_build_array(generation, state, parent_generation, activation_commit_lsn::text)
+                              ORDER BY generation)
+             FROM sync_registry_generations WHERE generation IN ($1, $2)",
+            &[queued.into(), child.into()],
+        )
+        .unwrap()
+        .expect("queued chain state");
+        assert_eq!(
+            chain.0,
+            json!([[queued, "superseded", second, "0/D80"], [child, "active", queued, "0/D80"]])
+        );
+        assert_eq!(progress(), Some(child));
+        assert_eq!(materialize(&marker_only(queued, 0xd90)), Ok(()));
+        assert_eq!(materialize(&marker_only(child, 0xda0)), Ok(()));
+        assert_eq!(generation_state(queued), "superseded");
+        assert_eq!(generation_state(child), "active");
+        assert_eq!(progress(), Some(child));
+
+        // A pending ancestor without a queued request is not activated early.
+        let third = register_orders_with_added_column("repeat_third");
+        Spi::run_with_args(
+            "DELETE FROM synchro.sync_registry_activation_requests WHERE registry_generation = $1",
+            &[third.into()],
+        )
+        .unwrap();
+        let fourth = register_orders_with_added_column("repeat_fourth");
+        let parent: Option<i64> = Spi::get_one_with_args(
+            "SELECT parent_generation FROM sync_registry_generations WHERE generation = $1",
+            &[fourth.into()],
+        )
+        .unwrap();
+        assert_eq!(parent, Some(third));
+        assert_eq!(
+            materialize(&marker_only(fourth, 0xe00)),
+            Err("validation_failed".to_string())
+        );
+        assert_eq!(generation_state(third), "pending");
+        assert_eq!(generation_state(fourth), "pending");
+        assert_eq!(progress(), Some(child));
+    }
+
+    #[pg_test]
+    fn wal_defers_activation_with_unknown_source_requirement() {
+        setup_test_tables();
+        bind_test_wal_progress();
+        let active: i64 = Spi::get_one(
+            "SELECT generation FROM sync_registry_generations WHERE state = 'active'",
+        )
+        .unwrap()
+        .expect("active generation");
+        let generation = register_orders_with_added_column("deferred_note");
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = NULL WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+        let marker_only = |commit_lsn: u64| WalTransaction {
+            xid: 1,
+            final_lsn: commit_lsn,
+            commit_lsn,
+            end_lsn: commit_lsn + 1,
+            commit_timestamp: 0,
+            events: Vec::new(),
+            truncates: Vec::new(),
+            messages: vec![registry_activation_message(generation, 0)],
+        };
+
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &marker_only(0x800))
+        })
+        .expect("materialize deferred legacy activation");
+        let progress: Option<i64> =
+            Spi::get_one("SELECT registry_generation FROM synchro.sync_wal_progress WHERE singleton")
+                .unwrap();
+        assert_eq!(generation_state(generation), "pending");
+        assert_eq!(generation_state(active), "active");
+        assert_eq!(progress, Some(active));
+
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = 0 WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+        Spi::connect_mut(|client| {
+            crate::bgworker::materialize_transaction_for_test(client, &marker_only(0x900))
+        })
+        .expect("materialize direct activation");
+        assert_eq!(generation_state(generation), "active");
     }

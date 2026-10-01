@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -697,7 +698,7 @@ func TestRealIssue49MutationLifecycleVersionsVocabularyAndCrossBatchReplay(t *te
 }
 
 func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	harness, token := provisionRealProofHarness(t, ctx)
 	globalID := "00000000-0000-4000-8d02-000000000001"
@@ -862,6 +863,691 @@ func TestRealIssue49PortableSeedScopeContinuationAndTokenBindings(t *testing.T) 
 			t.Fatalf("forged seed receipt produced a cursor: %#v", response)
 		}
 	})
+
+	// A real compaction held open in transaction A moves the portable floor above
+	// the receipt. First connect B waits for A, then validates the committed floor.
+	receiptPayload := issue49DecodeOpaqueToken(t, receipt, "sc1")
+	boundary, _ := receiptPayload["snapshot_boundary"].(map[string]any)
+	receiptLSN, _ := boundary["commit_lsn"].(string)
+	if boundary["position_kind"] != "transaction_end" || receiptLSN == "" || !reflect.DeepEqual(boundary, manifest["snapshot_boundary"]) {
+		t.Fatalf("portable seed receipt is not bound to the committed export boundary: %#v", boundary)
+	}
+	for _, controlClient := range []string{"issue49-seeded-client", "issue49-forged-seed-client"} {
+		if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", controlClient); err != nil {
+			t.Fatalf("expire seed control client: %v", err)
+		}
+	}
+	laterIDs := []string{"00000000-0000-4000-8d02-000000000003", "00000000-0000-4000-8d02-000000000004"}
+	laterValues := []string{"issue49-after-export-1", "issue49-after-export-2"}
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_global_items (id, value) VALUES ($1, $2), ($3, $4)",
+		laterIDs[0], laterValues[0], laterIDs[1], laterValues[1],
+	); err != nil {
+		t.Fatalf("insert rows after the portable export: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_global_items", laterIDs...)
+
+	compactor, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire compaction connection: %v", err)
+	}
+	defer compactor.Close()
+	compactorOpen := false
+	releaseCompactor := func() {
+		if compactorOpen {
+			compactorOpen = false
+			rollbackIssue49Transaction(t, compactor, "held compaction")
+		}
+	}
+	defer releaseCompactor()
+	if _, err := compactor.ExecContext(ctx, "BEGIN ISOLATION LEVEL READ COMMITTED"); err != nil {
+		t.Fatalf("begin held compaction: %v", err)
+	}
+	compactorOpen = true
+	var compactorPID int64
+	if err := compactor.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&compactorPID); err != nil {
+		t.Fatalf("read compaction backend: %v", err)
+	}
+	var compactionRaw []byte
+	if err := compactor.QueryRowContext(ctx, "SELECT synchro.synchro_compact($1, $2)", "30 days", 10000).Scan(&compactionRaw); err != nil {
+		t.Fatalf("run held compaction: %v", err)
+	}
+	var compaction struct {
+		DeactivatedClients int64 `json:"deactivated_clients"`
+		DeletedEntries     int64 `json:"deleted_entries"`
+	}
+	if err := json.Unmarshal(compactionRaw, &compaction); err != nil {
+		t.Fatalf("decode held compaction: %v", err)
+	}
+	if compaction.DeactivatedClients != 2 || compaction.DeletedEntries <= 0 {
+		t.Fatalf("held compaction did not retire both controls and delete effects: %#v", compaction)
+	}
+	var floorKind, floorLSN, floorStream string
+	var floorAboveReceipt bool
+	var floorMembership, floorRetention int64
+	if err := compactor.QueryRowContext(ctx, `
+		SELECT floor_position_kind, floor_commit_lsn::text, floor_commit_lsn > $1::pg_lsn,
+		       stream_generation, membership_generation, retention_generation
+		FROM synchro.sync_scope_state WHERE scope_id = 'cf:global'`, receiptLSN).Scan(
+		&floorKind, &floorLSN, &floorAboveReceipt, &floorStream, &floorMembership, &floorRetention,
+	); err != nil {
+		t.Fatalf("read held compaction floor: %v", err)
+	}
+	if floorKind != "effect" || !floorAboveReceipt {
+		t.Fatalf("held compaction floor %s at %s does not exceed receipt position %s", floorKind, floorLSN, receiptLSN)
+	}
+	if floorStream != receiptPayload["stream_generation"] ||
+		fmt.Sprint(floorMembership) != receiptPayload["membership_generation"] ||
+		fmt.Sprint(floorRetention) != receiptPayload["retention_generation"] {
+		t.Fatal("held compaction changed a receipt binding other than the floor")
+	}
+
+	const heldClientID = "issue49-held-compaction-client"
+	contender, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire held-compaction connect connection: %v", err)
+	}
+	type heldConnect struct {
+		response string
+		err      error
+	}
+	connectDone := make(chan heldConnect, 1)
+	contenderOpen := false
+	connectStarted := false
+	joined := false
+	contenderCtx, contenderCancel := context.WithTimeout(ctx, time.Minute)
+	defer contenderCancel()
+	defer func() {
+		// Release A before B is canceled and joined, so B can finish on every failure path.
+		releaseCompactor()
+		if connectStarted && !joined {
+			contenderCancel()
+			select {
+			case <-connectDone:
+				joined = true
+			case <-time.After(30 * time.Second):
+				t.Errorf("held-compaction connect did not stop during cleanup")
+			}
+		}
+		// A query that did not join still owns the connection, so rollback and Close could block.
+		if connectStarted && !joined {
+			return
+		}
+		if contenderOpen {
+			rollbackIssue49Transaction(t, contender, "held-compaction connect")
+		}
+		if err := contender.Close(); err != nil {
+			t.Errorf("close held-compaction connect connection: %v", err)
+		}
+	}()
+	if _, err := contender.ExecContext(ctx, "BEGIN ISOLATION LEVEL READ COMMITTED"); err != nil {
+		t.Fatalf("begin held-compaction connect: %v", err)
+	}
+	contenderOpen = true
+	var contenderPID int64
+	var contenderIsolation string
+	if err := contender.QueryRowContext(ctx, "SELECT pg_backend_pid(), current_setting('transaction_isolation')").Scan(&contenderPID, &contenderIsolation); err != nil {
+		t.Fatalf("read held-compaction connect backend: %v", err)
+	}
+	if contenderIsolation != "read committed" {
+		t.Fatalf("held-compaction connect isolation = %q, want read committed", contenderIsolation)
+	}
+	heldRequest, err := json.Marshal(map[string]any{
+		"client_id":         heldClientID,
+		"platform":          "conformance",
+		"app_version":       "0.3.0",
+		"protocol_version":  3,
+		"schema":            map[string]any{"version": 0, "hash": ""},
+		"scope_set_version": 0,
+		"known_scopes":      map[string]any{},
+		"seed_receipts":     map[string]any{"cf:global": receipt},
+	})
+	if err != nil {
+		t.Fatalf("encode held-compaction connect: %v", err)
+	}
+	connectStarted = true
+	go func() {
+		var response string
+		err := contender.QueryRowContext(
+			contenderCtx,
+			"SELECT synchro.synchro_connect($1, $2::jsonb)::text",
+			"diagnostic-user",
+			string(heldRequest),
+		).Scan(&response)
+		connectDone <- heldConnect{response: response, err: err}
+	}()
+
+	waited := false
+	for deadline := time.Now().Add(20 * time.Second); !waited && time.Now().Before(deadline); {
+		select {
+		case <-connectDone:
+			joined = true
+			t.Fatal("held-compaction connect finished before it waited for compaction A")
+		default:
+		}
+		if err := database.QueryRowContext(ctx, `
+			SELECT COALESCE(wait_event_type = 'Lock', false)
+			       AND $1::integer = ANY(pg_blocking_pids($2::integer))
+			FROM pg_stat_activity WHERE pid = $2::integer`, compactorPID, contenderPID).Scan(&waited); err != nil {
+			t.Fatalf("observe held-compaction connect wait: %v", err)
+		}
+		if !waited {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !waited {
+		t.Fatal("held-compaction connect did not wait for compaction A")
+	}
+	if _, err := compactor.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit held compaction: %v", err)
+	}
+	compactorOpen = false
+	var heldResult heldConnect
+	select {
+	case heldResult = <-connectDone:
+		joined = true
+	case <-time.After(time.Minute):
+		t.Fatal("held-compaction connect did not finish after compaction A committed")
+	}
+	if heldResult.err != nil {
+		t.Fatalf("held-compaction connect failed after compaction A committed: %v", heldResult.err)
+	}
+	if _, err := contender.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit held-compaction connect: %v", err)
+	}
+	contenderOpen = false
+	var heldResponse map[string]any
+	if err := json.Unmarshal([]byte(heldResult.response), &heldResponse); err != nil {
+		t.Fatalf("decode held-compaction connect: %v", err)
+	}
+
+	t.Run("assertion", func(t *testing.T) {
+		if heldResponse["error"] != nil {
+			t.Fatalf("held-compaction connect returned an error: %#v", heldResponse["error"])
+		}
+		if heldResponse["client_generation"] != float64(1) || heldResponse["scope_set_version"] != float64(1) {
+			t.Fatalf("held-compaction connect identity is invalid: generation=%#v version=%#v", heldResponse["client_generation"], heldResponse["scope_set_version"])
+		}
+		delta, _ := heldResponse["scopes"].(map[string]any)
+		additions, _ := delta["add"].([]any)
+		nullCursors := map[string]bool{}
+		for _, raw := range additions {
+			assignment, _ := raw.(map[string]any)
+			scopeID, _ := assignment["id"].(string)
+			cursor, present := assignment["cursor"]
+			nullCursors[scopeID] = present && cursor == nil
+		}
+		// The nonportable shared control scope is assigned too, and it has no receipt.
+		if len(additions) != 3 || len(nullCursors) != 3 || !nullCursors["cf:global"] || !nullCursors["cf:not-portable"] || !nullCursors["user:diagnostic-user"] {
+			t.Fatalf("a receipt below the committed floor did not fall back to the exact null-cursor additions: count=%d cursors=%#v", len(additions), nullCursors)
+		}
+		var generation, scopeSetVersion int64
+		var subscriptions, checkpoints string
+		if err := database.QueryRowContext(ctx, `
+			SELECT client.client_generation, client.scope_set_version,
+			       array_to_string(client.bucket_subs, ','),
+			       (SELECT string_agg(checkpoint.bucket_id || '=' || checkpoint.position_kind, ','
+			                          ORDER BY checkpoint.bucket_id)
+			        FROM synchro.sync_client_checkpoints AS checkpoint
+			        WHERE checkpoint.user_id = client.user_id
+			          AND checkpoint.client_id = client.client_id)
+			FROM synchro.sync_clients AS client
+			WHERE client.user_id = 'diagnostic-user' AND client.client_id = $1`, heldClientID).Scan(
+			&generation, &scopeSetVersion, &subscriptions, &checkpoints,
+		); err != nil {
+			t.Fatalf("read held-compaction client state: %v", err)
+		}
+		if generation != 1 || scopeSetVersion != 1 ||
+			subscriptions != "cf:global,cf:not-portable,user:diagnostic-user" ||
+			checkpoints != "cf:global=generation_start,cf:not-portable=generation_start,user:diagnostic-user=generation_start" {
+			t.Fatalf("held-compaction client state is invalid: generation=%d version=%d subscriptions=%s checkpoints=%s", generation, scopeSetVersion, subscriptions, checkpoints)
+		}
+	})
+
+	heldClient := parseRealProtocolClient(t, heldResponse, heldClientID, "cf:global", "cf:not-portable", "user:diagnostic-user")
+	globalTable := requireRealTable(t, heldClient, "cf_global_items")
+	globalRecords, _ := rebuildRealScope(t, ctx, harness, token, heldClient, "cf:global", "00000000-0000-4000-8d02-000000000011")
+	t.Run("assertion", func(t *testing.T) {
+		if len(globalRecords) != 3 {
+			t.Fatalf("portable rebuild after fallback returned %d records, want 3", len(globalRecords))
+		}
+		requireRebuildRecordVersion(t, globalRecords, globalTable, globalID, "issue49-portable")
+		requireRebuildRecordVersion(t, globalRecords, globalTable, laterIDs[0], laterValues[0])
+		requireRebuildRecordVersion(t, globalRecords, globalTable, laterIDs[1], laterValues[1])
+	})
+	rebuildRealScope(t, ctx, harness, token, heldClient, "user:diagnostic-user", "00000000-0000-4000-8d02-000000000012")
+	rebuildRealScope(t, ctx, harness, token, heldClient, "cf:not-portable", "00000000-0000-4000-8d02-000000000014")
+	acknowledgeRealClientCursors(t, ctx, harness, token, heldClient)
+
+	requireIssue49PortabilityCycleKeepsAdoptedFloor(t, ctx, harness, token, database, heldClientID)
+}
+
+// rollbackIssue49Transaction reports a failed cleanup rollback instead of dropping it.
+func rollbackIssue49Transaction(t *testing.T, connection *sql.Conn, name string) {
+	t.Helper()
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cleanupCancel()
+	if _, err := connection.ExecContext(cleanupCtx, "ROLLBACK"); err != nil {
+		t.Errorf("roll back %s: %v", name, err)
+	}
+}
+
+// requireIssue49PortabilityCycleKeepsAdoptedFloor runs the #207 portable
+// declaration cycle. The receipted scope is assigned but not portable when
+// connect takes its row locks, and it is portable again at receipt validation.
+// Connect must still protect that scope's floor through seed issuance.
+// Two owned SQL gates order the schedule: a row lock on an empty portable
+// scope that orders after the receipted scope, and a token-key table lock that
+// receipt validation meets after it reads the scope floors.
+func requireIssue49PortabilityCycleKeepsAdoptedFloor(
+	t *testing.T,
+	ctx context.Context,
+	harness *blackbox.Harness,
+	token string,
+	database *sql.DB,
+	pinningClientID string,
+) {
+	t.Helper()
+	const scopeID = "cf:global"
+	// The gate scope orders after cf:global. No table maps rows to it.
+	const gateScopeID = "cf:portability-gate"
+	const clientID = "issue49-portability-cycle-client"
+	if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, true)", gateScopeID); err != nil {
+		t.Fatalf("register the empty portable gate scope: %v", err)
+	}
+
+	export, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire portability-cycle export connection: %v", err)
+	}
+	exportOpen, exportReleased := false, false
+	defer func() {
+		if exportReleased {
+			return
+		}
+		if exportOpen {
+			rollbackIssue49Transaction(t, export, "portability-cycle export")
+		}
+		if err := export.Close(); err != nil {
+			t.Errorf("close portability-cycle export connection: %v", err)
+		}
+	}()
+	if _, err := export.ExecContext(ctx, "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE"); err != nil {
+		t.Fatalf("begin portability-cycle export: %v", err)
+	}
+	exportOpen = true
+	manifest := issue49QueryJSONObject(t, ctx, export, "SELECT synchro.synchro_portable_seed_manifest(1)")
+	if _, err := export.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit portability-cycle export: %v", err)
+	}
+	exportOpen = false
+	// The manifest is local data now, so the export connection returns before the gates start.
+	exportReleased = true
+	if err := export.Close(); err != nil {
+		t.Fatalf("return the committed portability-cycle export connection: %v", err)
+	}
+	exported, _ := manifest["portable_scopes"].([]any)
+	receipts := map[string]any{}
+	for _, raw := range exported {
+		scope, _ := raw.(map[string]any)
+		id, _ := scope["id"].(string)
+		continuation, _ := scope["continuation"].(string)
+		if id == "" || continuation == "" {
+			t.Fatal("portability-cycle export omitted a scope receipt")
+		}
+		receipts[id] = continuation
+	}
+	if len(exported) != 2 || len(receipts) != 2 || receipts[scopeID] == nil || receipts[gateScopeID] == nil {
+		t.Fatalf("portability-cycle export is not the complete two-scope set: scopes=%d", len(exported))
+	}
+	boundary, _ := manifest["snapshot_boundary"].(map[string]any)
+	exportLSN, _ := boundary["commit_lsn"].(string)
+	if boundary["position_kind"] != "transaction_end" || exportLSN == "" {
+		t.Fatalf("portability-cycle export boundary is not a committed position: %#v", boundary)
+	}
+
+	laterIDs := []string{"00000000-0000-4000-8d02-000000000005", "00000000-0000-4000-8d02-000000000006"}
+	laterValues := []string{"issue49-after-portability-export-1", "issue49-after-portability-export-2"}
+	if err := harness.Source().ExecContext(
+		ctx,
+		"INSERT INTO cf_global_items (id, value) VALUES ($1, $2), ($3, $4)",
+		laterIDs[0], laterValues[0], laterIDs[1], laterValues[1],
+	); err != nil {
+		t.Fatalf("insert rows after the portability-cycle export: %v", err)
+	}
+	waitForRealWALRecords(t, ctx, harness, "cf_global_items", laterIDs...)
+	if err := harness.Operator().ExpireRetentionClient(ctx, "diagnostic-user", pinningClientID); err != nil {
+		t.Fatalf("expire the remaining portable control client: %v", err)
+	}
+	// Compaction locks only scopes with compactable effects, so it never waits on the gate scope.
+	var gateEffects int64
+	if err := database.QueryRowContext(ctx, "SELECT count(*) FROM synchro.sync_changelog WHERE bucket_id = $1", gateScopeID).Scan(&gateEffects); err != nil {
+		t.Fatalf("count gate scope effects: %v", err)
+	}
+	if gateEffects != 0 {
+		t.Fatalf("the portability gate scope has %d effects", gateEffects)
+	}
+	if _, err := database.ExecContext(ctx, "SELECT synchro.synchro_register_shared_scope($1, false)", scopeID); err != nil {
+		t.Fatalf("disable portable scope: %v", err)
+	}
+	var portable bool
+	if err := database.QueryRowContext(ctx, "SELECT portable FROM synchro.sync_shared_scopes WHERE scope_id = $1", scopeID).Scan(&portable); err != nil || portable {
+		t.Fatalf("receipted scope did not stay shared and nonportable: portable=%t error=%v", portable, err)
+	}
+
+	type workerResult struct {
+		value string
+		err   error
+	}
+	var rowGate, keyGate, connect, compactor *sql.Conn
+	rowGateOpen, keyGateOpen, connectOpen := false, false, false
+	connectStarted, connectJoined, compactStarted, compactJoined := false, false, false, false
+	connectDone := make(chan workerResult, 1)
+	compactDone := make(chan workerResult, 1)
+	connectCtx, connectCancel := context.WithTimeout(ctx, time.Minute)
+	defer connectCancel()
+	compactCtx, compactCancel := context.WithTimeout(ctx, time.Minute)
+	defer compactCancel()
+	joinWorker := func(done chan workerResult, joined *bool, cancel context.CancelFunc, name string) {
+		if *joined {
+			return
+		}
+		cancel()
+		select {
+		case <-done:
+			*joined = true
+		case <-time.After(30 * time.Second):
+			t.Errorf("%s did not stop during cleanup", name)
+		}
+	}
+	defer func() {
+		// Release both gates before any worker is canceled or joined.
+		if rowGateOpen {
+			rowGateOpen = false
+			rollbackIssue49Transaction(t, rowGate, "portability row gate")
+		}
+		if keyGateOpen {
+			keyGateOpen = false
+			rollbackIssue49Transaction(t, keyGate, "portability key gate")
+		}
+		if connectStarted {
+			joinWorker(connectDone, &connectJoined, connectCancel, "portability-cycle connect")
+		}
+		if connectOpen && (connectJoined || !connectStarted) {
+			rollbackIssue49Transaction(t, connect, "portability-cycle connect")
+		}
+		if compactStarted {
+			joinWorker(compactDone, &compactJoined, compactCancel, "portability-cycle compaction")
+		}
+		// A connection whose worker did not stop still owns its query.
+		for _, owned := range []struct {
+			connection *sql.Conn
+			busy       bool
+		}{
+			{rowGate, false},
+			{keyGate, false},
+			{connect, connectStarted && !connectJoined},
+			{compactor, compactStarted && !compactJoined},
+		} {
+			if owned.connection != nil && !owned.busy {
+				if err := owned.connection.Close(); err != nil {
+					t.Errorf("close portability-cycle connection: %v", err)
+				}
+			}
+		}
+	}()
+	blockedBy := func(waiterPID, blockerPID int64) bool {
+		t.Helper()
+		var waiting bool
+		if err := database.QueryRowContext(ctx, `
+			SELECT COALESCE(wait_event_type = 'Lock', false)
+			       AND $1::integer = ANY(pg_blocking_pids($2::integer))
+			FROM pg_stat_activity WHERE pid = $2::integer`, blockerPID, waiterPID).Scan(&waiting); err != nil {
+			t.Fatalf("observe portability-cycle lock wait: %v", err)
+		}
+		return waiting
+	}
+
+	// Gate 1 is a row lock on the empty gate scope. It blocks FOR SHARE without changing data.
+	if rowGate, err = database.Conn(ctx); err != nil {
+		t.Fatalf("acquire portability row gate: %v", err)
+	}
+	if _, err := rowGate.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatalf("begin portability row gate: %v", err)
+	}
+	rowGateOpen = true
+	var rowGatePID int64
+	var lockedGate string
+	if err := rowGate.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&rowGatePID); err != nil {
+		t.Fatalf("read portability row gate backend: %v", err)
+	}
+	if err := rowGate.QueryRowContext(ctx, "SELECT scope_id FROM synchro.sync_scope_state WHERE scope_id = $1 FOR UPDATE", gateScopeID).Scan(&lockedGate); err != nil || lockedGate != gateScopeID {
+		t.Fatalf("lock the portability gate scope row: %v", err)
+	}
+	// Gate 2 blocks the token-key lookup that follows receipt validation's floor query.
+	if keyGate, err = database.Conn(ctx); err != nil {
+		t.Fatalf("acquire portability key gate: %v", err)
+	}
+	if _, err := keyGate.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatalf("begin portability key gate: %v", err)
+	}
+	keyGateOpen = true
+	var keyGatePID int64
+	if err := keyGate.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&keyGatePID); err != nil {
+		t.Fatalf("read portability key gate backend: %v", err)
+	}
+	if _, err := keyGate.ExecContext(ctx, "LOCK TABLE synchro.sync_token_keys IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatalf("lock the token-key table gate: %v", err)
+	}
+
+	if connect, err = database.Conn(ctx); err != nil {
+		t.Fatalf("acquire portability-cycle connect connection: %v", err)
+	}
+	if _, err := connect.ExecContext(ctx, "BEGIN ISOLATION LEVEL READ COMMITTED"); err != nil {
+		t.Fatalf("begin portability-cycle connect: %v", err)
+	}
+	connectOpen = true
+	var connectPID int64
+	var connectIsolation string
+	if err := connect.QueryRowContext(ctx, "SELECT pg_backend_pid(), current_setting('transaction_isolation')").Scan(&connectPID, &connectIsolation); err != nil {
+		t.Fatalf("read portability-cycle connect backend: %v", err)
+	}
+	if connectIsolation != "read committed" {
+		t.Fatalf("portability-cycle connect isolation = %q, want read committed", connectIsolation)
+	}
+	request, err := json.Marshal(map[string]any{
+		"client_id":         clientID,
+		"platform":          "conformance",
+		"app_version":       "0.3.0",
+		"protocol_version":  3,
+		"schema":            map[string]any{"version": 0, "hash": ""},
+		"scope_set_version": 0,
+		"known_scopes":      map[string]any{},
+		"seed_receipts":     receipts,
+	})
+	if err != nil {
+		t.Fatalf("encode portability-cycle connect: %v", err)
+	}
+	connectStarted = true
+	go func() {
+		var response string
+		err := connect.QueryRowContext(
+			connectCtx,
+			"SELECT synchro.synchro_connect($1, $2::jsonb)::text",
+			"diagnostic-user",
+			string(request),
+		).Scan(&response)
+		connectDone <- workerResult{value: response, err: err}
+	}()
+	awaitConnectBlockedBy := func(blockerPID int64, gate string) {
+		t.Helper()
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			select {
+			case result := <-connectDone:
+				connectJoined = true
+				t.Fatalf("portability-cycle connect finished before it waited on the %s: error=%v", gate, result.err)
+			default:
+			}
+			if blockedBy(connectPID, blockerPID) {
+				return
+			}
+		}
+		t.Fatalf("portability-cycle connect did not wait on the %s", gate)
+	}
+	awaitConnectBlockedBy(rowGatePID, "gate scope row")
+
+	// Reenable portability through the real registration path while connect's row query waits.
+	registerCtx, registerCancel := context.WithTimeout(ctx, 20*time.Second)
+	_, err = database.ExecContext(registerCtx, "SELECT synchro.synchro_register_shared_scope($1, true)", scopeID)
+	registerCancel()
+	if err != nil {
+		t.Fatalf("reenable the receipted scope while connect waits: %v", err)
+	}
+	rowGateOpen = false
+	rollbackIssue49Transaction(t, rowGate, "portability row gate")
+	awaitConnectBlockedBy(keyGatePID, "token-key table")
+
+	if compactor, err = database.Conn(ctx); err != nil {
+		t.Fatalf("acquire portability-cycle compaction connection: %v", err)
+	}
+	var compactorPID int64
+	if err := compactor.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&compactorPID); err != nil {
+		t.Fatalf("read portability-cycle compaction backend: %v", err)
+	}
+	compactStarted = true
+	go func() {
+		var result string
+		err := compactor.QueryRowContext(compactCtx, "SELECT synchro.synchro_compact($1, $2)::text", "30 days", 10000).Scan(&result)
+		compactDone <- workerResult{value: result, err: err}
+	}()
+	// Either event only orders the schedule. The final assertions decide the outcome.
+	compactionEvent := ""
+	for deadline := time.Now().Add(20 * time.Second); compactionEvent == "" && time.Now().Before(deadline); {
+		select {
+		case result := <-compactDone:
+			compactJoined = true
+			if result.err != nil {
+				t.Fatalf("portability-cycle compaction failed: %v", result.err)
+			}
+			var floorAbove bool
+			if err := database.QueryRowContext(ctx, `
+				SELECT floor_position_kind <> 'generation_start' AND floor_commit_lsn > $1::pg_lsn
+				FROM synchro.sync_scope_state WHERE scope_id = $2`, exportLSN, scopeID).Scan(&floorAbove); err != nil {
+				t.Fatalf("read the floor after portability-cycle compaction: %v", err)
+			}
+			if !floorAbove {
+				t.Fatal("portability-cycle compaction completed without moving the floor above the receipt")
+			}
+			compactionEvent = "completed with the floor above the receipt"
+		default:
+			if blockedBy(compactorPID, connectPID) {
+				compactionEvent = "waited on the connect transaction"
+			} else {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}
+	if compactionEvent == "" {
+		t.Fatal("portability-cycle compaction neither waited on connect nor completed")
+	}
+	t.Logf("portability-cycle compaction %s", compactionEvent)
+
+	keyGateOpen = false
+	rollbackIssue49Transaction(t, keyGate, "portability key gate")
+	var connected workerResult
+	select {
+	case connected = <-connectDone:
+		connectJoined = true
+	case <-time.After(time.Minute):
+		t.Fatal("portability-cycle connect did not finish after both gates were released")
+	}
+	if connected.err != nil {
+		t.Fatalf("portability-cycle connect failed after both gates were released: %v", connected.err)
+	}
+	// Commit connect before waiting on a compaction that it can block.
+	if _, err := connect.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit portability-cycle connect: %v", err)
+	}
+	connectOpen = false
+	if !compactJoined {
+		var compacted workerResult
+		select {
+		case compacted = <-compactDone:
+			compactJoined = true
+		case <-time.After(time.Minute):
+			t.Fatal("portability-cycle compaction did not finish after connect committed")
+		}
+		if compacted.err != nil {
+			t.Fatalf("portability-cycle compaction failed after connect committed: %v", compacted.err)
+		}
+	}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(connected.value), &response); err != nil {
+		t.Fatalf("decode portability-cycle connect: %v", err)
+	}
+
+	t.Run("assertion", func(t *testing.T) {
+		if response["error"] != nil {
+			t.Fatalf("portability-cycle connect returned an error: %#v", response["error"])
+		}
+		if response["client_generation"] != float64(1) || response["scope_set_version"] != float64(1) {
+			t.Fatalf("portability-cycle connect identity is invalid: generation=%#v version=%#v", response["client_generation"], response["scope_set_version"])
+		}
+		delta, _ := response["scopes"].(map[string]any)
+		additions, _ := delta["add"].([]any)
+		cursors := map[string]any{}
+		for _, raw := range additions {
+			assignment, _ := raw.(map[string]any)
+			id, _ := assignment["id"].(string)
+			cursors[id] = assignment["cursor"]
+		}
+		if len(additions) != 4 || len(cursors) != 4 || cursors["cf:not-portable"] != nil || cursors["user:diagnostic-user"] != nil {
+			t.Fatalf("portability-cycle connect additions are invalid: count=%d", len(additions))
+		}
+		for _, seeded := range []string{scopeID, gateScopeID} {
+			cursor, _ := cursors[seeded].(string)
+			if cursor == "" {
+				t.Fatalf("portability-cycle connect did not continue %s from its receipt", seeded)
+			}
+			if position := issue49DecodeOpaqueToken(t, cursor, "ic1")["position"]; !reflect.DeepEqual(position, boundary) {
+				t.Fatalf("portability-cycle cursor for %s is not at the receipt position: %#v", seeded, position)
+			}
+		}
+		var floorNotAbove bool
+		if err := database.QueryRowContext(ctx, `
+			SELECT floor_position_kind = 'generation_start' OR floor_commit_lsn <= $1::pg_lsn
+			FROM synchro.sync_scope_state WHERE scope_id = $2`, exportLSN, scopeID).Scan(&floorNotAbove); err != nil {
+			t.Fatalf("read the adopted scope floor: %v", err)
+		}
+		if !floorNotAbove {
+			t.Fatal("the adopted scope floor moved above the issued seed position")
+		}
+	})
+
+	client := parseRealProtocolClient(t, response, clientID, scopeID, gateScopeID, "cf:not-portable", "user:diagnostic-user")
+	globalTable := requireRealTable(t, client, "cf_global_items")
+	rebuildRealScope(t, ctx, harness, token, client, "user:diagnostic-user", "00000000-0000-4000-8d02-000000000013")
+	rebuildRealScope(t, ctx, harness, token, client, "cf:not-portable", "00000000-0000-4000-8d02-000000000015")
+	continued := pullRealClient(t, ctx, harness, token, client)
+	t.Run("assertion", func(t *testing.T) {
+		changes := requireRealChanges(t, continued)
+		if len(changes) != len(laterIDs) {
+			t.Fatalf("seed continuation returned %d changes, want %d", len(changes), len(laterIDs))
+		}
+		seen := map[string]bool{}
+		for _, change := range changes {
+			pk, _ := change["pk"].(map[string]any)
+			row, _ := change["row"].(map[string]any)
+			recordID, _ := pk[globalTable.PrimaryKeyField].(string)
+			index := slices.Index(laterIDs, recordID)
+			if change["scope"] != scopeID || change["table"] != globalTable.ID || index < 0 || seen[recordID] || row[globalTable.ValueField] != laterValues[index] {
+				t.Fatalf("seed continuation returned an unexpected change for %s", recordID)
+			}
+			seen[recordID] = true
+		}
+	})
+	acknowledgeRealClientCursors(t, ctx, harness, token, client)
 }
 
 func TestRealIssue49ConcurrentUpdateDeletePreservesOneAuthoritativeWinner(t *testing.T) {
@@ -1026,9 +1712,9 @@ func TestRealIssue49FirstPushLateFailureRollsBackEveryDurableEffect(t *testing.T
 	}
 	mutations := []map[string]any{
 		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000001", recordIDs[0], "atomic-written"),
-		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000002", recordIDs[1], "atomic-suppressed"),
+		phase4InsertMutation(client, table, ownerField, "00000000-0000-4000-8d06-000000000002", recordIDs[1], "atomic-failed"),
 	}
-	suppressIssue49ItemInsert(t, ctx, harness, recordIDs[1])
+	failIssue49ItemInsert(t, ctx, harness, recordIDs[1])
 
 	payload := phase4PushPayload(client, "00000000-0000-4000-8d05-000000000000", mutations)
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", payload)

@@ -25,7 +25,7 @@ You need:
 Run the shell examples in Bash from a checkout of the selected Synchro version.
 Keep that checkout unchanged while you install its matching artifacts.
 
-The Synchro `0.3.2` server artifact uses PostgreSQL 18.3.
+The Synchro `0.4.0-rc.1` server artifact uses PostgreSQL 18.3.
 Install that version in the fresh VM from the PostgreSQL APT archive:
 
 ```sh
@@ -216,7 +216,9 @@ psql --host 127.0.0.1 --username synchro_quickstart_owner \
 ```
 
 The membership function reads only `synchro_projection.notes`. It returns
-`user:{owner_id}`. The RLS policy compares `owner_id` with the authenticated
+`user:{owner_id}`. The worker evaluates the function as its owner,
+`synchro_quickstart_owner`, in a security-restricted operation.
+`synchro_prepare_projection_view` grants that role SELECT on the view. The RLS policy compares `owner_id` with the authenticated
 push identity in `synchro.user_id` when that context exists. It prevents a user
 from writing another user's row or changing `owner_id`. A missing context
 permits trusted database owner and operator maintenance. The adapter login
@@ -312,7 +314,8 @@ belongs to `user:alice`.
 ## Assignment operations
 
 The tutorial uses the default `user:alice` assignment. The server also supports
-fixed shared scopes and explicit grants. Run these statements as an operator:
+fixed shared scopes, explicit grants, and one assignment function. Run these
+statements as an operator:
 
 ```sql
 SELECT synchro.synchro_register_shared_scope('notes:announcements', false);
@@ -320,9 +323,69 @@ SELECT synchro.synchro_grant_user_scope('alice', 'notes:review');
 SELECT synchro.synchro_revoke_user_scope('alice', 'notes:review');
 ```
 
-The next connect reconciles each change. An added scope rebuilds. A removed
-scope causes local provenance cleanup. A client cannot request an invented
-scope or grant itself one.
+An assignment function derives scopes from application data. This example
+assigns review scopes from an application table. Run it as
+`synchro_quickstart_owner`, because that role has `synchro_operator` membership
+and must own the function:
+
+```sql
+CREATE TABLE public.note_reviewers (
+    user_id text NOT NULL,
+    scope_id text NOT NULL,
+    PRIMARY KEY (user_id, scope_id)
+);
+
+CREATE FUNCTION public.note_review_scopes(p_user_id text)
+RETURNS SETOF text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, synchro
+BEGIN ATOMIC
+    SELECT scope_id FROM public.note_reviewers WHERE user_id = p_user_id;
+END;
+
+REVOKE ALL ON FUNCTION public.note_review_scopes(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.note_review_scopes(text) TO synchro_owner;
+
+SELECT synchro.synchro_register_assignment_function('public.note_review_scopes', 100);
+
+INSERT INTO public.note_reviewers (user_id, scope_id)
+VALUES ('alice', 'notes:review');
+```
+
+The extension requires these function attributes and grants:
+
+- `LANGUAGE sql` with a `BEGIN ATOMIC` body.
+- Exactly one `text` argument. The argument is the canonical user ID.
+- `RETURNS SETOF text`.
+- `STABLE`, and not `SECURITY DEFINER`.
+- `SET search_path = pg_catalog, synchro`.
+- EXECUTE for `synchro_owner` and no EXECUTE for PUBLIC.
+- SELECT for the function owner on each relation that the function reads, and
+  USAGE for the function owner on the schema of that relation.
+
+The extension evaluates the function as its owner in a security-restricted
+operation. The function body never runs with the privileges of
+`synchro_owner`. `synchro_quickstart_owner` owns `public.note_reviewers`, so it
+needs no additional grant. Schema-qualify each relation in the function body.
+The second registration argument limits each user to 100 function scopes. A
+function result must not start with `user:`. A scope holds rows only when a
+membership function returns that scope for the rows.
+
+Register the function again after you change its definition. Until then,
+connect and pull fail with `500 sync_integrity_failure`. Remove the
+registration with this statement:
+
+```sql
+SELECT synchro.synchro_unregister_assignment_function();
+```
+
+The next successful connect or pull reconciles each assignment change. A
+change to `public.note_reviewers` needs no grant call. A changed set advances
+`scope_set_version` by one, and the same response reports the change. An added
+scope rebuilds. A removed scope causes local provenance cleanup. Rebuild does
+not reconcile assignment. A client cannot request an invented scope or grant
+itself one.
 
 ## 7. Create the local tutorial token
 

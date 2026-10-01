@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [dev, master]
+    branches: [master]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -22,10 +22,14 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ''
       GOWORK: 'off'
+      # rust-cache keeps extensions/target between runs.
+      PGRX_TARGET_DIR: ${{ github.workspace }}/extensions/target
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Released update scripts are compared with their release tags.
+          fetch-depth: 0
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -55,23 +59,6 @@ jobs:
         with:
           runtime-source: download
 
-      - name: Validate contract and metadata
-        run: |
-          make verify-contract
-          make test-version-contract version-check release-npm-dry-run
-
-      - name: Build portable sources
-        run: make build-check build-seed build-conformance
-
-      - name: Run conformance checks
-        run: make lint-conformance test-conformance test-integration-mutant-manifest
-
-      - name: Run release and recovery controls
-        run: make test-release-artifacts test-release-publish test-server-consumer-helper test-packaged-smoke-structure
-
-      - name: Run source lint checks
-        run: make lint-go lint-rust-core lint-rust-pg check-pg-sql lint-rn PGRX_TARGET_DIR="$GITHUB_WORKSPACE/extensions/target"
-
       - name: Install Android build components
         run: |
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
@@ -80,8 +67,8 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
-      - name: Run unit and client build checks
-        run: make test-rust-core test-rn-unit build-kotlin-library test-kotlin-unit
+      - name: Run source-quality tests
+        run: make ci-source-quality
 
   pull-request-swift:
     name: pull-request Swift unit
@@ -114,44 +101,9 @@ jobs:
       security-events: write
     uses: ./.github/workflows/dependency-review.yml
 
-  candidate-reuse:
-    name: candidate reuse
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      reuse: ${{ steps.evidence.outputs.reuse }}
-    steps:
-      - name: Find a passed Candidate for the identical tree
-        id: evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Identical source trees give identical Candidate inputs. Promotions and
-          # back-merges reuse a parent result. A changed tree runs every suite.
-          reuse=false
-          commit="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA")"
-          tree="$(jq -r '.tree.sha' <<<"$commit")"
-          for parent in $(jq -r '.parents[].sha' <<<"$commit"); do
-            test "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$parent" | jq -r '.tree.sha')" = "$tree" || continue
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&status=completed&head_sha=$parent&per_page=100")"
-            for run in $(jq -r --arg sha "$parent" '.workflow_runs[] | select(.head_sha == $sha and .event == "push" and (.head_branch == "dev" or .head_branch == "master") and .conclusion == "success") | .id' <<<"$runs"); do
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" | jq -e 'any(.jobs[]; .name == "candidate" and .conclusion == "success")' >/dev/null; then
-                reuse=true
-                echo "Reused Candidate run $run from parent $parent. Both commits have tree $tree." >> "$GITHUB_STEP_SUMMARY"
-                break 2
-              fi
-            done
-          done
-          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
-
   candidate-pgrx-runtime:
     name: candidate PostgreSQL runtime
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -173,8 +125,7 @@ jobs:
 
   candidate-server:
     name: candidate server
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     env:
       GOWORK: 'off'
@@ -182,8 +133,6 @@ jobs:
       POSTGRESQL_VERSION: '18.3'
       RUST_TOOLCHAIN: '1.92.0'
       PGRX_TARGET_DIR: ${{ github.workspace }}/.pgrx-target
-      SOAK_SEED: '20260914'
-      SOAK_DURATION: '5s'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -212,38 +161,37 @@ jobs:
         with:
           expected-postgresql-version: ${{ env.POSTGRESQL_VERSION }}
 
-      - name: Run extension and SQL checks
-        run: make test-rust-pg check-pg-sql
+      - name: Install cargo-mutants
+        run: cargo install --locked --force cargo-mutants --version 27.1.0
 
-      - name: Run curated core mutants
-        run: |
-          cargo install --locked --force cargo-mutants --version 27.1.0
-          make test-rust-mutants
-
-      - name: Run adapter integration
+      - name: Start local PostgreSQL
         run: |
           make local-postgres-start
-          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
-          export ADAPTER_TEST_URL
-          make test-adapter
-          make local-postgres-stop
+          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
-      - name: Fetch extension update baseline
-        run: |
-          make conformance-update-baseline-extension-artifact
-          echo "SYNCHRO_CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT=$GITHUB_WORKSPACE/dist/conformance/synchro-pg-pg18-update-baseline" >> "$GITHUB_ENV"
+      - name: Run candidate-server tests
+        run: make ci-candidate-server SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
 
-      - name: Run real server black box with deterministic stateful seed
-        run: make test-blackbox
+      - name: Retain seeded stress replay evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: candidate-soak-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/soak-evidence
+          # A failure before the stress test leaves no journal. The test step keeps that failure.
+          if-no-files-found: ignore
 
-      - name: Run curated integration mutants
-        run: make test-integration-mutants
+      - name: Stop local PostgreSQL
+        if: always()
+        run: make local-postgres-stop
 
   candidate-swift:
     name: candidate Swift
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
+    if: github.event_name == 'push'
     runs-on: macos-15
+    env:
+      ANDROID_HOME: /Users/runner/Library/Android/sdk
+      ANDROID_SDK_ROOT: /Users/runner/Library/Android/sdk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -259,6 +207,15 @@ jobs:
           runtime-source: brew
 
       - uses: ./.github/actions/setup-conformance-pg18
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Export Android Java home
+        run: echo "ANDROID_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
 
       - name: Ensure CocoaPods is available
         run: command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
@@ -281,8 +238,8 @@ jobs:
             echo "WARM_CONNECT_ENV_FILE=$attach"
           } >> "$GITHUB_ENV"
 
-      - name: Run Swift checks against local PostgreSQL
-        run: make test-swift test-consumer-swift
+      - name: Run candidate-swift tests
+        run: make ci-candidate-swift
 
       - name: Stop local fixture
         if: always()
@@ -292,14 +249,13 @@ jobs:
 
   candidate-kotlin:
     name: candidate Kotlin
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: [candidate-reuse, candidate-pgrx-runtime]
+    if: github.event_name == 'push'
+    needs: candidate-pgrx-runtime
     runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       KOTLIN_ANDROID_SERIAL: emulator-5554
-      GRADLE_TEST_ARGS: ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -363,18 +319,11 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            make test-kotlin-instrumentation
-            make test-kotlin
-            make test-consumer-kotlin-device
-
-      - name: Build Kotlin source consumer
-        run: make test-consumer-kotlin
+          script: make ci-candidate-kotlin
 
   candidate-rn-ios:
     name: candidate React Native iOS
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
+    if: github.event_name == 'push'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -427,8 +376,8 @@ jobs:
             echo "WARM_CONNECT_ENV_FILE=$attach"
           } >> "$GITHUB_ENV"
 
-      - name: Run React Native iOS checks against local PostgreSQL
-        run: make test-rn-e2e-ios test-consumer-rn-ios
+      - name: Run candidate-rn-ios tests
+        run: make ci-candidate-rn-ios
 
       - name: Stop local fixture
         if: always()
@@ -438,13 +387,13 @@ jobs:
 
   candidate-rn-android:
     name: candidate React Native Android
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: [candidate-reuse, candidate-pgrx-runtime]
+    if: github.event_name == 'push'
+    needs: candidate-pgrx-runtime
     runs-on: ubuntu-24.04
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ''
+      KOTLIN_ANDROID_SERIAL: emulator-5554
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -529,26 +478,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            make test-rn-e2e-android-run
-            make test-consumer-rn-android
-
-  candidate-docs:
-    name: candidate docs
-    if: github.event_name == 'push' && needs.candidate-reuse.outputs.reuse != 'true'
-    needs: candidate-reuse
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
-
-      - name: Build documentation
-        run: make docs-build
+          script: make ci-candidate-rn-android
 
   pull-request:
     name: pull-request
@@ -574,14 +504,12 @@ jobs:
       - source-quality
       - codeql
       - dependency-scan
-      - candidate-reuse
       - candidate-pgrx-runtime
       - candidate-server
       - candidate-swift
       - candidate-kotlin
       - candidate-rn-ios
       - candidate-rn-android
-      - candidate-docs
     runs-on: ubuntu-24.04
     steps:
       - name: Require every candidate dependency
@@ -589,13 +517,9 @@ jobs:
           test "${{ needs.source-quality.result }}" = success
           test "${{ needs.codeql.result }}" = success
           test "${{ needs.dependency-scan.result }}" = success
-          test "${{ needs.candidate-reuse.result }}" = success
-          suite=success
-          if [ "${{ needs.candidate-reuse.outputs.reuse }}" = true ]; then suite=skipped; fi
-          test "${{ needs.candidate-pgrx-runtime.result }}" = "$suite"
-          test "${{ needs.candidate-server.result }}" = "$suite"
-          test "${{ needs.candidate-swift.result }}" = "$suite"
-          test "${{ needs.candidate-kotlin.result }}" = "$suite"
-          test "${{ needs.candidate-rn-ios.result }}" = "$suite"
-          test "${{ needs.candidate-rn-android.result }}" = "$suite"
-          test "${{ needs.candidate-docs.result }}" = "$suite"
+          test "${{ needs.candidate-pgrx-runtime.result }}" = success
+          test "${{ needs.candidate-server.result }}" = success
+          test "${{ needs.candidate-swift.result }}" = success
+          test "${{ needs.candidate-kotlin.result }}" = success
+          test "${{ needs.candidate-rn-ios.result }}" = success
+          test "${{ needs.candidate-rn-android.result }}" = success

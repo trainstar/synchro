@@ -164,7 +164,7 @@ class ContractTests {
     }
 
     @Test
-    fun testPushOutcomeShapeUsesRequestedOperation() {
+    fun testPushOutcomeRowPresenceStatesRowStateAfterPushUnit() {
         val row = JsonObject(
             mapOf("field-id" to JsonPrimitive("r1"), "field-title" to JsonPrimitive("Title"))
         )
@@ -186,12 +186,18 @@ class ContractTests {
                 listOf(valid),
                 emptyList(),
             ).validate(request)
+            PushResponse(
+                request.batchID,
+                "2026-01-01T00:00:00.000000Z",
+                listOf(valid.copy(serverRow = null, rowChecksum = null)),
+                emptyList(),
+            ).validate(request)
             assertTrue(
                 runCatching {
                     PushResponse(
                         request.batchID,
                         "2026-01-01T00:00:00.000000Z",
-                        listOf(valid.copy(serverRow = null, rowChecksum = null)),
+                        listOf(valid.copy(rowChecksum = null)),
                         emptyList(),
                     ).validate(request)
                 }.isFailure
@@ -550,6 +556,112 @@ class ContractTests {
                 parseRetryAfter(testCase.value) != null,
             )
         }
+    }
+
+    @Test
+    fun atomicPushResponseIsAllAppliedOrOneFailureWithEveryOtherMemberRejected() {
+        val base = makePushRequest(Operation.INSERT)
+        val mutations = (1..3).map { index ->
+            base.mutations.single().copy(
+                mutationID = "00000000-0000-5000-8000-00000000001$index",
+                pk = JsonObject(mapOf("field-id" to JsonPrimitive("r$index"))),
+            )
+        }
+        val request = base.copy(mutations = mutations, atomic = true)
+        fun applied(mutation: Mutation) = AcceptedMutation(
+            mutationID = mutation.mutationID,
+            table = mutation.table,
+            pk = mutation.pk,
+            outcomeSchema = request.schema,
+            status = MutationStatus.APPLIED,
+            serverRow = JsonObject(mapOf("field-id" to mutation.pk.getValue("field-id"))),
+            rowChecksum = validChecksum,
+            serverVersion = "server-version",
+        )
+        fun rejected(mutation: Mutation, code: MutationRejectionCode, status: MutationStatus = MutationStatus.REJECTED_TERMINAL) =
+            RejectedMutation(
+                mutationID = mutation.mutationID,
+                table = mutation.table,
+                pk = mutation.pk,
+                outcomeSchema = request.schema,
+                status = status,
+                code = code,
+                message = "rejected",
+            )
+        fun response(accepted: List<AcceptedMutation>, rejected: List<RejectedMutation>) =
+            PushResponse(request.batchID, "2026-01-01T00:00:00.000000Z", accepted, rejected)
+        val groupRejection = MutationRejectionCode.ATOMIC_BATCH_REJECTED
+        val (first, second, third) = mutations
+
+        response(mutations.map(::applied), emptyList()).validate(request)
+        response(
+            emptyList(),
+            listOf(
+                rejected(first, groupRejection),
+                rejected(second, MutationRejectionCode.ROW_ALREADY_EXISTS, MutationStatus.CONFLICT),
+                rejected(third, groupRejection),
+            ),
+        ).validate(request)
+        response(
+            emptyList(),
+            listOf(
+                rejected(first, groupRejection),
+                rejected(second, groupRejection),
+                rejected(third, MutationRejectionCode.POLICY_REJECTED),
+            ),
+        ).validate(request)
+
+        val malformed = listOf(
+            response(
+                listOf(applied(first)),
+                listOf(rejected(second, MutationRejectionCode.POLICY_REJECTED), rejected(third, groupRejection)),
+            ),
+            response(emptyList(), mutations.map { rejected(it, groupRejection) }),
+            response(
+                emptyList(),
+                listOf(
+                    rejected(first, MutationRejectionCode.POLICY_REJECTED),
+                    rejected(second, MutationRejectionCode.VALIDATION_FAILED),
+                    rejected(third, groupRejection),
+                ),
+            ),
+            response(
+                emptyList(),
+                listOf(
+                    rejected(first, groupRejection, MutationStatus.CONFLICT),
+                    rejected(second, MutationRejectionCode.POLICY_REJECTED),
+                    rejected(third, groupRejection),
+                ),
+            ),
+        )
+        malformed.forEach { outcome -> assertTrue(runCatching { outcome.validate(request) }.isFailure) }
+
+        val single = makePushRequest(Operation.INSERT)
+        assertTrue(
+            runCatching {
+                rejectedResponse(rejected(single.mutations.single(), groupRejection), single).validate(single)
+            }.isFailure,
+        )
+        assertTrue(runCatching { single.copy(atomic = false).validate() }.isFailure)
+    }
+
+    @Test
+    fun atomicFlagIsTheOnlyEncodedDifferenceFromANonAtomicRequest() {
+        val wire = Json {
+            encodeDefaults = true
+            explicitNulls = false
+        }
+        val request = makePushRequest(Operation.INSERT)
+        val nonAtomic = wire.encodeToString(PushRequest.serializer(), request)
+
+        assertEquals(
+            setOf("client_id", "client_generation", "batch_id", "schema", "mutations"),
+            json.parseToJsonElement(nonAtomic).let { it as JsonObject }.keys,
+        )
+        assertEquals(
+            nonAtomic.dropLast(1) + ",\"atomic\":true}",
+            wire.encodeToString(PushRequest.serializer(), request.copy(atomic = true)),
+        )
     }
 
     @Test

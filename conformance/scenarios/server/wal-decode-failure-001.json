@@ -3,7 +3,7 @@
   "schema_version": 2,
   "id": "SCN-WAL-DECODE-FAILURE-001",
   "title": "WAL decode poison blocks and repairs in commit order",
-  "description": "A decode failure creates durable redacted quarantine until the same source transaction repairs and unblocks the contiguous prefix.",
+  "description": "A decode failure creates durable redacted quarantine until the same source transaction repairs and unblocks the contiguous prefix. The real repairable decode poison comes from the published 0.3.1 migration baseline, whose decoder rejects a valid Relation refresh. A current TRUNCATE poison separately proves blocked acknowledgement and requires reset, not retry.",
   "requirement_ids": [
     "SYNC-WAL-005",
     "SYNC-WAL-006",
@@ -352,7 +352,7 @@
           "installation": {
             "installed": true,
             "schema_name": "synchro",
-            "extension_version": "0.3.2",
+            "extension_version": "0.4.0-rc.1",
             "protocol_version": 3,
             "minimum_client_runtime": 3,
             "stale_client_interval_milliseconds": 3600000,
@@ -682,7 +682,7 @@
         "target": "logical slot acknowledgement",
         "operator": "replace",
         "parameters": {
-          "scenario": "materialize transaction N+1 while transaction N is incomplete",
+          "scenario": "persist blocking poison for transaction N while a later transaction stays pending",
           "defect": "advance the slot to a later or batch-maximum LSN beyond the durable contiguous prefix"
         }
       }
@@ -699,7 +699,7 @@
         "target": "candidate logical slot reset lifecycle",
         "operator": "crash",
         "parameters": {
-          "scenario": "kill reset during exported-snapshot import, catch-up, or active-slot handoff",
+          "scenario": "restart PostgreSQL after reset creates its permanent candidate slot and before snapshot import, then discard that candidate and run a new reset",
           "defect": "use temporary or wrong slot, lose lifecycle state, activate before gap-free verification, or lose WAL continuity"
         }
       }
@@ -1027,7 +1027,7 @@
     {
       "id": "ASSERT-WAL-RESET-LIFECYCLE-SEMANTIC-001",
       "requirement_ids": ["SYNC-WAL-010"],
-      "description": "A permanent candidate slot and its persisted reset state survive interruption, then activate atomically only after verified gap-free catch-up.",
+      "description": "A permanent candidate slot and its persisted reset state survive interruption. Recovery discards that pre-activation candidate. A new reset with a different reset ID imports a new baseline and activates atomically only after verified gap-free catch-up.",
       "expectation_ids": ["EXPECT-WAL-DECODE-STATE-001", "EXPECT-WAL-DECODE-TRANSITION-001"],
       "predicate": {"contract_predicate": "state-transition", "name": "legal-state-transition", "payload": {}},
       "oracle": {"kind": "state-transition", "expected_source": "authored-model", "observed_source": "system-under-test"},

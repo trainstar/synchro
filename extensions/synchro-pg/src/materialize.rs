@@ -136,6 +136,8 @@ fn synchro_backfill_bucket_edges(
 
         let boundary = load_materialization_boundary(client)
             .unwrap_or_else(|error| pgrx::error!("loading membership backfill boundary: {error}"));
+        drop_staging_table(client)
+            .unwrap_or_else(|error| pgrx::error!("dropping membership backfill stage: {error}"));
 
         pgrx::JsonB(serde_json::json!({
             "tables": table_names,
@@ -198,10 +200,15 @@ pub(crate) fn resolve_membership_batch(
             .iter()
             .map(|record_id| serde_json::json!({ "record_id": record_id }))
             .collect::<Vec<_>>();
-        let rows = client.select(
-            &query,
-            None,
-            &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+        let rows = crate::bucketing::evaluate_as_function_owner(
+            &registration.membership_function,
+            || {
+                client.select(
+                    &query,
+                    None,
+                    &[pgrx::JsonB(serde_json::Value::Array(input)).into()],
+                )
+            },
         )?;
         for row in rows {
             let record_id = row
@@ -232,17 +239,213 @@ pub(crate) fn resolve_membership_batch(
     })
 }
 
-pub(crate) fn activate_staged_membership_generation(
+/// One pending membership stage of a registry transition.
+struct MembershipStage {
+    generation: i64,
+    target_relation_ids: Vec<String>,
+    declared_affected_scopes: Option<Vec<String>>,
+}
+
+/// Activate the membership stages of `transitions`, each a pair of source and
+/// target generation in activation order. One source transaction can carry
+/// several transitions. Their membership is evaluated once, with the registry
+/// of `evaluation_generation`, against the projection that the caller has
+/// already brought to its final state. `baseline` holds the buckets before the
+/// transaction of each changed row that existed before the transaction. The
+/// caller has already written the final edges of the changed rows, so the
+/// changed scopes compare the staged membership with that baseline. A row that
+/// the transaction inserted has no baseline and compares with its final edges. The affected scopes are the union of
+/// the declared scopes. A transition without a declaration adds the changed
+/// scopes.
+pub(crate) fn activate_membership_stages(
     client: &mut SpiClient<'_>,
-    source_generation: i64,
-    target_generation: i64,
+    transitions: &[(i64, i64)],
+    evaluation_generation: i64,
+    baseline: &std::collections::HashMap<(String, String), Vec<String>>,
     stream_generation: &str,
     activation_commit_lsn: &str,
     activation_end_lsn: &str,
 ) -> Result<(), String> {
+    let mut stages = Vec::new();
+    for (source_generation, target_generation) in transitions {
+        if let Some(stage) =
+            load_pending_membership_stage(client, *source_generation, *target_generation)?
+        {
+            stages.push(stage);
+        }
+    }
+    let Some(last_stage) = stages.last().map(|stage| stage.generation) else {
+        return Ok(());
+    };
+
+    acquire_backfill_lock(client)?;
+    let registry = load_registry_generation_from_client(client, evaluation_generation)
+        .map_err(|error| format!("loading membership evaluation registry: {error}"))?;
+    // A later transition in the transaction can remove a staged relation. That
+    // relation has no final projection and no final membership.
+    let tables: Vec<&TableRegistration> = registry
+        .iter()
+        .filter(|registration| {
+            registration.is_synced()
+                && stages.iter().any(|stage| {
+                    stage
+                        .target_relation_ids
+                        .contains(&registration.relation_id)
+                })
+        })
+        .collect();
+    if stages.iter().any(|stage| {
+        stage.generation == evaluation_generation
+            && stage
+                .target_relation_ids
+                .iter()
+                .any(|relation_id| !tables.iter().any(|table| &table.relation_id == relation_id))
+    }) {
+        return Err("membership activation targets are incomplete".to_string());
+    }
+    let table_names: Vec<String> = tables
+        .iter()
+        .map(|table| table.table_name.clone())
+        .collect();
+
+    validate_existing_edges(client, &tables)?;
+    create_staging_table(client)?;
+    stage_membership_baseline(client, &tables, baseline)?;
+    let mut counts = std::collections::HashMap::with_capacity(tables.len());
+    for table in &tables {
+        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
+        counts.insert(table.relation_id.clone(), (records, edges));
+    }
+    verify_staging(client, &tables)?;
+    let changed_scopes = changed_scopes(client, &table_names)?;
+    let mut affected_scopes = Vec::new();
+    let mut undeclared = false;
+    for stage in &stages {
+        match &stage.declared_affected_scopes {
+            Some(declared) => affected_scopes.extend(declared.iter().cloned()),
+            None => undeclared = true,
+        }
+    }
+    if undeclared {
+        affected_scopes.extend(changed_scopes.iter().cloned());
+    }
+    affected_scopes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    affected_scopes.dedup();
+    if affected_scopes.is_empty() {
+        return Err("membership activation requires exact affected scopes".to_string());
+    }
+    if changed_scopes
+        .iter()
+        .any(|scope| !affected_scopes.contains(scope))
+    {
+        return Err("declared affected scopes omit a changed scope".to_string());
+    }
+    install_staged_edges(client, &table_names)?;
+    advance_affected_generations(client, &affected_scopes, Some(last_stage))?;
+
+    for stage in &stages {
+        let (mut record_count, mut edge_count) = (0i64, 0i64);
+        for relation_id in &stage.target_relation_ids {
+            let (records, edges) = counts.get(relation_id).copied().unwrap_or((0, 0));
+            record_count = record_count
+                .checked_add(records)
+                .ok_or_else(|| "membership activation record count overflowed".to_string())?;
+            edge_count = edge_count
+                .checked_add(edges)
+                .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
+        }
+        let updated = client
+            .update(
+                "UPDATE synchro.sync_registry_membership_stages
+                 SET state = 'activated', stream_generation = $2,
+                     activation_commit_lsn = $3::pg_lsn,
+                     activation_end_lsn = $4::pg_lsn,
+                     staged_record_count = $5, staged_edge_count = $6,
+                     affected_scopes = $7::text[], verified = true,
+                     activated_at = now()
+                 WHERE registry_generation = $1 AND state = 'pending'",
+                None,
+                &[
+                    stage.generation.into(),
+                    stream_generation.into(),
+                    activation_commit_lsn.into(),
+                    activation_end_lsn.into(),
+                    record_count.into(),
+                    edge_count.into(),
+                    affected_scopes.clone().into(),
+                ],
+            )
+            .map_err(|error| format!("recording membership activation: {error}"))?
+            .len();
+        if updated != 1 {
+            return Err("membership activation stage changed".to_string());
+        }
+    }
+    drop_staging_table(client)
+}
+
+/// Record the membership before the transaction of the changed rows of the
+/// staged tables. A row without buckets keeps one row with a null bucket.
+fn stage_membership_baseline(
+    client: &mut SpiClient<'_>,
+    tables: &[&TableRegistration],
+    baseline: &std::collections::HashMap<(String, String), Vec<String>>,
+) -> Result<(), String> {
+    let mut rows = Vec::new();
+    for ((relation_id, record_id), buckets) in baseline {
+        let Some(table) = tables
+            .iter()
+            .find(|table| &table.relation_id == relation_id)
+        else {
+            continue;
+        };
+        if buckets.is_empty() {
+            rows.push(serde_json::json!({
+                "relation_id": relation_id, "table_name": table.table_name,
+                "record_id": record_id, "bucket_id": serde_json::Value::Null,
+            }));
+        }
+        for bucket_id in buckets {
+            rows.push(serde_json::json!({
+                "relation_id": relation_id, "table_name": table.table_name,
+                "record_id": record_id, "bucket_id": bucket_id,
+            }));
+        }
+    }
+    for batch in rows.chunks(DEFAULT_BACKFILL_BATCH_SIZE as usize) {
+        let inserted = client
+            .update(
+                "INSERT INTO pg_temp.synchro_membership_baseline (
+                     relation_id, table_name, record_id, bucket_id
+                 )
+                 SELECT input.relation_id::uuid, input.table_name, input.record_id,
+                        input.bucket_id
+                 FROM jsonb_to_recordset($1::jsonb) AS input(
+                     relation_id text, table_name text, record_id text, bucket_id text
+                 )
+                 RETURNING record_id",
+                None,
+                &[pgrx::JsonB(serde_json::Value::Array(batch.to_vec())).into()],
+            )
+            .map_err(|error| format!("staging membership baseline: {error}"))?
+            .len();
+        if inserted != batch.len() {
+            return Err("membership baseline was not staged completely".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn load_pending_membership_stage(
+    client: &SpiClient<'_>,
+    source_generation: i64,
+    target_generation: i64,
+) -> Result<Option<MembershipStage>, String> {
     let rows = client
         .select(
-            "SELECT source_registry_generation, state, affected_scopes
+            "SELECT source_registry_generation, state, affected_scopes,
+                    ARRAY(SELECT target::text FROM unnest(target_relation_ids) target
+                          ORDER BY target) AS target_relation_ids
              FROM synchro.sync_registry_membership_stages
              WHERE registry_generation = $1",
             None,
@@ -250,7 +453,7 @@ pub(crate) fn activate_staged_membership_generation(
         )
         .map_err(|error| format!("loading membership activation stage: {error}"))?;
     let Some(stage) = rows.into_iter().next() else {
-        return Ok(());
+        return Ok(None);
     };
     let staged_source = stage
         .get_by_name::<i64, &str>("source_registry_generation")
@@ -263,106 +466,25 @@ pub(crate) fn activate_staged_membership_generation(
     if staged_source != source_generation || state != "pending" {
         return Err("membership activation stage binding is invalid".to_string());
     }
-
-    acquire_backfill_lock(client)?;
-    let registry = load_registry_generation_from_client(client, target_generation)
-        .map_err(|error| format!("loading pending membership registry: {error}"))?;
-    let target_rows = client
-        .select(
-            "SELECT target_relation_id::text AS relation_id
-             FROM synchro.sync_registry_membership_stages stage
-             CROSS JOIN LATERAL unnest(stage.target_relation_ids) target(target_relation_id)
-             WHERE stage.registry_generation = $1
-             ORDER BY target_relation_id",
-            None,
-            &[target_generation.into()],
-        )
-        .map_err(|error| format!("loading membership activation targets: {error}"))?;
-    let mut target_relation_ids = Vec::with_capacity(target_rows.len());
-    for row in target_rows {
-        target_relation_ids.push(required_text(&row, "relation_id", "")?);
-    }
-    let tables: Vec<&TableRegistration> = registry
-        .iter()
-        .filter(|registration| {
-            registration.is_synced() && target_relation_ids.contains(&registration.relation_id)
-        })
-        .collect();
-    if tables.len() != target_relation_ids.len() || tables.is_empty() {
-        return Err("membership activation targets are incomplete".to_string());
-    }
-    let table_names: Vec<String> = tables
-        .iter()
-        .map(|table| table.table_name.clone())
-        .collect();
-
-    validate_existing_edges(client, &tables)?;
-    create_staging_table(client)?;
-    let mut record_count = 0i64;
-    let mut edge_count = 0i64;
-    for table in &tables {
-        let (records, edges, _) = stage_table_edges(client, table, DEFAULT_BACKFILL_BATCH_SIZE)?;
-        record_count = record_count
-            .checked_add(records)
-            .ok_or_else(|| "membership activation record count overflowed".to_string())?;
-        edge_count = edge_count
-            .checked_add(edges)
-            .ok_or_else(|| "membership activation edge count overflowed".to_string())?;
-    }
-    verify_staging(client, &tables)?;
-    let changed_scopes = changed_scopes(client, &table_names)?;
-    let affected_scopes = match declared_affected_scopes {
-        Some(declared) => {
-            if declared.is_empty()
-                || declared
-                    .windows(2)
-                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
-            {
-                return Err("declared affected scopes are invalid".to_string());
-            }
-            if changed_scopes
-                .iter()
-                .any(|scope| declared.binary_search(scope).is_err())
-            {
-                return Err("declared affected scopes omit a changed scope".to_string());
-            }
-            declared
+    if let Some(declared) = &declared_affected_scopes {
+        if declared.is_empty()
+            || declared
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+        {
+            return Err("declared affected scopes are invalid".to_string());
         }
-        None if changed_scopes.is_empty() => {
-            return Err("membership activation requires exact affected scopes".to_string());
-        }
-        None => changed_scopes,
-    };
-    install_staged_edges(client, &table_names)?;
-    advance_affected_generations(client, &affected_scopes, Some(target_generation))?;
-
-    let updated = client
-        .update(
-            "UPDATE synchro.sync_registry_membership_stages
-             SET state = 'activated', stream_generation = $2,
-                 activation_commit_lsn = $3::pg_lsn,
-                 activation_end_lsn = $4::pg_lsn,
-                 staged_record_count = $5, staged_edge_count = $6,
-                 affected_scopes = $7::text[], verified = true,
-                 activated_at = now()
-             WHERE registry_generation = $1 AND state = 'pending'",
-            None,
-            &[
-                target_generation.into(),
-                stream_generation.into(),
-                activation_commit_lsn.into(),
-                activation_end_lsn.into(),
-                record_count.into(),
-                edge_count.into(),
-                affected_scopes.clone().into(),
-            ],
-        )
-        .map_err(|error| format!("recording membership activation: {error}"))?
-        .len();
-    if updated != 1 {
-        return Err("membership activation stage changed".to_string());
     }
-    Ok(())
+    let target_relation_ids = stage
+        .get_by_name::<Vec<String>, &str>("target_relation_ids")
+        .map_err(|error| format!("reading membership activation targets: {error}"))?
+        .filter(|targets| !targets.is_empty())
+        .ok_or_else(|| "membership activation targets are incomplete".to_string())?;
+    Ok(Some(MembershipStage {
+        generation: target_generation,
+        target_relation_ids,
+        declared_affected_scopes,
+    }))
 }
 
 pub(crate) fn migrate_schema_digests(
@@ -1041,10 +1163,14 @@ fn acquire_backfill_lock(client: &mut SpiClient<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates a new edge stage and membership baseline for one staging operation.
+/// The operation drops both before it succeeds. A relation that already has a
+/// stage name can belong to the caller, so creation then fails instead of
+/// using it.
 fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
     client
         .update(
-            "CREATE TEMP TABLE IF NOT EXISTS synchro_backfill_edges (
+            "CREATE TEMP TABLE synchro_backfill_edges (
                  relation_id UUID NOT NULL,
                  table_name TEXT NOT NULL,
                  record_id TEXT NOT NULL,
@@ -1058,8 +1184,28 @@ fn create_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
         )
         .map_err(|error| format!("creating temporary edge table: {error}"))?;
     client
-        .update("TRUNCATE pg_temp.synchro_backfill_edges", None, &[])
-        .map_err(|error| format!("clearing temporary edge table: {error}"))?;
+        .update(
+            "CREATE TEMP TABLE synchro_membership_baseline (
+                 relation_id UUID NOT NULL,
+                 table_name TEXT NOT NULL,
+                 record_id TEXT NOT NULL,
+                 bucket_id TEXT
+             ) ON COMMIT DROP",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("creating temporary membership baseline: {error}"))?;
+    Ok(())
+}
+
+fn drop_staging_table(client: &mut SpiClient<'_>) -> Result<(), String> {
+    client
+        .update(
+            "DROP TABLE pg_temp.synchro_backfill_edges, pg_temp.synchro_membership_baseline",
+            None,
+            &[],
+        )
+        .map_err(|error| format!("dropping temporary edge table: {error}"))?;
     Ok(())
 }
 
@@ -1279,7 +1425,7 @@ fn stage_table_edges(
     Ok((record_count, edge_count, batch_count))
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -1318,14 +1464,30 @@ fn verify_staging(client: &SpiClient<'_>, tables: &[&TableRegistration]) -> Resu
     Ok(())
 }
 
+/// Compare the staged edges with the prior membership. The prior membership of
+/// a row in pg_temp.synchro_membership_baseline is its baseline. Every other
+/// row keeps its current edges.
 fn changed_scopes(client: &SpiClient<'_>, table_names: &[String]) -> Result<Vec<String>, String> {
     let rows = client
         .select(
-            "SELECT bucket_id AS scope_id
+            "WITH prior AS (
+                 SELECT edge.relation_id, edge.table_name, edge.record_id, edge.bucket_id
+                 FROM synchro.sync_bucket_edges edge
+                 WHERE edge.table_name = ANY($1)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM pg_temp.synchro_membership_baseline baseline
+                       WHERE baseline.relation_id = edge.relation_id
+                         AND baseline.record_id = edge.record_id
+                   )
+                 UNION ALL
+                 SELECT relation_id, table_name, record_id, bucket_id
+                 FROM pg_temp.synchro_membership_baseline
+                 WHERE table_name = ANY($1) AND bucket_id IS NOT NULL
+             )
+             SELECT bucket_id AS scope_id
              FROM (
-                 (SELECT relation_id, table_name, record_id, bucket_id
-                  FROM synchro.sync_bucket_edges
-                  WHERE table_name = ANY($1)
+                 (SELECT relation_id, table_name, record_id, bucket_id FROM prior
                   EXCEPT
                   SELECT relation_id, table_name, record_id, bucket_id
                   FROM pg_temp.synchro_backfill_edges)
@@ -1333,9 +1495,7 @@ fn changed_scopes(client: &SpiClient<'_>, table_names: &[String]) -> Result<Vec<
                  (SELECT relation_id, table_name, record_id, bucket_id
                   FROM pg_temp.synchro_backfill_edges
                   EXCEPT
-                  SELECT relation_id, table_name, record_id, bucket_id
-                  FROM synchro.sync_bucket_edges
-                  WHERE table_name = ANY($1))
+                  SELECT relation_id, table_name, record_id, bucket_id FROM prior)
              ) AS changed",
             None,
             &[table_names.to_vec().into()],

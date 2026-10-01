@@ -369,9 +369,9 @@ final class HttpClient: @unchecked Sendable {
             cursorFingerprintsComplete: cursorFingerprintsComplete,
             requestFacts: requestFacts,
             responseBody: observedStatusCode == 200 ? data : nil,
-            // The failure body carries the reported code. Only that code is
-            // derived here, so no error payload is retained.
-            errorCode: observedErrorCode(statusCode: observedStatusCode, responseBody: data)
+            // The failure body carries the reported code and retryability.
+            // Only those facts are derived here, so no error payload is retained.
+            reportedError: observedError(statusCode: observedStatusCode, responseBody: data)
         )
         observationRecorded = true
         try await config.transportObservationCollector?.pauseIfArmed(for: operationClass)
@@ -386,7 +386,7 @@ final class HttpClient: @unchecked Sendable {
         cursorFingerprintsComplete: Bool?,
         requestFacts: TransportRequestFacts? = nil,
         responseBody: Data? = nil,
-        errorCode: String? = nil
+        reportedError: (code: String?, retryable: Bool?) = (nil, nil)
     ) {
         let attemptEnded = DispatchTime.now().uptimeNanoseconds
         config.transportObservationCollector?.record(
@@ -398,7 +398,8 @@ final class HttpClient: @unchecked Sendable {
             requestFacts: requestFacts,
             rebuildResponseFacts: operationClass == .rebuild ? rebuildResponseFacts(from: responseBody) : nil,
             pullResponseFacts: operationClass == .pull ? pullResponseFacts(from: responseBody) : nil,
-            errorCode: errorCode
+            errorCode: reportedError.code,
+            retryable: reportedError.retryable
         )
     }
 
@@ -597,9 +598,19 @@ final class HttpClient: @unchecked Sendable {
         return nil
     }
 
-    private func observedErrorCode(statusCode: Int, responseBody: Data?) -> String? {
-        guard !(200..<300).contains(statusCode), let responseBody else { return nil }
-        return protocolErrorCode(from: responseBody)?.rawValue
+    private func observedError(statusCode: Int, responseBody: Data?) -> (code: String?, retryable: Bool?) {
+        struct RetryableOnlyErrorResponse: Decodable {
+            struct Body: Decodable {
+                let retryable: Bool
+            }
+
+            let error: Body
+        }
+        guard !(200..<300).contains(statusCode), let responseBody else { return (nil, nil) }
+        return (
+            protocolErrorCode(from: responseBody)?.rawValue,
+            try? decoder.decode(RetryableOnlyErrorResponse.self, from: responseBody).error.retryable
+        )
     }
 
     private func decodeProtocolError(from data: Data) -> ErrorBody? {

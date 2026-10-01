@@ -1,5 +1,7 @@
 package com.trainstar.synchro
 
+import kotlinx.coroutines.delay
+
 internal const val RETRYABLE_429_ERROR_JSON =
     "{\"error\":{\"code\":\"retry_later\",\"message\":\"retry later\",\"retryable\":true}}"
 internal const val RETRYABLE_503_ERROR_JSON =
@@ -386,3 +388,31 @@ fun makeChangeRecord(
 
 fun protocolEmptyScopeChecksum(scopeID: String): ChecksumObject =
     Integrity.scopeDigest(PROTOCOL_TEST_SCHEMA_HASH, scopeID, emptyList())
+
+/** Returns the current records. A legacy record fails the calling test. */
+internal fun List<RetainedMutationInspection>.currentRecords(): List<PendingMutationInspection> = map {
+    (it as? RetainedMutationInspection.Current)?.mutation ?: error("unexpected legacy mutation")
+}
+
+/**
+ * A real server answers a pull with retryable 503 capture_pending until WAL
+ * capture reaches the accepted writes. A consumer calls syncNow again. The
+ * public error names no protocol code, and a retryable 503 envelope admits only
+ * capture_pending and temporary_unavailable, so every other failure propagates.
+ */
+internal suspend fun syncNowRetryingCapturePending(client: SynchroClient, timeoutMs: Long = 30_000) {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (true) {
+        try {
+            client.syncNow()
+            return
+        } catch (error: RetryableError) {
+            if (error.retryClassification != RetryClassification.HTTP_503 ||
+                System.currentTimeMillis() >= deadline
+            ) {
+                throw error
+            }
+        }
+        delay(250)
+    }
+}

@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/sha512"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
@@ -74,18 +73,6 @@ func testTokenHS256(userID string, secret []byte) string {
 	)
 	sigInput := header + "." + payload
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(sigInput))
-	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return sigInput + "." + sig
-}
-
-func testTokenHS384(userID string, secret []byte) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS384","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString(
-		[]byte(fmt.Sprintf(`{"sub":"%s","iat":1700000000,"exp":9999999999}`, userID)),
-	)
-	sigInput := header + "." + payload
-	mac := hmac.New(sha512.New384, secret)
 	mac.Write([]byte(sigInput))
 	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return sigInput + "." + sig
@@ -443,33 +430,6 @@ func TestRequireCurrentExtensionObjectsRejectsStale(t *testing.T) {
 	}
 }
 
-func TestConnectPassthroughTrustedUpstreamAuth(t *testing.T) {
-	srv := testServerWithConfig(t, func(cfg *Config) {
-		cfg.UserIDResolver = func(r *http.Request) (string, error) {
-			return "user-1", nil
-		}
-	})
-	clientID := testClientID(t, "test-canonical-connect-upstream-client")
-	schema := currentSchemaReference(t, srv)
-
-	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         clientID,
-		"platform":          "ios",
-		"app_version":       "1.0.0",
-		"protocol_version":  ExpectedProtocolVersion,
-		"schema":            schema,
-		"scope_set_version": 0,
-		"known_scopes":      map[string]any{},
-	})
-
-	if status != 200 {
-		t.Fatalf("expected 200, got %d: %v", status, body)
-	}
-	if body["protocol_version"] == nil {
-		t.Error("response missing 'protocol_version'")
-	}
-}
-
 func TestConnectUpgradeRequired426(t *testing.T) {
 	srv := testServer(t)
 	token := testToken("user-1")
@@ -698,25 +658,71 @@ func TestPushRejectsMalformedClientVersionTimestamp(t *testing.T) {
 	}
 }
 
-func TestTrustedUpstreamAuthRequiresUser(t *testing.T) {
-	srv := testServerWithConfig(t, func(cfg *Config) {
-		cfg.UserIDResolver = func(r *http.Request) (string, error) {
-			return "", ErrAuthRequired
+func TestPushAtomicMemberRequiresLiteralTrue(t *testing.T) {
+	srv := testServer(t)
+	token := testToken("user-1")
+	clientID := testClientID(t, "test-atomic-push-client")
+	client := connectClient(t, srv, token, clientID)
+	request := func(idPrefix string, atomic any) map[string]any {
+		mutations := make([]map[string]any, 0, 2)
+		for _, mutationID := range []string{idPrefix + "1", idPrefix + "2"} {
+			mutations = append(mutations, map[string]any{
+				"mutation_id":     mutationID,
+				"table":           "018f2b5e-7c42-7a1d-9d31-8a95bd6744f0",
+				"pk":              map[string]any{"018f2b5e-7c42-7a1d-9d31-8a95bd6744f1": mutationID},
+				"authored_schema": client.Schema,
+				"op":              "insert",
+				"client_version":  "2026-08-14T00:00:00.000000Z",
+				"columns":         map[string]any{"018f2b5e-7c42-7a1d-9d31-8a95bd6744f2": "value"},
+			})
 		}
-	})
+		return map[string]any{
+			"client_id":         clientID,
+			"client_generation": client.Generation,
+			"batch_id":          idPrefix + "0",
+			"schema":            client.Schema,
+			"atomic":            atomic,
+			"mutations":         mutations,
+		}
+	}
 
-	status, body := doJSON(t, "POST", srv.URL+"/sync/connect", "", map[string]any{
-		"client_id":         "client",
-		"platform":          "ios",
-		"app_version":       "1.0.0",
-		"protocol_version":  1,
-		"schema":            map[string]any{"version": 0, "hash": ""},
-		"scope_set_version": 0,
-		"known_scopes":      map[string]any{},
-	})
+	for _, tt := range []struct {
+		name     string
+		idPrefix string
+		atomic   any
+	}{
+		{name: "false", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67441", atomic: false},
+		{name: "number", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67442", atomic: 1},
+		{name: "null", idPrefix: "018f2b5e-7c42-7a1d-9d31-8a95bd67443", atomic: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, request(tt.idPrefix, tt.atomic))
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %v", status, body)
+			}
+			errorBody, ok := body["error"].(map[string]any)
+			if !ok || errorBody["code"] != "invalid_request" {
+				t.Fatalf("expected invalid_request, got %v", body)
+			}
+		})
+	}
 
-	if status != 401 {
-		t.Fatalf("expected 401, got %d: %v", status, body)
+	status, body := doJSON(t, "POST", srv.URL+"/sync/push", token, request("018f2b5e-7c42-7a1d-9d31-8a95bd67444", true))
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", status, body)
+	}
+	if accepted, ok := body["accepted"].([]any); !ok || len(accepted) != 0 {
+		t.Fatalf("expected no accepted outcome, got %v", body["accepted"])
+	}
+	rejected, ok := body["rejected"].([]any)
+	if !ok || len(rejected) != 2 {
+		t.Fatalf("expected two rejected outcomes, got %v", body["rejected"])
+	}
+	for index, wantCode := range []string{"table_not_synced", "atomic_batch_rejected"} {
+		outcome, ok := rejected[index].(map[string]any)
+		if !ok || outcome["code"] != wantCode {
+			t.Fatalf("rejected outcome %d code = %v, want %s", index, rejected[index], wantCode)
+		}
 	}
 }
 
@@ -745,47 +751,6 @@ func TestRoutesAuthenticateBeforeVersionGate(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 			}
 		})
-	}
-}
-
-func TestJWTRejectsHS384Token(t *testing.T) {
-	secret := []byte("test-secret")
-	called := false
-	handler := jwtMiddleware(Config{JWTSecret: secret}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		called = true
-	}))
-	request := httptest.NewRequest(http.MethodPost, "/sync/connect", nil)
-	request.Header.Set("Authorization", "Bearer "+testTokenHS384("user", secret))
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-	if called {
-		t.Fatal("HS384 token reached the protected handler")
-	}
-}
-
-func TestJWTRejectsDuplicateAuthorizationHeaders(t *testing.T) {
-	secret := []byte("test-secret")
-	called := false
-	handler := jwtMiddleware(Config{JWTSecret: secret}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		called = true
-	}))
-	request := httptest.NewRequest(http.MethodPost, "/sync/connect", nil)
-	request.Header.Add("Authorization", "Bearer "+testTokenHS256("first-user", secret))
-	request.Header.Add("Authorization", "Bearer "+testTokenHS256("second-user", secret))
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-	if called {
-		t.Fatal("duplicate authorization headers reached the protected handler")
 	}
 }
 

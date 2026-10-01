@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/health.rs b/extensions/synchro-pg/src/health.rs
+--- a/extensions/synchro-pg/src/health.rs
++++ b/extensions/synchro-pg/src/health.rs
+@@ -220,7 +220,7 @@ SELECT
+                          OR key_attribute.attgenerated <> ''
+                      )
+                ))
+-           OR EXISTS (
++           OR false AND EXISTS (
+                SELECT 1
+                FROM synchro.sync_registry_fields field
+                JOIN pg_catalog.pg_attribute field_attribute

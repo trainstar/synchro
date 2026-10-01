@@ -8,7 +8,7 @@
   "properties": {
     "$schema": { "const": "./schemas/support-matrix.schema.json" },
     "schema_version": { "const": 1 },
-    "release": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "release": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[1-9][0-9]*)?$" },
     "current_track_policy": { "$ref": "#/$defs/currentTrackPolicy" },
     "semantic_corpus_cell_ids": { "$ref": "#/$defs/semanticCorpusCellIDs" },
     "cells": {

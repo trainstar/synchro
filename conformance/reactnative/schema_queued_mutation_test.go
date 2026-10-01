@@ -70,7 +70,7 @@ func TestValidateSchemaQueuedMutationScenarioRejectsContractChanges(t *testing.T
 
 func TestSchemaQueuedMutationCommandUsesEmptyStepsArray(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create schema-queued-mutation coordinator: %v", err)
@@ -90,7 +90,7 @@ func TestSchemaQueuedMutationFinalCaptureAcceptsReopenedStatus(t *testing.T) {
 	coordinator := &SchemaQueuedMutationCoordinator{}
 	for _, status := range []string{"stopped", "uninitialized"} {
 		t.Run(status, func(t *testing.T) {
-			raw := fmt.Sprintf(`{"kind":"capture","capture":{"client_state":null,"pending_mutations":[],"rejected_mutations":[],"sync_status":{"state":%q,"retry_at":null,"operation":null,"failure":null},"sync_events":[],"request_trace":{"observations":[],"overflowed":false,"sequenceCheckpoint":0},"durable_proof":{"row_metadata":null,"rebuild_receipt_proofs":[]}},"process":{"process_id":"process","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, status)
+			raw := fmt.Sprintf(`{"kind":"capture","capture":{"client_state":null,"pending_mutations":[],"rejected_mutations":[],"sync_status":{"state":%q,"retry_at":null,"operation":null,"failure":null},"sync_events":[],"request_trace":{"observations":[],"overflowed":false,"sequenceCheckpoint":0},"durable_proof":{"row_metadata":null,"rebuild_receipt_proofs":[]},"application_rows":[]},"process":{"process_id":"process","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, status)
 			if _, err := coordinator.validateFinalCapture(json.RawMessage(raw)); err != nil {
 				t.Fatalf("validate reopened status %q: %v", status, err)
 			}
@@ -100,19 +100,23 @@ func TestSchemaQueuedMutationFinalCaptureAcceptsReopenedStatus(t *testing.T) {
 
 func TestSchemaQueuedMutationFinalCaptureRequestsDurableProof(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "ios", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create schema-queued-mutation coordinator: %v", err)
 	}
 	defer func() { _ = coordinator.Close(context.Background()) }()
+	// Prepare binds the compatible write to its runtime table and key.
+	write := coordinator.steps["STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001"]
+	write.Operation.Payload = json.RawMessage(`{"table_id":"cf_schema_queue","pk":{"id":"00000000-0000-4000-8000-000000000001"}}`)
+	coordinator.steps[write.ID] = write
 	coordinator.stage = schemaQueuedMutationStageRestarted
 	response, err := coordinator.advanceLocked(context.Background(), 1)
 	if err != nil || response.Command == nil {
 		t.Fatalf("create schema-queued-mutation final capture command: command=%#v error=%v", response.Command, err)
 	}
 	sources, ok := response.Command.Action.Action.Parameters["sources"].([]string)
-	want := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof"}
+	want := []string{"scope-state", "pending-mutations", "rejected-mutations", "sync-status", "sync-events", "request-trace", "durable-proof", "application-rows"}
 	if !ok || !slices.Equal(sources, want) {
 		t.Fatalf("schema-queued-mutation final capture sources=%#v want=%#v", response.Command.Action.Action.Parameters["sources"], want)
 	}
@@ -164,6 +168,8 @@ func TestSchemaQueuedMutationServerEvidenceUsesControllerAndClientCaptures(t *te
 	recordID := "00000000-0000-4000-8000-000000008001"
 	digest := strings.Repeat("a", 64)
 	checksum := fmt.Sprintf(`{"algorithm":"sha256","version":1,"encoding":"hex","digest":%q}`, digest)
+	baselineDigest := strings.Repeat("b", 64)
+	baselineChecksum := fmt.Sprintf(`{"algorithm":"sha256","version":1,"encoding":"hex","digest":%q}`, baselineDigest)
 	proof, err := json.Marshal(durableProof{
 		RowMetadata: &durableMetadata{
 			TableName: "cf_schema_queue", RecordID: recordID, ServerVersion: "runtime-version", RowChecksum: &checksum,
@@ -177,18 +183,26 @@ func TestSchemaQueuedMutationServerEvidenceUsesControllerAndClientCaptures(t *te
 		userID: "user-a", clientID: "client-a", tableName: "cf_schema_queue",
 		runtimeIDs: map[string]json.RawMessage{"queued-row-primary-key": json.RawMessage(`"` + recordID + `"`)},
 		preRestart: &traceSnapshot{Observations: []transportObservation{
-			{},
+			{OperationClass: "connect"},
 			{OperationClass: "rebuild", RequestFacts: json.RawMessage(fmt.Sprintf(`{"rebuild_id_fingerprint":%q}`, hashFingerprint(rebuildID)))},
-			{},
-			{},
+			{OperationClass: "pull"},
+			{OperationClass: "connect"},
+			{OperationClass: "push"},
+			{OperationClass: "pull"},
+			{OperationClass: "connect"},
 			{OperationClass: "connect", RequestFacts: json.RawMessage(`{"client_generation":5,"scope_set_version":7}`)},
+			{OperationClass: "push"},
 		}},
+		baselineRow: &durableMetadata{
+			TableName: "cf_schema_queue", RecordID: recordID, ServerVersion: "baseline-version", RowChecksum: &baselineChecksum,
+		},
 		finalResult: &finalCapture{DurableProof: proof},
 	}
 	server := scenarios.StateFacts{Rebuilds: []scenarios.RebuildFact{{UserID: "user-a", ClientID: "client-a", RebuildID: rebuildID}}}
 	evidence, err := coordinator.serverEvidence(server)
-	if err != nil || evidence.clientGeneration != 5 || evidence.scopeSetVersion != 7 || evidence.rebuildID != rebuildID || evidence.rowVersion != "runtime-version" || evidence.rowChecksum != digest {
-		t.Fatalf("schema-queued-mutation evidence=%+v want generation=5 scope_set=7 rebuild=%q version=runtime-version checksum=%q error=%v", evidence, rebuildID, digest, err)
+	if err != nil || evidence.clientGeneration != 5 || evidence.scopeSetVersion != 7 || evidence.rebuildID != rebuildID || evidence.rowVersion != "runtime-version" ||
+		evidence.baselineVersion != "baseline-version" || evidence.baselineChecksum != baselineDigest {
+		t.Fatalf("schema-queued-mutation evidence=%+v want generation=5 scope_set=7 rebuild=%q version=runtime-version baseline=baseline-version/%q error=%v", evidence, rebuildID, baselineDigest, err)
 	}
 	if _, err := coordinator.serverEvidence(scenarios.StateFacts{}); err == nil || !strings.Contains(err.Error(), "matches=0") || !strings.Contains(err.Error(), "want=1") {
 		t.Fatalf("schema-queued-mutation absent rebuild error=%v want observed and expected values", err)
@@ -209,7 +223,7 @@ func TestSchemaQueuedMutationHasNoRawObserverRead(t *testing.T) {
 
 func TestNewSchemaQueuedMutationCoordinatorKeepsAndroidSidecarOnHostLoopback(t *testing.T) {
 	coordinator, err := NewSchemaQueuedMutationCoordinator(SchemaQueuedMutationCoordinatorConfig{
-		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadSchemaQueuedMutationAuthoredScenario(t), Platform: "android", ServerURL: "http://127.0.0.1:8080", AuthToken: "unit-token",
 	})
 	if err != nil || coordinator == nil {
 		t.Fatalf("Android schema-queued-mutation coordinator=%v error=%v", coordinator, err)
@@ -221,8 +235,8 @@ func TestNewSchemaQueuedMutationCoordinatorKeepsAndroidSidecarOnHostLoopback(t *
 	if !strings.HasPrefix(coordinator.adapter, "http://10.0.2.2:") {
 		t.Fatalf("Android schema-queued-mutation adapter URL=%q", coordinator.adapter)
 	}
-	if coordinator.ExchangeCount() != 10 {
-		t.Fatalf("schema-queued-mutation exchanges=%d want=10", coordinator.ExchangeCount())
+	if coordinator.ExchangeCount() != 15 {
+		t.Fatalf("schema-queued-mutation exchanges=%d want=15", coordinator.ExchangeCount())
 	}
 }
 

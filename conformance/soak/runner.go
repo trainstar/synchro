@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/faults"
 	"github.com/trainstar/synchro/conformance/invariants"
@@ -38,6 +39,7 @@ type ObservationCapture struct {
 	CursorAcknowledgements []invariants.CursorAcknowledgementObservation
 	ServerRowIdentities    []invariants.ServerRowIdentityObservation
 	FaultActivation        *FaultActivationObservation
+	SourceState            *SourceStateObservation
 }
 
 // AssembleObservation assigns the runner sequence to one harness capture.
@@ -65,11 +67,15 @@ type Harness interface {
 }
 
 // RunResult contains bounded execution results and every assembled observation.
+// Elapsed is the measured wall time of plan execution. Failure is the terminal
+// failure fact of a failed run.
 type RunResult struct {
 	Seed               uint64
 	OperationsExecuted int
+	Elapsed            time.Duration
 	Observations       []invariants.Observation
 	Violations         []invariants.Violation
+	Failure            *OperationFact
 }
 
 // Run executes a plan, journals each operation and observation sequence, and
@@ -78,35 +84,43 @@ func Run(ctx context.Context, plan Plan, harness Harness, journalPath string) (r
 	if journalPath == "" {
 		return RunResult{}, ErrJournalPathRequired
 	}
+	// Opening the journal truncates it, so an invalid invocation must fail first.
+	if err := validateRunInputs(ctx, plan, harness); err != nil {
+		return RunResult{}, err
+	}
 	writer, err := newJournalWriter(journalPath, plan)
 	if err != nil {
 		return RunResult{}, err
 	}
+	defer func() {
+		if closeErr := writer.Close(); runErr == nil && closeErr != nil {
+			runErr = closeErr
+		}
+	}()
 	return runPlan(ctx, plan, harness, writer)
 }
 
-func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWriter) (result RunResult, runErr error) {
+func validateRunInputs(ctx context.Context, plan Plan, harness Harness) error {
 	if ctx == nil {
-		return RunResult{}, errors.New("soak context is required")
+		return errors.New("soak context is required")
 	}
 	if harness == nil {
-		return RunResult{}, ErrHarnessRequired
+		return ErrHarnessRequired
 	}
 	if len(plan.Operations) == 0 {
-		return RunResult{}, ErrZeroOperations
+		return ErrZeroOperations
 	}
 	if err := plan.Config.validate(); err != nil {
-		return RunResult{}, err
+		return err
 	}
-	if err := validateRunPlan(plan); err != nil {
+	return validateRunPlan(plan)
+}
+
+func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWriter) (result RunResult, runErr error) {
+	if err := validateRunInputs(ctx, plan, harness); err != nil {
 		return RunResult{}, err
 	}
 	if writer != nil {
-		defer func() {
-			if closeErr := writer.Close(); runErr == nil && closeErr != nil {
-				runErr = closeErr
-			}
-		}()
 		for _, operation := range plan.Operations {
 			if err := writer.RecordOperation(operation); err != nil {
 				return result, err
@@ -116,17 +130,27 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 
 	result.Seed = plan.Seed
 	result.Observations = make([]invariants.Observation, 0, len(plan.Operations))
+	started := time.Now()
+	defer func() { result.Elapsed = time.Since(started) }()
+	fail := func(sequence uint64, code string, runErr error, violations []invariants.Violation) error {
+		fact := failureFact(sequence, code, runErr, violations)
+		result.Failure = &fact
+		return recordRunFailure(writer, fact, runErr)
+	}
 	for index, operation := range plan.Operations {
 		if err := ctx.Err(); err != nil {
-			return result, recordRunFailure(writer, operation.Sequence, "context-cancelled", err)
+			failure := fail(operation.Sequence, "context-cancelled", err, nil)
+			return result, failure
 		}
 		capture, err := harness.Execute(ctx, operation)
 		if err != nil {
 			err = fmt.Errorf("execute soak operation %d: %w", index+1, err)
-			return result, recordRunFailure(writer, operation.Sequence, "harness-error", err)
+			failure := fail(operation.Sequence, "harness-error", err, nil)
+			return result, failure
 		}
 		if err := validateObservationCapture(operation, capture, result.Observations); err != nil {
-			return result, recordRunFailure(writer, operation.Sequence, "capture-incomplete", err)
+			failure := fail(operation.Sequence, "capture-incomplete", err, nil)
+			return result, failure
 		}
 		sequence := operation.Sequence
 		observation := AssembleObservation(sequence, capture)
@@ -139,19 +163,17 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 		result.OperationsExecuted++
 
 		violations, checkerErr := checkLatest(result.Observations)
+		violations = orderViolations(append(violations, CheckSourceState(sequence, capture.Manifest, capture.Clients, *capture.SourceState)...))
 		result.Violations = append(result.Violations, violations...)
 		result.Violations = orderViolations(result.Violations)
 		if checkerErr != nil {
 			checkerErr = fmt.Errorf("run invariant checkers after operation %d: %w", index+1, checkerErr)
-			return result, recordRunFailure(writer, operation.Sequence, "checker-error", checkerErr)
+			failure := fail(operation.Sequence, "checker-error", checkerErr, nil)
+			return result, failure
 		}
 		if len(violations) != 0 {
-			if writer != nil {
-				if err := writer.RecordFailure(operation.Sequence, "invariant-violation"); err != nil {
-					return result, err
-				}
-			}
-			return result, fmt.Errorf("%w after operation %d", ErrInvariantViolation, index+1)
+			failure := fail(operation.Sequence, "invariant-violation", fmt.Errorf("%w after operation %d", ErrInvariantViolation, index+1), violations)
+			return result, failure
 		}
 		if writer != nil {
 			if err := writer.RecordCompletion(operation.Sequence, observation.Sequence); err != nil {
@@ -175,11 +197,11 @@ func runPlan(ctx context.Context, plan Plan, harness Harness, writer *journalWri
 
 // recordRunFailure writes the failure fact and preserves a recording error
 // beside the run error, so a broken failure artifact is never silent.
-func recordRunFailure(writer *journalWriter, sequence uint64, code string, runErr error) error {
+func recordRunFailure(writer *journalWriter, fact OperationFact, runErr error) error {
 	if writer == nil {
 		return runErr
 	}
-	if recordErr := writer.RecordFailure(sequence, code); recordErr != nil {
+	if recordErr := writer.RecordFailure(fact); recordErr != nil {
 		return errors.Join(runErr, fmt.Errorf("record soak failure fact: %w", recordErr))
 	}
 	return runErr

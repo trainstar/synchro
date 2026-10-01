@@ -7,6 +7,8 @@ Set Synchro GUCs in `postgresql.conf` or with the equivalent PostgreSQL configur
 
 Reload PostgreSQL after a `SIGHUP` setting changes. Restart PostgreSQL after a `postmaster` setting changes.
 
+The WAL worker applies a reloaded `SIGHUP` setting before its next poll.
+
 Use [server setup](/synchro/getting-started/server-setup/) for PostgreSQL 18
 installation, role separation, logical WAL prerequisites, and the first
 registration. Do not place application rows or internal diagnostics in a
@@ -24,9 +26,60 @@ readiness endpoint.
 
 An empty publication, slot, database, or worker login makes the related readiness check fail.
 
-The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction. An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement. Candidate decoding also rejects the transaction. Split the source write into smaller transactions to stay below these fixed safety limits.
+The decoder retains at most 16 MiB and 10,000 pgoutput payload records for one source transaction.
+Each captured row change uses two payload records.
+One record is the row change.
+One record is its `synchro_fence` logical message.
+Other pgoutput messages in the transaction also use payload records.
+Relation metadata is one example.
+Thus, one source transaction can capture at most 5,000 row changes.
+An oversized active-stream transaction becomes blocking poison before materialization or slot acknowledgement.
+Candidate decoding also rejects the transaction.
+Split the source write into smaller transactions to stay below these fixed safety limits.
+
+A `decode_failed` poison has one of these fixed `failure_detail` values:
+
+- `WAL decoder found a truncated replication message`
+- `WAL decoder rejected a malformed replication message`
+- `WAL source transaction exceeds the decode limit of 16777216 bytes or 10000 payload records`
+
+An operator reads the value at `observations.poison` in `synchro_health_detail()`.
+The oversized transaction detail names both limits.
+
+Each change to a registered row counts as two records: the row change and its write fence message. The first change to a relation in a decoding session can add one relation message. An application trigger that writes a registered table adds the records of its own row changes. For example, one transaction that inserts 4,999 rows into one registered table without triggers has 9,999 records and is accepted. A transaction that inserts 5,001 such rows has 10,002 records and becomes poison.
+
+Recovery of an oversized transaction uses an operator-authorized stream reset. The reset baseline reads the committed source rows, so it includes the rows of the poisoned transaction. Clients then rebuild, and later source writes materialize normally.
 
 The worker reads peeked pgoutput data one message at a time. It preserves each complete valid source transaction when a poll batch reaches its soft 16 MiB target.
+
+### Replication slot ownership
+
+The worker owns a slot only when `synchro.sync_runtime_state` binds that slot to the current stream.
+A slot name, plugin, or database match is not ownership evidence.
+
+- A bound worker validates and reuses its slot.
+- An unbound worker creates the configured slot only when no slot has that name.
+- An unbound worker never drops or adopts an existing slot with the configured name.
+
+When a slot with the configured name exists before the first binding, worker startup fails.
+The worker logs `configured replication slot exists without synchro ownership evidence` and leaves that slot unchanged.
+Capture readiness stays unready.
+
+To recover, make an explicit operator decision:
+
+1. Identify the consumer that owns the existing slot.
+2. If another consumer owns the slot, set `synchro.replication_slot` to an unused name and reload the configuration.
+3. If the slot is an obsolete Synchro slot that you can prove is unused, verify that it is inactive and drop it.
+
+PostgreSQL restarts the failed worker process.
+The new worker process then creates and binds the configured slot.
+
+### Registration transactions
+
+Separate registration transactions can commit before the worker activates an earlier one.
+The worker activates their registry generations in commit order.
+Each membership rule transition stages and activates in the generation that its own transaction created.
+A later transaction does not change a membership stage that an earlier committed transaction created.
 
 ## Publication membership
 
@@ -39,7 +92,25 @@ Each registered relation must be a member of the configured publication without 
 To repair a member, drop the table from the publication.
 Then add the table to the publication again without a column list and without a row filter.
 
-## Generated columns
+## Partitioned tables
+
+A registered partitioned table needs `publish_via_partition_root = true` on the configured publication.
+Without this setting, pgoutput publishes each change under its leaf partition, and the worker cannot find the registration.
+Synchro creates its publication with `publish_via_partition_root = true`.
+
+Registration never changes the option of an existing publication, because other subscribers can share that publication.
+
+- Registration rejects a partitioned table when the configured publication does not have `publish_via_partition_root = true`.
+- Registration rejects a relation that the publication publishes through an ancestor partitioned table.
+- The rejected registration leaves the registry and the publication unchanged.
+- The readiness check `publication` fails with `publication_mismatch` when a registered relation is not published under its own identity.
+
+To register a partitioned table on an existing publication, first confirm that no other subscriber depends on leaf partition identities.
+Then run `ALTER PUBLICATION <name> SET (publish_via_partition_root = true)` and register the table.
+A `TRUNCATE` of one leaf partition is not published under the root identity.
+Do not truncate a partition of a registered partitioned table.
+
+## Generated and identity columns
 
 The worker reads only the columns that pgoutput sends.
 pgoutput never sends a virtual generated column.
@@ -49,6 +120,9 @@ Synchro creates its publication with the PostgreSQL defaults.
 
 Registration applies these rules to each synced field and to each captured column of a capture dependency:
 
+- Clients cannot write an identity `ALWAYS` column.
+- Clients can write a `BY DEFAULT` identity column.
+- A registration with push policy `enabled` rejects a database-generated key.
 - Registration rejects a virtual generated column.
 - Registration rejects a stored generated column when the configured publication does not have `publish_generated_columns = stored`.
 - Registration accepts a stored generated column when the configured publication has `publish_generated_columns = stored`. Clients cannot write this field.
@@ -96,6 +170,22 @@ must provide and cancel `JWKSContext` itself.
 | `synchro.max_wal_lag_bytes` | `SIGHUP` | `67108864` (64 MiB) | Limits current WAL beyond acknowledged WAL. |
 | `synchro.max_wal_lag_seconds` | `SIGHUP` | `30` | Limits the oldest unmaterialized registered write age. |
 
+The WAL worker writes its heartbeat when its state or its copied progress changes.
+Otherwise, it writes the heartbeat when the heartbeat age reaches half of `synchro.max_worker_heartbeat_age_seconds`.
+Thus, the heartbeat check can fail when one worker poll takes more than about half of the limit.
+A long storage flush is one example.
+Set a limit that is more than two times the longest poll time on your server.
+
+The WAL worker acknowledges WAL without a registered change.
+It does this when the progress age reaches half of `synchro.max_worker_heartbeat_age_seconds`.
+It also does this when the WAL byte lag reaches half of `synchro.max_wal_lag_bytes`.
+It does this at once when more decoded WAL waits.
+A consumer can use `confirmed_flush_lsn >= L` as a materialization barrier for each registered write that ends at or before `L`.
+On an idle server, this barrier completes within about half of the heartbeat limit.
+PostgreSQL moves `restart_lsn` from a running transactions record.
+Thus, retained WAL can stay about 15 s to 30 s behind the acknowledgement.
+During a projection bootstrap catch-up, the worker does not acknowledge after the activation barrier.
+
 Each readiness limit must be a positive integer. A zero value makes its readiness check fail with `invalid_limit`.
 
 Use stricter positive limits when your service-level objectives require faster failure detection.
@@ -120,10 +210,12 @@ Repeat compaction while either `deactivated_clients` or `deleted_entries` is non
 ## Development database reinstalls
 
 A running worker does not by itself prove that registry activation succeeded.
-Registrations can commit while the worker is disabled, before its replacement logical slot exists.
-Their original activation messages then precede the new slot boundary.
-Synchro preserves these requests and emits new transactional activation messages when the initial slot binds.
-Normal WAL processing activates the pending generations.
+Registrations can commit while no logical slot is bound.
+This occurs while the worker is disabled, and while a new worker creates and binds its first slot.
+Each registration emits its transactional activation message and also records an activation request.
+When the initial slot binds, Synchro emits a new transactional activation message for each pending request.
+The new slot can contain both messages for a registration that committed after the slot started.
+The worker activates the generation at the first message and ignores a later activation of a generation that the active chain already contains.
 
 Older builds without this replay can remain at registry generation 1 while later WAL advances.
 Publication readiness then reports `publication_mismatch` because the pending relations are not in the active registry.

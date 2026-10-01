@@ -100,7 +100,7 @@ func RunQueueReplayScenario(ctx context.Context, scenario scenarios.Scenario, co
 		if err != nil {
 			return QueueReplayResult{}, err
 		}
-		if replayed.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable {
+		if replayed.Completion != "idle" || pushObservation.StatusCode != 200 || pushObservation.Retryable != nil {
 			return QueueReplayResult{}, fmt.Errorf("Swift queue-replay replay for step %s did not complete successfully", stepID)
 		}
 		replayCalls = append(replayCalls, replayed)
@@ -250,7 +250,7 @@ func swiftQueueSuccessorEvidence(targets []scenarios.NativeCRUDTarget, before, r
 			return scenarios.NativeQueueSuccessorEvidence{}, fmt.Errorf("Swift queue successor changed-intent count for table %q is %d", target.TableID, len(successors))
 		}
 		evidence.Rows = append(evidence.Rows, scenarios.NativeQueueSuccessorRow{
-			BeforeRestart: swiftNativeQueuedMutation(original), AfterRestart: swiftNativeQueuedMutation(restartedMutation),
+			Target: target, BeforeRestart: swiftNativeQueuedMutation(original), AfterRestart: swiftNativeQueuedMutation(restartedMutation),
 			OriginalAfterChange: swiftNativeQueuedMutation(changedOriginal), Successor: swiftNativeQueuedMutation(successors[0]),
 		})
 	}
@@ -573,7 +573,10 @@ func swiftQueueReplayCRUDResponse(operation string, call SynchronizationResult) 
 	for _, observation := range call.transportObservations {
 		value := scenarios.NativeCRUDTransport{
 			OperationClass: observation.OperationClass, StatusCode: observation.StatusCode,
-			Retryable: observation.Retryable, RetryablePresent: true,
+		}
+		if observation.Retryable != nil {
+			value.Retryable = *observation.Retryable
+			value.RetryablePresent = true
 		}
 		if observation.ErrorCode != nil {
 			value.ErrorCode = *observation.ErrorCode

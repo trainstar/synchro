@@ -281,9 +281,10 @@ class LifecycleDurabilityTests {
                     rejectedID,
                     reopened.readTransaction { db -> SynchroMeta.listRejectedMutations(db).single().mutationID },
                 )
-                assertTrue(reopened.query("SELECT id FROM orders").isEmpty())
-                assertTrue(
-                    reopened.query("PRAGMA table_info(orders)").map { it.getValue("name") }.contains("notes"),
+                // The captured intent keeps its row visible across the reset (#267).
+                assertEquals(
+                    listOf(mapOf("id" to "queued", "ship_address" to "Queued address", "notes" to null)),
+                    reopened.query("SELECT id, ship_address, notes FROM orders"),
                 )
             } finally {
                 reopened.close()

@@ -37,6 +37,15 @@ sealed class SynchroError(message: String, cause: Throwable? = null) : Exception
     )
     class AlreadyStarted : SynchroError("Sync has already been started")
     class NotStarted : SynchroError("Sync has not been started")
+    class AtomicGroupInvalid(val reason: AtomicGroupInvalidReason) :
+        SynchroError("Atomic write group is invalid: ${reason.name}")
+}
+
+enum class AtomicGroupInvalidReason {
+    DELETE_FOLLOWED_BY_WRITE,
+    TOO_MANY_MUTATIONS,
+    MUTATION_TOO_LARGE,
+    REQUEST_TOO_LARGE,
 }
 
 class RetryableError(

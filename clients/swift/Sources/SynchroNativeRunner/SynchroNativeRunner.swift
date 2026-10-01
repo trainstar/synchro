@@ -352,6 +352,7 @@ private struct RunnerResult: Encodable {
     var rebuildReceiptCount: Int? = nil
     var schema: SchemaRef? = nil
     var applicationRows: [[String: AnyCodable]]? = nil
+    var applicationRowStorageClasses: [[String: String]]? = nil
     var retainedMutations: [RetainedMutation]? = nil
     var rejectedMutations: [RetainedRejection]? = nil
     var scopeStates: [ScopeStateRecord]? = nil
@@ -395,6 +396,7 @@ private struct RunnerResult: Encodable {
         case rebuildReceiptCount = "rebuild_receipt_count"
         case schema
         case applicationRows = "application_rows"
+        case applicationRowStorageClasses = "application_row_storage_classes"
         case retainedMutations = "retained_mutations"
         case rejectedMutations = "rejected_mutations"
         case scopeStates = "scope_states"
@@ -441,7 +443,7 @@ private struct RunnerTransportObservation: Encodable {
     let operationClass: TransportOperationClass
     let statusCode: Int
     let errorCode: String?
-    let retryable: Bool
+    let retryable: Bool?
     let durationNanoseconds: UInt64
     let cursorFingerprints: [String]?
     let cursorFingerprintsComplete: Bool?
@@ -467,14 +469,8 @@ private struct RunnerTransportObservation: Encodable {
         sequence = observation.sequence
         operationClass = observation.operationClass
         statusCode = observation.statusCode
-        let (mappedCode, mappedRetryable) = transportFailureFacts(
-            statusCode: observation.statusCode,
-            operationClass: observation.operationClass
-        )
-        // One status code carries more than one error code, so the code the
-        // server reported wins over the code the status implies.
-        errorCode = observation.errorCode ?? mappedCode
-        retryable = mappedRetryable
+        errorCode = observation.errorCode
+        retryable = observation.retryable
         durationNanoseconds = observation.durationNanoseconds
         cursorFingerprints = observation.cursorFingerprints
         cursorFingerprintsComplete = observation.cursorFingerprintsComplete
@@ -496,41 +492,6 @@ private struct RunnerTransportObservation: Encodable {
         try container.encodeIfPresent(requestFacts, forKey: .requestFacts)
         try container.encodeIfPresent(rebuildResponseFacts, forKey: .rebuildResponseFacts)
         try container.encodeIfPresent(pullResponseFacts, forKey: .pullResponseFacts)
-    }
-}
-
-private func transportFailureFacts(
-    statusCode: Int,
-    operationClass: TransportOperationClass
-) -> (String?, Bool) {
-    guard statusCode != 0 else { return (nil, true) }
-    guard !(200..<300).contains(statusCode) else { return (nil, false) }
-    switch statusCode {
-    case 400:
-        return ("invalid_request", false)
-    case 401:
-        return ("auth_required", false)
-    case 409:
-        switch operationClass {
-        case .rebuild:
-            return ("rebuild_restart_required", false)
-        case .push:
-            return ("idempotency_conflict", false)
-        default:
-            return ("client_generation_expired", false)
-        }
-    case 422:
-        return ("schema_mismatch", false)
-    case 426:
-        return ("upgrade_required", false)
-    case 429:
-        return ("retry_later", true)
-    case 500:
-        return ("sync_integrity_failure", false)
-    case 503:
-        return ("capture_pending", true)
-    default:
-        return ("invalid_response", false)
     }
 }
 
@@ -1058,7 +1019,7 @@ private final class Runner: @unchecked Sendable {
             throw RunnerError.invalidCommand
         }
         let retainedMutationIDs = payload.operation == .delete
-            ? Set(try client.inspectRetainedMutations().map(\.mutationID))
+            ? Set(try client.inspectRetainedMutationRecords().map(\.mutationID))
             : []
         let result: ExecResult
         switch payload.operation {
@@ -1116,7 +1077,7 @@ private final class Runner: @unchecked Sendable {
         let retainedDelete: Bool
         if payload.operation == .delete && result.rowsAffected == 0 {
             let recordID = try payload.primaryKey.recordID()
-            retainedDelete = try client.inspectRetainedMutations().contains {
+            retainedDelete = try client.inspectRetainedMutationRecords().contains {
                 !retainedMutationIDs.contains($0.mutationID)
                     && $0.tableName == payload.tableName
                     && $0.recordID == recordID
@@ -1195,21 +1156,15 @@ private final class Runner: @unchecked Sendable {
               command.rowSelectors.map({ $0.count <= Self.maximumSelectors }) ?? true else {
             throw RunnerError.invalidCommand
         }
-        let capture = try inspection.captureState(maximumRecords: maximumBoundedRecords)
-        let scopeStates = capture.scopeStatesTruncated ? nil : capture.scopeStates
-        let scopeRows = capture.scopeRowsTruncated ? nil : capture.scopeRows
-        let rebuildAttempts = capture.rebuildAttemptsTruncated ? nil : capture.rebuildAttempts
-        let rebuildReceipts = capture.rebuildReceiptsTruncated ? nil : capture.rebuildReceipts
-        let counts = capture
-        let retainedMutations: [RetainedMutation]? = counts.mutationLedgerCount <= maximumBoundedRecords ? try retainedMutationRecords(client.inspectRetainedMutations()) : nil
-        let rejectedMutations: [RetainedRejection]? = counts.rejectedMutationCount <= maximumBoundedRecords ? try bounded(
-            client.inspectRejectedMutations().map(RetainedRejection.init),
-            subject: "rejected mutations"
-        ) : nil
+        // Direct inspection does not normalize. Normalize first, so the one
+        // snapshot below reports normalized counts and details together.
+        _ = try client.pendingChangeCount()
         var capturedApplicationRows: [[String: AnyCodable]] = []
+        var capturedStorageClasses: [[String: String]] = []
         var captureValueBytes = 0
-        let scopedTables = Set<String>((scopeRows ?? []).map(\.tableName))
-        if counts.applicationRowCount <= Self.maximumRows {
+        let snapshot = try inspection.captureSnapshot(maximumRecords: maximumBoundedRecords) { capture, transaction in
+            guard capture.applicationRowCount <= Self.maximumRows else { return }
+            let scopedTables = Set<String>((capture.scopeRowsTruncated ? [] : capture.scopeRows).map(\.tableName))
             for selector in command.rowSelectors ?? [] {
                 if scopedTables.contains(selector.tableName) {
                     continue
@@ -1221,7 +1176,7 @@ private final class Runner: @unchecked Sendable {
                 let field = try quoteIdentifier(selector.primaryKeyField)
                 let rows: [Row]
                 do {
-                    rows = try client.query(
+                    rows = try transaction.query(
                         "SELECT * FROM \(table) WHERE \(field) = ?",
                         params: [selector.primaryKey.databaseValue()]
                     )
@@ -1233,6 +1188,7 @@ private final class Runner: @unchecked Sendable {
                 }
                 if let row = rows.first {
                     capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                    capturedStorageClasses.append(storageClasses(row))
                 }
             }
             for tableName in scopedTables {
@@ -1240,15 +1196,23 @@ private final class Runner: @unchecked Sendable {
                 let table = try quoteIdentifier(tableName)
                 let rows: [Row]
                 do {
-                    rows = try client.query("SELECT * FROM \(table)")
+                    rows = try transaction.query("SELECT * FROM \(table)")
                 } catch {
                     throw RunnerError.captureQuery
                 }
                 for row in rows {
                     capturedApplicationRows.append(try rowObject(row, valueBytes: &captureValueBytes))
+                    capturedStorageClasses.append(storageClasses(row))
                 }
             }
         }
+        let counts = snapshot.capture
+        let scopeStates = counts.scopeStatesTruncated ? nil : counts.scopeStates
+        let scopeRows = counts.scopeRowsTruncated ? nil : counts.scopeRows
+        let rebuildAttempts = counts.rebuildAttemptsTruncated ? nil : counts.rebuildAttempts
+        let rebuildReceipts = counts.rebuildReceiptsTruncated ? nil : counts.rebuildReceipts
+        let retainedMutations = try snapshot.retainedMutations.map(retainedMutationRecords)
+        let rejectedMutations = try snapshot.rejectedMutations.map(rejectedMutationRecords)
         let metadataRecords = counts.rowMetadataTruncated
             ? nil
             : counts.rowMetadata.map(RowMetadataRecord.init)
@@ -1262,7 +1226,7 @@ private final class Runner: @unchecked Sendable {
             let rebuildReceiptRecords: [RebuildReceiptRecord]? = try rebuildReceipts.map { try bounded($0.map(RebuildReceiptRecord.init), subject: "rebuild receipts") }
             return RunnerResult(
                 status: client.getSyncStatus().rawValue,
-                pendingChangeCount: try client.pendingChangeCount(),
+                pendingChangeCount: snapshot.pendingChangeCount,
                 applicationRowCount: counts.applicationRowCount,
                 mutationLedgerCount: counts.mutationLedgerCount,
                 mutationOutcomeCount: counts.mutationOutcomeCount,
@@ -1276,6 +1240,7 @@ private final class Runner: @unchecked Sendable {
                 rebuildReceiptCount: counts.rebuildReceiptCount,
                 schema: counts.schema,
                 applicationRows: counts.applicationRowCount <= Self.maximumRows ? capturedApplicationRows : nil,
+                applicationRowStorageClasses: counts.applicationRowCount <= Self.maximumRows ? capturedStorageClasses : nil,
                 retainedMutations: retainedMutations,
                 rejectedMutations: rejectedMutations,
                 scopeStates: scopeStateRecords,
@@ -1292,7 +1257,7 @@ private final class Runner: @unchecked Sendable {
                 captureOverflowed: counts.overflowed,
                 provenanceMaintenanceWorkCursor: counts.provenanceMaintenanceWorkCursor,
                 events: events.snapshot(),
-                failure: try client.getBlockingFailure()
+                failure: snapshot.blockingFailure
             )
         } catch {
             throw RunnerError.captureInspection
@@ -1503,12 +1468,29 @@ private func bounded<T>(_ values: [T], subject: String, limit: Int = maximumBoun
 }
 
 private func retainedMutationRecords(
-    _ values: [PendingMutationInspection]
+    _ values: [RetainedMutationInspection]
 ) throws -> [RetainedMutation] {
-    guard values.allSatisfy({ $0.authoredFields.count <= maximumBoundedRecords }) else {
+    // The runner wire has only the current record shape. A legacy import fails
+    // the capture instead of reaching the harness with invented bindings.
+    let current = try values.map { value in
+        guard let mutation = value.current else { throw RunnerError.captureInspection }
+        return mutation
+    }
+    guard current.allSatisfy({ $0.authoredFields.count <= maximumBoundedRecords }) else {
         throw RunnerError.outputLimit("retained mutation authored fields exceed \(maximumBoundedRecords)")
     }
-    return try bounded(values.map(RetainedMutation.init), subject: "retained mutations")
+    return try bounded(current.map(RetainedMutation.init), subject: "retained mutations")
+}
+
+private func rejectedMutationRecords(
+    _ values: [RetainedRejectionInspection]
+) throws -> [RetainedRejection] {
+    // A legacy rejection has no exact mutation or rejection, so it fails the capture.
+    let current = try values.map { value in
+        guard let rejection = value.current else { throw RunnerError.captureInspection }
+        return RetainedRejection(rejection)
+    }
+    return try bounded(current, subject: "rejected mutations")
 }
 
 private func isReservedTable(_ value: String) -> Bool {
@@ -1564,6 +1546,8 @@ private func rawCallErrorCategory(_ error: Error) -> String {
         return "already_started"
     case .notStarted:
         return "not_started"
+    case .atomicGroupInvalid:
+        return "atomic_group_invalid"
     }
 }
 
@@ -1721,6 +1705,23 @@ private extension RunnerJSONValue {
             return value.base64URLEncodedString
         }
     }
+}
+
+/// The JSON value of a blob is base64url text, and a real with an integral
+/// value encodes as an integer, so the SQLite storage class is reported apart.
+private func storageClasses(_ row: Row) -> [String: String] {
+    var result: [String: String] = [:]
+    for column in row.columnNames {
+        let value: DatabaseValue = row[column]
+        switch value.storage {
+        case .null: result[column] = "null"
+        case .int64: result[column] = "integer"
+        case .double: result[column] = "real"
+        case .string: result[column] = "text"
+        case .blob: result[column] = "blob"
+        }
+    }
+    return result
 }
 
 private func rowObject(_ row: Row, valueBytes: inout Int) throws -> [String: AnyCodable] {

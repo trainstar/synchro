@@ -207,23 +207,30 @@ func TestPlatformSealedRetryPushInjects429Then503AndRejectsChangedBytes(t *testi
 		}
 	})
 
-	t.Run("changed canonical bytes", func(t *testing.T) {
-		platform := &Platform{}
-		release, armed, err := platform.armSealedRetryPush(operation)
-		if err != nil || !armed {
-			t.Fatalf("arm sealed retry: %t, %v", armed, err)
-		}
-		defer release()
-		platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
-		changed := strings.Replace(requestBody, `"runtime-mutation"`, `"changed-mutation"`, 1)
-		response := httptest.NewRecorder()
-		if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
-			t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
-		}
-		if err := platform.validateSealedRetryPush(1); err == nil {
-			t.Fatal("changed sealed request bytes passed validation")
-		}
-	})
+	// A new batch of the same size is not a replay, whether it renews the
+	// mutation identities or reseals the same mutations under a new batch.
+	for name, replacement := range map[string][2]string{
+		"changed mutation identity": {`"runtime-mutation"`, `"changed-mutation"`},
+		"changed batch identity":    {`"runtime-batch"`, `"renewed-batch"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			platform := &Platform{}
+			release, armed, err := platform.armSealedRetryPush(operation)
+			if err != nil || !armed {
+				t.Fatalf("arm sealed retry: %t, %v", armed, err)
+			}
+			defer release()
+			platform.serveSealedRetryPush(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(requestBody)))
+			changed := strings.Replace(requestBody, replacement[0], replacement[1], 1)
+			response := httptest.NewRecorder()
+			if !platform.serveSealedRetryPush(response, httptest.NewRequest(http.MethodPost, "/sync/push", strings.NewReader(changed))) || response.Code != http.StatusBadGateway {
+				t.Fatalf("changed retry = intercepted status %d, want 502", response.Code)
+			}
+			if err := platform.validateSealedRetryPush(1); err == nil {
+				t.Fatal("changed sealed request bytes passed validation")
+			}
+		})
+	}
 }
 
 func TestPlatformConfigDefaultsAndBoundsPushBatchSize(t *testing.T) {
@@ -456,6 +463,61 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	if err := validateCaptureResult(duplicatedReceipts); err == nil {
 		t.Fatal("duplicated rebuild receipt was accepted")
 	}
+
+	// One (scope, rebuild) group with more pages than the record bound is complete detail.
+	largePages := maximumRunnerRecords + 1
+	oneLargeGroup := multiPage
+	oneLargeGroup.RebuildReceiptCount = &largePages
+	oneLargeGroup.RebuildReceipts = append([]rebuildReceiptRecord(nil), multiPage.RebuildReceipts...)
+	oneLargeGroup.RebuildReceipts[0].PageCount = largePages
+	if err := validateCaptureResult(oneLargeGroup); err != nil {
+		t.Fatalf("one complete receipt group with many pages was rejected: %v", err)
+	}
+	truncatedPresent := oneLargeGroup
+	truncatedPresent.RebuildReceiptsTruncated = &truncatedValue
+	truncatedPresent.CaptureOverflowed = &truncatedValue
+	if err := validateCaptureResult(truncatedPresent); err == nil {
+		t.Fatal("truncated receipt groups with present detail were accepted")
+	}
+	smallTruncated := multiPage
+	smallTruncated.RebuildReceipts = nil
+	smallTruncated.RebuildReceiptsTruncated = &truncatedValue
+	smallTruncated.CaptureOverflowed = &truncatedValue
+	if err := validateCaptureResult(smallTruncated); err == nil {
+		t.Fatal("receipt group truncation within the page bound was accepted")
+	}
+	largeTruncated := smallTruncated
+	largeTruncated.RebuildReceiptCount = &largePages
+	if err := validateCaptureResult(largeTruncated); err != nil {
+		t.Fatalf("truncated receipt groups beyond the page bound were rejected: %v", err)
+	}
+
+	schema := schemaRef{Version: 1, Hash: digest}
+	retained := func(id string, status string) retainedMutation {
+		return retainedMutation{MutationID: id, LocalOrder: 1, TableID: "table-items", TableName: "items", RecordID: "row-a", PrimaryKeyFieldID: "field-id", PrimaryKeyLogicalType: "string", Operation: "insert", AuthoredSchema: schema, ClientVersion: "2026-01-01T00:00:00.000000Z", Status: status, SourceKind: "local"}
+	}
+	three := 3
+	normalizedPending := 1
+	normalized := complete
+	normalized.MutationLedgerCount = &three
+	normalized.PendingChangeCount = &normalizedPending
+	normalized.RetainedMutations = []retainedMutation{retained("m1", "superseded_before_send"), retained("m2", "superseded_before_send"), retained("m3", "pending")}
+	if err := validateCaptureResult(normalized); err != nil {
+		t.Fatalf("normalized retained snapshot was rejected: %v", err)
+	}
+	// The pre-normalization ledger with a post-normalization pending count is a mixed state.
+	two := 2
+	mixed := normalized
+	mixed.MutationLedgerCount = &two
+	mixed.RetainedMutations = []retainedMutation{retained("m1", "pending"), retained("m2", "pending")}
+	if err := validateCaptureResult(mixed); err == nil {
+		t.Fatal("pending count from another ledger state was accepted")
+	}
+	overfull := normalized
+	overfull.MutationLedgerCount = &two
+	if err := validateCaptureResult(overfull); err == nil {
+		t.Fatal("more retained detail than ledger rows was accepted")
+	}
 }
 
 func TestOperationWindowsUseMonotonicProvenanceMaintenanceCursorDelta(t *testing.T) {
@@ -483,15 +545,16 @@ func TestOperationWindowsUseMonotonicProvenanceMaintenanceCursorDelta(t *testing
 
 func TestExecutedHTTPFailuresKeepSuccessfulDisposition(t *testing.T) {
 	code := "temporary_unavailable"
+	retryable := true
 	for _, observation := range []transportObservation{
-		validPushObservation(0, nil, true),
-		validPushObservation(503, &code, true),
+		validPushObservation(0, nil, nil),
+		validPushObservation(503, &code, &retryable),
 	} {
 		mapped, err := transportStepObservation(observation)
 		if err != nil {
 			t.Fatalf("map executed HTTP request: %v", err)
 		}
-		if mapped.Disposition != "success" || mapped.ErrorCode != nil || mapped.Wire == nil || mapped.Wire.HTTPStatus != observation.StatusCode {
+		if mapped.Disposition != "success" || mapped.ErrorCode != nil || mapped.Wire == nil || mapped.Wire.HTTPStatus != observation.StatusCode || !mapped.Wire.Retryable {
 			t.Fatalf("mapped request = %#v", mapped)
 		}
 	}
@@ -509,7 +572,7 @@ func TestGroupedRequestsMatchTransportObservationsExactly(t *testing.T) {
 		{ContractOperation: "connect", Name: "send"},
 		{ContractOperation: "push", Name: "submit", Payload: pushDispatchPayload("apply")},
 	}
-	observations := []transportObservation{validConnectObservation(), validPushObservation(200, nil, false)}
+	observations := []transportObservation{validConnectObservation(), validPushObservation(200, nil, nil)}
 	mapped, err := mapTransportOperations(operations, observations, runnerResult{})
 	if err != nil {
 		t.Fatalf("map grouped requests: %v", err)
@@ -519,6 +582,10 @@ func TestGroupedRequestsMatchTransportObservationsExactly(t *testing.T) {
 	}
 	if _, err := mapTransportOperations(operations, []transportObservation{observations[1], observations[0]}, runnerResult{}); err == nil {
 		t.Fatal("out-of-order grouped observations were accepted")
+	}
+	pull := RequestOperations{{ContractOperation: "pull", Name: "request-page", Payload: json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"none"}],"limit":1}`)}}
+	if _, err := mapTransportOperations(pull, observations[:1], runnerResult{}); err == nil {
+		t.Fatal("a connect observation was accepted for a requested pull")
 	}
 }
 
@@ -564,6 +631,28 @@ func TestCursorSourcesBindToExactDurableFingerprints(t *testing.T) {
 	}
 }
 
+func TestEmptyScopePullBindsToNoCursor(t *testing.T) {
+	pull := scenarios.Operation{
+		ContractOperation: "pull",
+		Name:              "request-page",
+		Payload:           json.RawMessage(`{"scopes":[]}`),
+	}
+	complete := true
+	observation := transportObservation{OperationClass: "pull", CursorFingerprints: []string{}, CursorFingerprintsComplete: &complete}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err != nil {
+		t.Fatalf("bind empty-scope pull: %v", err)
+	}
+	observation.CursorFingerprints = []string{cursorFingerprint("checkpoint-a")}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err == nil {
+		t.Fatal("empty-scope pull with a cursor passed")
+	}
+	pull.Payload = json.RawMessage(`{}`)
+	observation.CursorFingerprints = []string{}
+	if err := validateCursorSourceBinding(pull, observation, runnerResult{}, nil); err == nil {
+		t.Fatal("pull without an authored scope set passed")
+	}
+}
+
 func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 	scopeCursor := "rebuilt-checkpoint"
 	complete := true
@@ -575,12 +664,12 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 		{
 			ContractOperation: "rebuild",
 			Name:              "request-page",
-			Payload:           json.RawMessage(`{"scope_id":"scope-a","rebuild_id":"00000000-0000-4000-8000-000000000001","cursor_source":"none"}`),
+			Payload:           json.RawMessage(`{"scope_id":"scope-a","rebuild_id":"00000000-0000-4000-8000-000000000001","cursor_source":"none","limit":100}`),
 		},
 		{
 			ContractOperation: "pull",
 			Name:              "request-page",
-			Payload:           json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"local_checkpoint"}]}`),
+			Payload:           json.RawMessage(`{"scopes":[{"scope_id":"scope-a","cursor_source":"local_checkpoint"}],"limit":100}`),
 		},
 	}
 	observations := []transportObservation{
@@ -611,6 +700,11 @@ func TestGroupedPullBindsToPrecedingTerminalRebuildCursor(t *testing.T) {
 		t.Fatalf("bind grouped rebuild checkpoint: %v", err)
 	}
 
+	limit = 50
+	if _, err := mapTransportOperations(operations, observations, runnerResult{}); err == nil {
+		t.Fatal("pull with a limit other than the authored limit passed")
+	}
+	limit = 100
 	observations[1].CursorFingerprints[0] = cursorFingerprint("different")
 	if _, err := mapTransportOperations(operations, observations, runnerResult{}); err == nil {
 		t.Fatal("pull cursor unrelated to preceding rebuild passed")
@@ -701,7 +795,7 @@ func validConnectObservation() transportObservation {
 	}
 }
 
-func validPushObservation(status int, code *string, retryable bool) transportObservation {
+func validPushObservation(status int, code *string, retryable *bool) transportObservation {
 	generation := int64(1)
 	mutationCount := 1
 	return transportObservation{

@@ -227,11 +227,9 @@ func TestWarmConnectTransportStepRejectsMalformedRequestEvidence(t *testing.T) {
 	schemaHash := "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
 	zero := 0
 	one := 1
-	retryable := false
 	validBootstrap := TransportObservation{
 		OperationClass:      "connect",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			SchemaVersion:   0,
@@ -244,7 +242,6 @@ func TestWarmConnectTransportStepRejectsMalformedRequestEvidence(t *testing.T) {
 	validReconnect := TransportObservation{
 		OperationClass:      "connect",
 		StatusCode:          200,
-		Retryable:           &retryable,
 		DurationNanoseconds: 1,
 		RequestFacts: &TransportRequestFacts{
 			ClientGeneration: &generation,
@@ -316,5 +313,25 @@ func TestWarmConnectTransportStepRejectsMalformedRequestEvidence(t *testing.T) {
 				t.Fatal("malformed request evidence was accepted")
 			}
 		})
+	}
+}
+
+func TestWarmConnectSnapshotRejectsOverflowedEventInspection(t *testing.T) {
+	empty := json.RawMessage(`[]`)
+	result := Result{
+		Schema:               json.RawMessage(`{"version":1,"hash":"` + testDigest + `"}`),
+		ScopeStates:          empty,
+		ScopeRows:            empty,
+		RowMetadata:          empty,
+		RebuildAttempts:      empty,
+		RebuildReceiptProofs: empty,
+	}
+	if _, err := decodeWarmConnectSnapshot(result); err != nil {
+		t.Fatalf("complete warm-connect snapshot was rejected: %v", err)
+	}
+	// A truncated event list can hide a forbidden event, so an overflow fails the snapshot.
+	result.EventsOverflowed = true
+	if _, err := decodeWarmConnectSnapshot(result); err == nil {
+		t.Fatal("overflowed event inspection passed")
 	}
 }

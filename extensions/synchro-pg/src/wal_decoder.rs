@@ -53,23 +53,19 @@ pub enum TupleValue {
 
 pub type TupleImage = HashMap<String, TupleValue>;
 
-/// Cached relation metadata from a pgoutput Relation message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Relation layout from a pgoutput Relation message that row decoding uses.
+#[derive(Clone)]
 pub struct RelationInfo {
     pub relation_name: String,
     pub namespace: String,
     pub relation_oid: u32,
-    /// pgoutput replica identity code. `b'd'` is DEFAULT.
-    pub replica_identity: u8,
     pub columns: Vec<ColumnInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ColumnInfo {
     pub name: String,
     pub is_key: bool,
-    pub type_oid: u32,
-    pub type_modifier: i32,
 }
 
 /// One decoded row-change event. Its ordinal is assigned before filtering.
@@ -95,6 +91,9 @@ pub struct WalLogicalMessage {
     pub prefix: String,
     pub content: Vec<u8>,
     pub message_lsn: u64,
+    /// Row and truncate ordinals below this value precede the message in the
+    /// source transaction. Registry activation uses it as its cutover point.
+    pub event_boundary: u64,
 }
 
 /// One complete, committed source transaction.
@@ -148,15 +147,14 @@ impl WalDecoder {
     }
 
     /// Preload relation metadata from the catalog.
-    pub fn preload_relations(&mut self, relations: Vec<(RelationKey, u8, Vec<ColumnInfo>)>) {
-        for (key, replica_identity, columns) in relations {
+    pub fn preload_relations(&mut self, relations: Vec<(RelationKey, Vec<ColumnInfo>)>) {
+        for (key, columns) in relations {
             self.relations.insert(
                 key.oid,
                 RelationInfo {
                     relation_name: key.name,
                     namespace: key.namespace,
                     relation_oid: key.oid,
-                    replica_identity,
                     columns,
                 },
             );
@@ -354,14 +352,22 @@ impl WalDecoder {
         let relation_oid = cursor.read_u32()?;
         let namespace = cursor.read_string()?;
         let relation_name = cursor.read_string()?;
-        let replica_identity = cursor.read_u8()?;
+        // These are the pg_class.relreplident values that pgoutput can send.
+        // Key tuples are filtered by column key flags, so the byte is not kept.
+        if !matches!(cursor.read_u8()?, b'd' | b'n' | b'f' | b'i') {
+            return Err(DecodeError::InvalidMessage(
+                "RELATION contains an unsupported replica identity".to_string(),
+            ));
+        }
         let ncols = cursor.read_u16()? as usize;
         let mut columns = Vec::with_capacity(ncols);
         for _ in 0..ncols {
             let flags = cursor.read_u8()?;
             let name = cursor.read_string()?;
-            let type_oid = cursor.read_u32()?;
-            let type_modifier = cursor.read_i32()?;
+            // Tuple values stay in their text or binary wire form, so the type OID
+            // and type modifier are consumed but not kept.
+            cursor.read_u32()?;
+            cursor.read_i32()?;
             if flags & !1 != 0 {
                 return Err(DecodeError::InvalidMessage(
                     "RELATION column contains unsupported flags".to_string(),
@@ -370,31 +376,18 @@ impl WalDecoder {
             columns.push(ColumnInfo {
                 name,
                 is_key: flags & 1 == 1,
-                type_oid,
-                type_modifier,
             });
         }
         cursor.finish()?;
 
-        if let Some(previous) = self.relations.get(&relation_oid) {
-            if previous.namespace != namespace
-                || previous.relation_name != relation_name
-                || previous.replica_identity != replica_identity
-                || previous.columns != columns
-            {
-                return Err(DecodeError::InvalidMessage(format!(
-                    "relation OID {} metadata changed",
-                    relation_oid
-                )));
-            }
-        }
+        // pgoutput resends Relation metadata after a definition change. The new
+        // entry applies to later rows. Buffered rows keep their decoded columns.
         self.relations.insert(
             relation_oid,
             RelationInfo {
                 relation_name,
                 namespace,
                 relation_oid,
-                replica_identity,
                 columns,
             },
         );
@@ -513,10 +506,12 @@ impl WalDecoder {
         let transaction = self.transaction.as_mut().ok_or_else(|| {
             DecodeError::InvalidMessage("logical message encountered without BEGIN".to_string())
         })?;
+        let event_boundary = transaction.next_ordinal;
         transaction.messages.push(WalLogicalMessage {
             prefix,
             content,
             message_lsn,
+            event_boundary,
         });
         Ok(())
     }
@@ -745,6 +740,22 @@ mod tests {
     use super::*;
 
     fn relation(oid: u32, namespace: &str, name: &str, identity: u8) -> Vec<u8> {
+        relation_with_columns(
+            oid,
+            namespace,
+            name,
+            identity,
+            &[("id", 23, true), ("value", 25, false)],
+        )
+    }
+
+    fn relation_with_columns(
+        oid: u32,
+        namespace: &str,
+        name: &str,
+        identity: u8,
+        columns: &[(&str, u32, bool)],
+    ) -> Vec<u8> {
         let mut value = vec![RELATION_MSG];
         value.extend_from_slice(&oid.to_be_bytes());
         value.extend_from_slice(namespace.as_bytes());
@@ -752,14 +763,31 @@ mod tests {
         value.extend_from_slice(name.as_bytes());
         value.push(0);
         value.push(identity);
-        value.extend_from_slice(&2u16.to_be_bytes());
-        for (name, oid) in [("id", 23u32), ("value", 25u32)] {
-            value.push(if name == "id" { 1 } else { 0 });
+        value.extend_from_slice(&(columns.len() as u16).to_be_bytes());
+        for (name, type_oid, is_key) in columns {
+            value.push(u8::from(*is_key));
             value.extend_from_slice(name.as_bytes());
             value.push(0);
-            value.extend_from_slice(&oid.to_be_bytes());
+            value.extend_from_slice(&type_oid.to_be_bytes());
             value.extend_from_slice(&(-1i32).to_be_bytes());
         }
+        value
+    }
+
+    fn image(values: &[(&str, TupleValue)]) -> TupleImage {
+        values
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn logical_message(transactional: bool, lsn: u64, prefix: &str, content: &[u8]) -> Vec<u8> {
+        let mut value = vec![LOGICAL_MSG, u8::from(transactional)];
+        value.extend_from_slice(&lsn.to_be_bytes());
+        value.extend_from_slice(prefix.as_bytes());
+        value.push(0);
+        value.extend_from_slice(&(content.len() as u32).to_be_bytes());
+        value.extend_from_slice(content);
         value
     }
 
@@ -1124,27 +1152,298 @@ mod tests {
     }
 
     #[test]
-    fn rejects_relation_drift_and_unknown_messages() {
+    fn replaces_relation_metadata_without_rewriting_buffered_records() {
+        let text = |value: &str| TupleValue::Text(value.as_bytes().to_vec());
+        let items = RelationKey::new("public", "items", 7);
+        let mut decoder = decoder(7, "public", "items");
+        decoder
+            .feed(&relation_with_columns(
+                7,
+                "public",
+                "items",
+                b'd',
+                &[("id", 23, true), ("value", 25, false)],
+            ))
+            .unwrap();
+        decoder.feed(&begin(1, 11, 5)).unwrap();
+        decoder
+            .feed(&dml(INSERT_MSG, 7, None, Some(&[text("1"), text("first")])))
+            .unwrap();
+        let first = decoder.feed(&commit(11, 12, 5)).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            (
+                first[0].xid,
+                first[0].final_lsn,
+                first[0].commit_lsn,
+                first[0].end_lsn,
+                first[0].commit_timestamp,
+            ),
+            (1, 11, 11, 12, 5)
+        );
+        assert_eq!(first[0].events.len(), 1);
+        assert_eq!(
+            first[0].events[0].after,
+            Some(image(&[("id", text("1")), ("value", text("first"))]))
+        );
+
+        // The same decoder buffers old-layout rows and a transactional message
+        // before the replacement Relation message arrives. The replacement adds
+        // a column and moves the replica identity key from id to value.
+        decoder.feed(&begin(2, 21, 6)).unwrap();
+        decoder
+            .feed(&dml(
+                INSERT_MSG,
+                7,
+                None,
+                Some(&[text("2"), text("before")]),
+            ))
+            .unwrap();
+        decoder
+            .feed(&dml(
+                DELETE_MSG,
+                7,
+                Some(&[text("1"), TupleValue::Null]),
+                None,
+            ))
+            .unwrap();
+        decoder
+            .feed(&logical_message(true, 15, "synchro", b"before-refresh"))
+            .unwrap();
+        decoder
+            .feed(&relation_with_columns(
+                7,
+                "public",
+                "items",
+                b'i',
+                &[
+                    ("id", 23, false),
+                    ("value", 25, true),
+                    ("added_value", 25, false),
+                ],
+            ))
+            .unwrap();
+        decoder
+            .feed(&dml(
+                UPDATE_MSG,
+                7,
+                None,
+                Some(&[text("2"), text("before"), text("wp05-nonnull")]),
+            ))
+            .unwrap();
+        decoder
+            .feed(&logical_message(true, 19, "synchro", b"after-refresh"))
+            .unwrap();
+        decoder
+            .feed(&dml(
+                DELETE_MSG,
+                7,
+                Some(&[TupleValue::Null, text("before"), TupleValue::Null]),
+                None,
+            ))
+            .unwrap();
+        let second = decoder.feed(&commit(21, 22, 6)).unwrap();
+
+        assert_eq!(second.len(), 1);
+        let transaction = &second[0];
+        assert_eq!(
+            (
+                transaction.xid,
+                transaction.final_lsn,
+                transaction.commit_lsn,
+                transaction.end_lsn,
+                transaction.commit_timestamp,
+            ),
+            (2, 21, 21, 22, 6)
+        );
+        assert!(transaction.truncates.is_empty());
+        assert_eq!(
+            transaction.messages,
+            vec![
+                WalLogicalMessage {
+                    prefix: "synchro".to_string(),
+                    content: b"before-refresh".to_vec(),
+                    message_lsn: 15,
+                    event_boundary: 2,
+                },
+                WalLogicalMessage {
+                    prefix: "synchro".to_string(),
+                    content: b"after-refresh".to_vec(),
+                    message_lsn: 19,
+                    event_boundary: 3,
+                },
+            ]
+        );
+        let expected = [
+            (
+                ChangeOperation::Insert,
+                None,
+                Some(image(&[("id", text("2")), ("value", text("before"))])),
+            ),
+            (
+                ChangeOperation::Delete,
+                Some(image(&[("id", text("1"))])),
+                None,
+            ),
+            (
+                ChangeOperation::Update,
+                None,
+                Some(image(&[
+                    ("id", text("2")),
+                    ("value", text("before")),
+                    ("added_value", text("wp05-nonnull")),
+                ])),
+            ),
+            (
+                ChangeOperation::Delete,
+                Some(image(&[("value", text("before"))])),
+                None,
+            ),
+        ];
+        assert_eq!(transaction.events.len(), expected.len());
+        for (ordinal, (event, (operation, before, after))) in
+            transaction.events.iter().zip(expected).enumerate()
+        {
+            assert_eq!(event.operation, operation);
+            assert_eq!(event.event_ordinal, ordinal as u64);
+            assert_eq!(event.relation, items);
+            assert_eq!(event.before, before);
+            assert_eq!(event.after, after);
+        }
+    }
+
+    #[test]
+    fn malformed_relation_replacement_poisons_decoder() {
+        let mut truncated = relation_with_columns(
+            7,
+            "public",
+            "items",
+            b'd',
+            &[
+                ("id", 23, true),
+                ("value", 25, false),
+                ("added_value", 25, false),
+            ],
+        );
+        truncated.pop();
+        let undefined_identity = relation(7, "public", "items", b'x');
+        let row = dml(
+            INSERT_MSG,
+            7,
+            None,
+            Some(&[TupleValue::Text(b"1".to_vec()), TupleValue::Null]),
+        );
+        for replacement in [truncated, undefined_identity] {
+            let mut decoder = decoder(7, "public", "items");
+            decoder.feed(&relation(7, "public", "items", b'd')).unwrap();
+            decoder.feed(&begin(1, 2, 1)).unwrap();
+            decoder.feed(&row).unwrap();
+            assert!(decoder.feed(&replacement).is_err());
+            // The old entry must not keep decoding after a rejected replacement.
+            assert!(decoder.feed(&row).is_err());
+            assert!(decoder.feed(&commit(2, 3, 1)).is_err());
+        }
+    }
+
+    #[test]
+    fn refreshes_each_replica_identity_and_rejects_unknown_messages() {
+        let text = |value: &str| TupleValue::Text(value.as_bytes().to_vec());
         let mut first = decoder(7, "public", "items");
         first.preload_relations(vec![(
             RelationKey::new("public", "items", 7),
-            b'd',
             vec![
                 ColumnInfo {
                     name: "id".to_string(),
                     is_key: true,
-                    type_oid: 23,
-                    type_modifier: -1,
                 },
                 ColumnInfo {
                     name: "value".to_string(),
                     is_key: false,
-                    type_oid: 25,
-                    type_modifier: -1,
                 },
             ],
         )]);
-        assert!(first.feed(&relation(7, "public", "items", b'f')).is_err());
+        let refresh = |identity: u8, id_key: bool, value_key: bool| {
+            relation_with_columns(
+                7,
+                "public",
+                "items",
+                identity,
+                &[("id", 23, id_key), ("value", 25, value_key)],
+            )
+        };
+        first.feed(&begin(1, 30, 7)).unwrap();
+        // FULL flags every column and sends the complete old tuple.
+        first.feed(&refresh(b'f', true, true)).unwrap();
+        first
+            .feed(&dml(
+                UPDATE_MSG,
+                7,
+                Some(&[text("1"), text("old")]),
+                Some(&[text("1"), text("new")]),
+            ))
+            .unwrap();
+        // NOTHING flags no column, so only an insert is published.
+        first.feed(&refresh(b'n', false, false)).unwrap();
+        first
+            .feed(&dml(
+                INSERT_MSG,
+                7,
+                None,
+                Some(&[text("2"), text("inserted")]),
+            ))
+            .unwrap();
+        // INDEX flags the index column, and DEFAULT flags the primary key.
+        first.feed(&refresh(b'i', false, true)).unwrap();
+        first
+            .feed(&dml(
+                DELETE_MSG,
+                7,
+                Some(&[TupleValue::Null, text("inserted")]),
+                None,
+            ))
+            .unwrap();
+        first.feed(&refresh(b'd', true, false)).unwrap();
+        first
+            .feed(&dml(
+                DELETE_MSG,
+                7,
+                Some(&[text("1"), TupleValue::Null]),
+                None,
+            ))
+            .unwrap();
+        let transactions = first.feed(&commit(30, 31, 7)).unwrap();
+        assert_eq!(transactions.len(), 1);
+        let expected = [
+            (
+                ChangeOperation::Update,
+                Some(image(&[("id", text("1")), ("value", text("old"))])),
+                Some(image(&[("id", text("1")), ("value", text("new"))])),
+            ),
+            (
+                ChangeOperation::Insert,
+                None,
+                Some(image(&[("id", text("2")), ("value", text("inserted"))])),
+            ),
+            (
+                ChangeOperation::Delete,
+                Some(image(&[("value", text("inserted"))])),
+                None,
+            ),
+            (
+                ChangeOperation::Delete,
+                Some(image(&[("id", text("1"))])),
+                None,
+            ),
+        ];
+        assert_eq!(transactions[0].events.len(), expected.len());
+        for (ordinal, (event, (operation, before, after))) in
+            transactions[0].events.iter().zip(expected).enumerate()
+        {
+            assert_eq!(event.operation, operation);
+            assert_eq!(event.event_ordinal, ordinal as u64);
+            assert_eq!(event.before, before);
+            assert_eq!(event.after, after);
+        }
         for tag in [b'S', b'Z'] {
             let mut fresh = decoder(7, "public", "items");
             assert!(fresh.feed(&[tag]).is_err());
@@ -1174,11 +1473,7 @@ mod tests {
     #[test]
     fn ignores_nontransactional_logical_messages() {
         let mut decoder = decoder(7, "public", "items");
-        let mut message = vec![LOGICAL_MSG, 0];
-        message.extend_from_slice(&1u64.to_be_bytes());
-        message.extend_from_slice(b"foreign\0");
-        message.extend_from_slice(&3u32.to_be_bytes());
-        message.extend_from_slice(b"abc");
+        let message = logical_message(false, 1, "foreign", b"abc");
         assert!(decoder.feed(&message).unwrap().is_empty());
 
         decoder.feed(&relation(7, "public", "items", b'd')).unwrap();

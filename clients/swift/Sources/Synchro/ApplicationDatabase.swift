@@ -17,6 +17,11 @@ public final class ApplicationTransaction {
         self.writeExecutor = writeExecutor
     }
 
+    /// A view for an inspection snapshot. The caller keeps the connection read-only.
+    convenience init(readOnlyDatabase database: GRDB.Database) {
+        self.init(database: database)
+    }
+
     @discardableResult
     public func execute(
         _ sql: String,
@@ -37,8 +42,7 @@ public final class ApplicationTransaction {
         params: [(any DatabaseValueConvertible)?]? = nil
     ) throws -> [Row] {
         try Row.fetchAll(
-            database,
-            sql: sql,
+            readOnlyStatement(sql),
             arguments: StatementArguments(params ?? [])
         )
     }
@@ -48,10 +52,40 @@ public final class ApplicationTransaction {
         params: [(any DatabaseValueConvertible)?]? = nil
     ) throws -> Row? {
         try Row.fetchOne(
-            database,
-            sql: sql,
+            readOnlyStatement(sql),
             arguments: StatementArguments(params ?? [])
         )
+    }
+
+    /// The query methods use the writable transaction connection. A write with
+    /// RETURNING must fail before it runs, because it bypasses `execute`.
+    private func readOnlyStatement(_ sql: String) throws -> GRDB.Statement {
+        let statement = try database.makeStatement(sql: sql)
+        guard statement.isReadonly else {
+            throw SynchroError.databaseError(underlying: ApplicationTransactionError.writableQuery)
+        }
+        return statement
+    }
+}
+
+/// Local failures at the managed application write boundary.
+enum ApplicationTransactionError: LocalizedError {
+    case writableQuery
+    case captureContextCleanupFailed(cleanup: any Error, write: (any Error)?)
+    case captureContextRemains
+
+    var errorDescription: String? {
+        switch self {
+        case .writableQuery:
+            return "Application queries must be read-only"
+        case .captureContextCleanupFailed(let cleanup, let write?):
+            return "Capture context cleanup failed: \(cleanup.localizedDescription). "
+                + "The write also failed: \(write.localizedDescription)"
+        case .captureContextCleanupFailed(let cleanup, nil):
+            return "Capture context cleanup failed: \(cleanup.localizedDescription)"
+        case .captureContextRemains:
+            return "Application write left capture context before commit"
+        }
     }
 }
 
@@ -84,7 +118,8 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
     private struct State {
         var syncedTables: Set<String> = []
         var captureTriggers: Set<String> = []
-        var captureContextWindowDepth = 0
+        var sdkWriteWindowDepth = 0
+        var managedWriteDepth = 0
     }
 
     private let state = NSLock()
@@ -103,18 +138,34 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
         state.unlock()
     }
 
-    /// The SDK writes the capture context rows itself, and the reserved-table
-    /// rule would deny that. The window opens only around the SDK's own
-    /// install and clear statements on the serial application queue.
-    func openCaptureContextWindow() {
+    /// The SDK writes the capture context rows and the atomic group state
+    /// itself, and the reserved-table rule would deny that. The window opens
+    /// only around the SDK's own statements on the serial application queue.
+    func openSDKWriteWindow() {
         state.lock()
-        protectedState.captureContextWindowDepth += 1
+        protectedState.sdkWriteWindowDepth += 1
         state.unlock()
     }
 
-    func closeCaptureContextWindow() {
+    func closeSDKWriteWindow() {
         state.lock()
-        protectedState.captureContextWindowDepth -= 1
+        protectedState.sdkWriteWindowDepth -= 1
+        state.unlock()
+    }
+
+    /// An application COMMIT or SAVEPOINT would end or split the managed
+    /// transaction before its commit-time checks. The scope covers only the
+    /// application callback. GRDB compiles its own BEGIN, COMMIT, and ROLLBACK
+    /// outside the scope.
+    func openManagedWriteScope() {
+        state.lock()
+        protectedState.managedWriteDepth += 1
+        state.unlock()
+    }
+
+    func closeManagedWriteScope() {
+        state.lock()
+        protectedState.managedWriteDepth -= 1
         state.unlock()
     }
 
@@ -151,7 +202,7 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
                 // writes remain unavailable because writable_schema is denied.
                 return SQLITE_OK
             }
-            if isCaptureContextTable(target), snapshot.captureContextWindowDepth > 0 {
+            if isSDKWriteTable(target), snapshot.sdkWriteWindowDepth > 0 {
                 return SQLITE_OK
             }
             guard isReserved(target) else { return SQLITE_OK }
@@ -188,6 +239,9 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
 
         case SQLITE_ATTACH, SQLITE_DETACH:
             return SQLITE_DENY
+
+        case SQLITE_TRANSACTION, SQLITE_SAVEPOINT:
+            return snapshot.managedWriteDepth > 0 ? SQLITE_DENY : SQLITE_OK
 
         case SQLITE_PRAGMA:
             return authorizePragma(name: first, argument: second)
@@ -230,9 +284,10 @@ final class ApplicationSQLPolicy: @unchecked Sendable {
             || name == "_grdb_migrations"
     }
 
-    private func isCaptureContextTable(_ name: String) -> Bool {
+    private func isSDKWriteTable(_ name: String) -> Bool {
         switch normalized(name) {
-        case "_synchro_capture_context", "_synchro_capture_fields":
+        case "_synchro_capture_context", "_synchro_capture_fields",
+             "_synchro_meta", "_synchro_pending_changes", "_synchro_mutation_values":
             return true
         default:
             return false
@@ -307,29 +362,95 @@ final class ApplicationDatabase: @unchecked Sendable {
     }
 
     func write<T>(_ body: (ApplicationTransaction) throws -> T) throws -> T {
-        try queue.write { database in
-            try body(ApplicationTransaction(database: database) { sql, execute in
-                guard let context = try self.captureContext(for: sql) else {
-                    return try execute()
-                }
-                return try self.withCaptureContext(context, database: database, execute)
-            })
+        try managedWrite { database in
+            try body(capturingTransaction(database))
         }
+    }
+
+    /// Runs one write transaction whose captured mutations form one atomic group.
+    ///
+    /// `validate` receives the group ID after the body and before commit. An
+    /// error from the body or from `validate` rolls back the transaction.
+    func atomicWrite<T>(
+        validate: (GRDB.Database, String) throws -> Void,
+        _ body: (ApplicationTransaction) throws -> T
+    ) throws -> T {
+        try managedWrite { database in
+            let groupID = UUID().uuidString.lowercased()
+            try sdkWrite {
+                try database.execute(
+                    sql: "INSERT INTO _synchro_meta (key, value) VALUES ('atomic_group_id', ?)",
+                    arguments: [groupID]
+                )
+            }
+            let result = try body(capturingTransaction(database))
+            try sdkWrite {
+                try validate(database, groupID)
+                try database.execute(sql: "DELETE FROM _synchro_meta WHERE key = 'atomic_group_id'")
+            }
+            return result
+        }
+    }
+
+    private func capturingTransaction(_ database: GRDB.Database) -> ApplicationTransaction {
+        ApplicationTransaction(database: database) { sql, execute in
+            guard let context = try self.captureContext(for: sql) else {
+                return try execute()
+            }
+            return try self.withCaptureContext(context, database: database, execute)
+        }
+    }
+
+    private func sdkWrite<T>(_ body: () throws -> T) throws -> T {
+        policy.openSDKWriteWindow()
+        defer { policy.closeSDKWriteWindow() }
+        return try body()
     }
 
     func write<T>(
         context: ApplicationCaptureContext,
         _ body: (ApplicationTransaction) throws -> T
     ) throws -> T {
-        try queue.write { database in
+        try managedWrite { database in
             try withCaptureContext(context, database: database) {
                 try body(ApplicationTransaction(database: database))
             }
         }
     }
 
+    /// GRDB begins the transaction before this closure and commits or rolls
+    /// back after it, so the transaction-control scope ends before either.
+    private func managedWrite<T>(_ body: (GRDB.Database) throws -> T) throws -> T {
+        try queue.write { database in
+            policy.openManagedWriteScope()
+            defer { policy.closeManagedWriteScope() }
+            let result = try body(database)
+            try requireNoCaptureContext(database)
+            return result
+        }
+    }
+
+    /// A callback can catch a statement error and continue. Residual context
+    /// changes later capture, so the managed write must not commit it.
+    private func requireNoCaptureContext(_ database: GRDB.Database) throws {
+        let residual = try Bool.fetchOne(
+            database,
+            sql: """
+                SELECT EXISTS (SELECT 1 FROM _synchro_capture_context)
+                    OR EXISTS (SELECT 1 FROM _synchro_capture_fields)
+                """
+        )
+        guard residual == false else {
+            throw SynchroError.databaseError(underlying: ApplicationTransactionError.captureContextRemains)
+        }
+    }
+
+    /// Only INSERT needs an inferred context: it names the authored columns.
+    /// UPDATE and DELETE statements are still validated here, but the update
+    /// trigger captures changed writable fields when no context exists.
     private func captureContext(for sql: String) throws -> ApplicationCaptureContext? {
-        guard let statement = try ApplicationWriteStatement.parse(sql) else { return nil }
+        guard let statement = try ApplicationWriteStatement.parse(sql),
+              statement.operation == "insert" else { return nil }
         writableColumnsLock.lock()
         let table = syncedTablesByName[normalized(statement.tableName)]
         writableColumnsLock.unlock()
@@ -356,20 +477,32 @@ final class ApplicationDatabase: @unchecked Sendable {
         _ body: () throws -> T
     ) throws -> T {
         let token = UUID().uuidString
-        policy.openCaptureContextWindow()
+        let outcome = Result<T, any Error> {
+            try sdkWrite {
+                try installCaptureContext(context, token: token, database: database)
+            }
+            return try body()
+        }
         do {
-            try installCaptureContext(context, token: token, database: database)
-            policy.closeCaptureContextWindow()
+            try sdkWrite {
+                try clearCaptureContext(token: token, database: database)
+            }
         } catch {
-            policy.closeCaptureContextWindow()
-            throw error
+            let writeError: (any Error)?
+            switch outcome {
+            case .success:
+                writeError = nil
+            case let .failure(failure):
+                writeError = failure
+            }
+            throw SynchroError.databaseError(
+                underlying: ApplicationTransactionError.captureContextCleanupFailed(
+                    cleanup: error,
+                    write: writeError
+                )
+            )
         }
-        defer {
-            policy.openCaptureContextWindow()
-            try? clearCaptureContext(token: token, database: database)
-            policy.closeCaptureContextWindow()
-        }
-        return try body()
+        return try outcome.get()
     }
 
     private func installCaptureContext(

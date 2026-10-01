@@ -2453,9 +2453,9 @@ PODS:
     - React-utils (= 0.83.0)
     - SocketRocket
   - SocketRocket (0.7.1)
-  - Synchro (0.3.2):
+  - Synchro (0.4.0-rc.1):
     - GRDB.swift (~> 7.0)
-  - SynchroReactNative (0.3.2):
+  - SynchroReactNative (0.4.0-rc.1):
     - boost
     - DoubleConversion
     - fast_float
@@ -2482,7 +2482,36 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.3.2)
+    - Synchro (= 0.4.0-rc.1)
+    - Yoga
+  - SynchroReactNative/Tests (0.4.0-rc.1):
+    - boost
+    - DoubleConversion
+    - fast_float
+    - fmt
+    - glog
+    - hermes-engine
+    - RCT-Folly
+    - RCT-Folly/Fabric
+    - RCTRequired
+    - RCTTypeSafety
+    - React-Core
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - SocketRocket
+    - Synchro (= 0.4.0-rc.1)
     - Yoga
   - Yoga (0.0.0)
 
@@ -2568,6 +2597,7 @@ DEPENDENCIES:
   - SocketRocket (~> 0.7.1)
   - Synchro (from `../../../..`)
   - SynchroReactNative (from `../..`)
+  - SynchroReactNative/Tests (from `../..`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2822,10 +2852,10 @@ SPEC CHECKSUMS:
   ReactCodegen: 10a61330b137caaad6f7fbe7f5d0e7a40d621700
   ReactCommon: c6cd81778336e767e27fe63c6707dd6b735fff5c
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: 3554829459f9c72d78d014880e8a6345a4bd90a7
-  SynchroReactNative: 42888f6c5cd3a13362dd8f4f3c9d95e49403d5ec
+  Synchro: 668a797b89a41bbfb905faed976eb6204e8d768c
+  SynchroReactNative: e31b85b83b5c14eaa2be7933fab948a7903ee7d0
   Yoga: 7a9f26c70daf0b08d82ec2f862e9a8872442129e
 
-PODFILE CHECKSUM: e0ef9b9dbc9d5667d968f38d96dad894fb21611f
+PODFILE CHECKSUM: 998a4402881d1f26904986555a044010b453070d
 
 COCOAPODS: 1.16.2

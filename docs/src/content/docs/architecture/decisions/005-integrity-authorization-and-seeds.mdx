@@ -356,7 +356,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE synchro_owner IN SCHEMA synchro
 
 The generated installation SQL explicitly revokes `PUBLIC` usage from every extension-owned type, then grants `USAGE` on `synchro`, type usage where required, and `EXECUTE` on each allowed function signature to the corresponding role. It does not use `GRANT EXECUTE ON ALL FUNCTIONS` for a runtime role. Tables and sequences remain inaccessible directly to adapter, seed, and monitor roles.
 
-Privileged functions are owned by `synchro_owner`, use a fixed safe function `search_path` of `pg_catalog, synchro`, resolve application relations by validated schema-qualified identity, and use parameterized values. Required application-relation privileges and RLS policies are granted explicitly during controlled registration. Registration fails closed when those privileges, policies, or relation identities are not valid.
+Privileged functions are owned by `synchro_owner`, use a fixed safe function `search_path` of `pg_catalog, synchro, pg_temp`, resolve application relations by validated schema-qualified identity, and use parameterized values. Required application-relation privileges and RLS policies are granted explicitly during controlled registration. Registration fails closed when those privileges, policies, or relation identities are not valid. PostgreSQL searches the session temporary schema first when a path does not name `pg_temp`. The last position of `pg_temp` prevents a caller temporary relation from replacing an extension relation in a privileged function.
+
+One extension function is not privileged. `synchro_assert_projection_reader` is `SECURITY INVOKER`, so each projection view checks the privileges of its reader. Only `synchro_operator` and `synchro_worker` have `EXECUTE` on it, because only they and `synchro_owner` have `USAGE` on `synchro_projection`.
 
 ## Fail-closed readiness
 
@@ -556,7 +558,7 @@ Version `0.3.1`, the first published Protocol 3 release, is the first supported 
 - Scope verification is a standard ordered streaming hash. Implementations may index and cache inputs, but they cannot substitute a different wire aggregate for speed.
 - Strict terminal maps and transition validation turn malformed or incomplete responses into explicit failures before cursor advancement.
 - Database deployment requires fixed roles, explicit application-relation grants and RLS policy, generated revokes and grants, and non-superuser authorization tests.
-- Readiness can remain unready during worker startup, stale heartbeat, unknown lag, registry drift, or poison recovery. This is intentional fail-closed behavior.
+- Readiness can remain unready during worker startup, stale heartbeat, unknown lag, registry drift, or poison recovery. This is intentional fail-closed behavior. Normal write processing within the configured limits does not make readiness unready.
 - Deferrable serializable seed export can wait for a safe snapshot and holds one transaction for the export duration. Export limits and operational scheduling must account for that cost.
 - Portable seeds are independently verified caches. They become resumable only after authenticated assignment validation issues client-bound cursors.
 - Existing version 2 checksums, seed cursors, public-schema installs, stale SQL, and permissive SemVer or state behavior are not accepted by the version 3 release.

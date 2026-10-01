@@ -417,12 +417,16 @@ final class SchemaManager: @unchecked Sendable {
     ) throws {
         let sourceByID = Dictionary(uniqueKeysWithValues: sourceTables.map { ($0.tableID, $0) })
         let targetByID = Dictionary(uniqueKeysWithValues: targetTables.map { ($0.tableID, $0) })
+        var protectedRows: [String: ProtectedRows] = [:]
 
         for operation in journal.plan.operations {
             switch operation.kind {
             case .dropTable:
                 guard let tableID = operation.tableID, let table = sourceByID[tableID] else {
                     throw SynchroError.invalidResponse(message: "schema migration drop operation is invalid")
+                }
+                if journal.schemaReset, let target = targetByID[tableID] {
+                    protectedRows[tableID] = try loadProtectedRows(db, source: table, target: target)
                 }
                 try dropSyncedTable(db, table: table)
 
@@ -434,6 +438,10 @@ final class SchemaManager: @unchecked Sendable {
                     throw SynchroError.invalidResponse(message: "schema migration create operation is invalid")
                 }
                 try db.execute(sql: SQLiteSchema.generateCreateTableSQL(table: table))
+                // Capture triggers are installed later, so this restore creates no intent.
+                if let rows = protectedRows.removeValue(forKey: tableID) {
+                    try restoreProtectedRows(db, rows: rows, target: table)
+                }
 
             case .addColumn:
                 guard let tableID = operation.tableID,
@@ -477,6 +485,63 @@ final class SchemaManager: @unchecked Sendable {
                     affectedScopes: journal.affectedScopes
                 )
             }
+        }
+    }
+
+    /// The target values of the application rows that hold unresolved local
+    /// intent. A reset rebuild must not overwrite or remove those rows (spec
+    /// schema evolution, client migration step 8), so the reset keeps each
+    /// field that the target declares with the same field ID and type. The
+    /// restore skips a row that the target shape cannot hold, and the rebuild
+    /// then installs the server row for it.
+    private struct ProtectedRows {
+        let columns: [String]
+        let rows: [[DatabaseValue]]
+    }
+
+    private func loadProtectedRows(
+        _ db: GRDB.Database,
+        source: LocalSchemaTable,
+        target: LocalSchemaTable
+    ) throws -> ProtectedRows {
+        let sourceColumns = Dictionary(uniqueKeysWithValues: source.columns.map { ($0.fieldID, $0) })
+        let kept = target.columns.compactMap { column -> (source: String, target: String)? in
+            guard let match = sourceColumns[column.fieldID], match.logicalType == column.logicalType else {
+                return nil
+            }
+            return (match.name, column.name)
+        }
+        guard source.primaryKeyFieldID == target.primaryKeyFieldID,
+              let primaryKey = sourceColumns[source.primaryKeyFieldID],
+              kept.contains(where: { $0.source == primaryKey.name }) else {
+            return ProtectedRows(columns: [], rows: [])
+        }
+        let selected = kept.map { SQLiteHelpers.quoteIdentifier($0.source) }.joined(separator: ", ")
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT \(selected) FROM \(SQLiteHelpers.quoteIdentifier(source.tableName))
+                WHERE \(SQLiteHelpers.quoteIdentifier(primaryKey.name)) IN (\(PullProcessor.protectedRecordIDsSQL))
+                """,
+            arguments: [source.tableName, source.tableName]
+        )
+        return ProtectedRows(
+            columns: kept.map(\.target),
+            rows: rows.map { row in kept.indices.map { row[$0] as DatabaseValue } }
+        )
+    }
+
+    private func restoreProtectedRows(_ db: GRDB.Database, rows: ProtectedRows, target: LocalSchemaTable) throws {
+        guard !rows.rows.isEmpty else { return }
+        let columns = rows.columns.map(SQLiteHelpers.quoteIdentifier).joined(separator: ", ")
+        let placeholders = Array(repeating: "?", count: rows.columns.count).joined(separator: ", ")
+        let statement = try db.makeStatement(
+            // OR IGNORE skips only a row that violates a target NOT NULL, CHECK,
+            // UNIQUE, or PRIMARY KEY constraint. Other errors still fail the reset.
+            sql: "INSERT OR IGNORE INTO \(SQLiteHelpers.quoteIdentifier(target.tableName)) (\(columns)) VALUES (\(placeholders))"
+        )
+        for values in rows.rows {
+            try statement.execute(arguments: StatementArguments(values))
         }
     }
 

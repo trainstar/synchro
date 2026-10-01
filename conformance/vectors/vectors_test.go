@@ -23,8 +23,8 @@ func TestFrozenVectors(t *testing.T) {
 	if !ok {
 		t.Fatal("Catalog.Set() did not return the loaded set")
 	}
-	if len(set.Vectors) != 123 {
-		t.Fatalf("loaded vector count = %d, want 123", len(set.Vectors))
+	if len(set.Vectors) != 129 {
+		t.Fatalf("loaded vector count = %d, want 129", len(set.Vectors))
 	}
 	for _, vector := range set.Vectors {
 		vector := vector

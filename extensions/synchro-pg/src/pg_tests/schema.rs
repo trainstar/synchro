@@ -28,7 +28,6 @@
              REVOKE EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID) FROM PUBLIC;
              GRANT EXECUTE ON FUNCTION public.test_registration_gate_membership(UUID)
                  TO synchro_owner, synchro_worker;
-             GRANT USAGE ON SCHEMA public TO synchro_owner, synchro_worker;
              GRANT SELECT ON TABLE test_registration_gate TO synchro_owner;
              ALTER TABLE test_registration_gate ENABLE ROW LEVEL SECURITY;
              CREATE POLICY test_registration_gate_policy
@@ -93,13 +92,23 @@
         .unwrap();
 
         dblink_exec(pull_name, "SET lock_timeout = '5s'");
+        // Parallel tests hold the WAL worker gate until they roll back. The
+        // backfill session takes the gate before the timeout starts, so only
+        // the progress lock wait remains inside the bounded wait.
+        dblink_exec(backfill_name, "BEGIN");
+        dblink_query(
+            backfill_name,
+            &format!(
+                "SELECT 'locked' FROM pg_catalog.pg_advisory_xact_lock({})",
+                crate::WAL_WORKER_GATE_LOCK_KEY
+            ),
+        );
         dblink_exec(backfill_name, "SET statement_timeout = '5s'");
         dblink_exec(pull_name, "BEGIN");
         dblink_exec(
             pull_name,
             "LOCK TABLE synchro.sync_wal_progress IN SHARE MODE",
         );
-        dblink_exec(backfill_name, "BEGIN");
         let backfill_pid: i32 = dblink_query(backfill_name, "SELECT pg_backend_pid()")
             .parse()
             .expect("parse backfill PID");
@@ -731,6 +740,11 @@
         )
         .unwrap();
         assert_eq!(in_pub, Some(true));
+        // A partitioned table needs root identity, and a new publication has no other subscriber.
+        let via_root: Option<bool> =
+            Spi::get_one("SELECT pubviaroot FROM pg_publication WHERE pubname = 'synchro_pub'")
+                .unwrap();
+        assert_eq!(via_root, Some(true));
     }
 
     #[pg_test]
@@ -789,6 +803,7 @@
         let before: Option<i64> =
             Spi::get_one("SELECT max(schema_version) FROM sync_schema_manifest").unwrap();
 
+        lock_wal_progress_writers();
         Spi::connect_mut(|client| {
             client.update(
                 "UPDATE sync_registry_generations
@@ -1966,8 +1981,12 @@
         )
         .unwrap();
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
-        assert!(result.is_err(), "live Class 4 type change must require bootstrap");
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(1));
+        assert!(
+            requires_projection_bootstrap(generation),
+            "live Class 4 type change must require bootstrap"
+        );
     }
 
     #[pg_test]
@@ -2023,9 +2042,10 @@
         )
         .unwrap();
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(1));
         assert!(
-            result.is_err(),
+            requires_projection_bootstrap(generation),
             "historical Class 4 type change must require bootstrap"
         );
     }
@@ -2072,6 +2092,9 @@
 
     #[pg_test]
     fn test_added_nonempty_table_is_class_3_with_bootstrap() {
+        // Class 3 affects every committed scope, so no dblink test may have
+        // committed clients while this test reads them.
+        lock_committed_scope_state(false);
         setup_test_tables();
         register_client("nonempty-table-user", "nonempty-table-client");
         Spi::run(
@@ -2624,17 +2647,71 @@
         assert!(tables.iter().any(|table| table["name"] == "test_products"));
     }
 
+    // A SQL entry point lets a PL/pgSQL exception block roll back a failed
+    // activation in a subtransaction, so the test can inspect the state after.
+    #[pg_extern]
+    fn activate_pending_registry() {
+        activate_pending_registry_for_test();
+    }
+
+    fn orders_capture_state() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'active_generation', (
+                     SELECT generation FROM sync_registry_generations WHERE state = 'active'
+                 ),
+                 'pending_generations', (
+                     SELECT count(*) FROM sync_registry_generations WHERE state = 'pending'
+                 ),
+                 'publication_row_filter', (
+                     SELECT rowfilter FROM pg_publication_tables
+                     WHERE pubname = 'synchro_pub'
+                       AND schemaname = 'public'
+                       AND tablename = 'test_orders'
+                 )
+             )",
+        )
+        .unwrap()
+        .expect("test_orders capture state")
+        .0
+    }
+
     #[pg_test]
     fn test_unregister_keeps_filtered_publication_member() {
         setup_test_tables();
         replace_orders_publication_member(ORDERS_ROW_FILTER_MEMBER);
         Spi::run("SELECT synchro_unregister_table('test_orders')").unwrap();
+        let before = orders_capture_state();
+        assert!(before["publication_row_filter"].is_string(), "{before}");
+        assert!(before["pending_generations"].as_i64() > Some(0), "{before}");
 
-        let result = std::panic::catch_unwind(activate_pending_registry_for_test);
-        assert!(
-            result.is_err(),
-            "activation must not remove a filtered publication member"
-        );
+        Spi::run(
+            "DO $test$
+             DECLARE
+                 rejected boolean := false;
+             BEGIN
+                 BEGIN
+                     PERFORM tests.activate_pending_registry();
+                 EXCEPTION WHEN OTHERS THEN
+                     rejected := true;
+                 END;
+                 IF NOT rejected THEN
+                     RAISE EXCEPTION 'activation removed a filtered publication member';
+                 END IF;
+             END
+             $test$",
+        )
+        .expect("activation must fail before it removes a filtered publication member");
+        assert_eq!(orders_capture_state(), before);
+        let active_orders: Option<i64> = Spi::get_one(
+            "SELECT count(*)
+             FROM sync_registry registry
+             JOIN sync_registry_generations generation
+               ON generation.generation = registry.registry_generation
+             WHERE generation.state = 'active' AND registry.table_name = 'test_orders'",
+        )
+        .unwrap();
+        assert_eq!(active_orders, Some(1));
     }
 
     #[pg_test]
@@ -3316,6 +3393,310 @@
         assert_eq!(checkpoints_after, checkpoints_before);
     }
 
+    /// Reads the connect-owned rows and the push replay ledger of one client.
+    fn connect_durable_state(user_id: &str, client_id: &str) -> Value {
+        let state: Option<pgrx::JsonB> = Spi::get_one_with_args(
+            "SELECT jsonb_build_object(
+                 'client', (
+                     SELECT to_jsonb(client) FROM sync_clients AS client
+                     WHERE client.user_id = $1 AND client.client_id = $2
+                 ),
+                 'history', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(history)
+                                ORDER BY history.client_generation,
+                                         history.scope_set_version,
+                                         history.scope_id), '[]'::jsonb)
+                     FROM sync_client_scope_history AS history
+                     WHERE history.user_id = $1 AND history.client_id = $2
+                 ),
+                 'checkpoints', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(checkpoint)
+                                ORDER BY checkpoint.bucket_id), '[]'::jsonb)
+                     FROM sync_client_checkpoints AS checkpoint
+                     WHERE checkpoint.user_id = $1 AND checkpoint.client_id = $2
+                 ),
+                 'push_batches', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(batch)
+                                ORDER BY batch.batch_id), '[]'::jsonb)
+                     FROM sync_push_batches AS batch
+                     WHERE batch.user_id = $1 AND batch.client_id = $2
+                 ),
+                 'push_mutations', (
+                     SELECT COALESCE(jsonb_agg(to_jsonb(mutation)
+                                ORDER BY mutation.mutation_id), '[]'::jsonb)
+                     FROM sync_push_mutations AS mutation
+                     WHERE mutation.user_id = $1 AND mutation.client_id = $2
+                 )
+             )",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        state.expect("durable connect state").0
+    }
+
+    #[pg_test]
+    fn test_connect_rejected_first_connect_claims_no_client_state() {
+        fn first_connect(
+            client_id: &str,
+            schema: &(i64, String),
+            scope_set_version: i64,
+            cursor: Value,
+        ) -> Value {
+            connect_client(
+                "first-user",
+                json!({
+                    "client_id": client_id,
+                    "platform": "ios",
+                    "app_version": "1.0.0",
+                    "protocol_version": 3,
+                    "schema": { "version": schema.0, "hash": schema.1 },
+                    "scope_set_version": scope_set_version,
+                    "known_scopes": { "user:first-user": { "cursor": cursor } }
+                }),
+            )
+        }
+
+        setup_test_tables();
+        let initial_schema = latest_schema_ref();
+        stage_orders_transition(false, true);
+        activate_pending_registry_for_test();
+        let current_schema = latest_schema_ref();
+        let no_client_state = json!({
+            "client": null,
+            "history": [],
+            "checkpoints": [],
+            "push_batches": [],
+            "push_mutations": []
+        });
+
+        // The prospective first connect has scope set version 1.
+        let too_high = first_connect("first-too-high", &current_schema, 2, Value::Null);
+        assert_eq!(too_high["error"]["code"], "invalid_request");
+        assert_eq!(
+            connect_durable_state("first-user", "first-too-high"),
+            no_client_state
+        );
+
+        // The schema change makes connect parse the presented cursor.
+        let forged_cursor = first_connect(
+            "first-forged-cursor",
+            &initial_schema,
+            1,
+            json!("forged-cursor"),
+        );
+        assert_eq!(forged_cursor["error"]["code"], "invalid_request");
+        assert_eq!(
+            connect_durable_state("first-user", "first-forged-cursor"),
+            no_client_state
+        );
+
+        // A premature claim would reject these corrected first connects.
+        let retried = first_connect("first-too-high", &current_schema, 1, Value::Null);
+        assert!(retried.get("error").is_none(), "{retried}");
+        assert_eq!(retried["client_generation"], 1);
+        assert_eq!(retried["scope_set_version"], 1);
+        let retried_cursor = first_connect("first-forged-cursor", &initial_schema, 1, Value::Null);
+        assert!(retried_cursor.get("error").is_none(), "{retried_cursor}");
+        assert_eq!(retried_cursor["schema"]["action"], "replace");
+        assert_eq!(
+            retried_cursor["scope_cursor_updates"],
+            json!({ "user:first-user": null })
+        );
+    }
+
+    #[pg_test]
+    fn test_connect_rejections_preserve_existing_client_state() {
+        fn existing_connect(
+            schema: &(i64, String),
+            platform: &str,
+            app_version: &str,
+            scope_set_version: i64,
+            known_scopes: &[&str],
+        ) -> Value {
+            let known_scopes: serde_json::Map<String, Value> = known_scopes
+                .iter()
+                .map(|scope| (scope.to_string(), json!({ "cursor": null })))
+                .collect();
+            connect_client(
+                "atomic-user",
+                json!({
+                    "client_id": "atomic-client",
+                    "client_generation": 1,
+                    "platform": platform,
+                    "app_version": app_version,
+                    "protocol_version": 3,
+                    "schema": { "version": schema.0, "hash": schema.1 },
+                    "scope_set_version": scope_set_version,
+                    "known_scopes": known_scopes
+                }),
+            )
+        }
+        fn history_rows(state: &Value, generation: i64) -> Vec<Value> {
+            state["history"]
+                .as_array()
+                .expect("history rows")
+                .iter()
+                .filter(|row| row["client_generation"] == generation)
+                .cloned()
+                .collect()
+        }
+
+        setup_test_tables();
+        let user_id = "atomic-user";
+        let client_id = "atomic-client";
+        let identity = "user:atomic-user";
+        register_client(user_id, client_id);
+        Spi::run_with_args(
+            "SELECT synchro_grant_user_scope($1, $2)",
+            &[user_id.into(), "team:alpha".into()],
+        )
+        .unwrap();
+        let schema = latest_schema_ref();
+        let assigned = existing_connect(&schema, "test", "1.0.0", 1, &[identity]);
+        assert_eq!(assigned["scope_set_version"], 2, "{assigned}");
+        assert_eq!(assigned["scopes"]["add"][0]["id"], "team:alpha");
+
+        let record_id = "40000000-0000-4000-8000-000000000001";
+        let pushed = push_client(
+            user_id,
+            client_id,
+            "atomic-replay",
+            vec![push_mutation(
+                (user_id, client_id),
+                "atomic-replay",
+                "test_orders",
+                "insert",
+                record_id,
+                None,
+                Some(&[("user_id", json!(user_id)), ("title", json!("atomic"))]),
+            )],
+        );
+        assert_eq!(pushed.json["accepted"][0]["status"], "applied");
+        Spi::run_with_args(
+            "UPDATE sync_client_checkpoints
+             SET position_kind = 'effect', commit_lsn = '0/10',
+                 event_ordinal = 1, effect_ordinal = 0
+             WHERE user_id = $1 AND client_id = $2 AND bucket_id = $3",
+            &[user_id.into(), client_id.into(), identity.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "UPDATE sync_clients
+             SET generation_created_at = now() - interval '2 days',
+                 last_acknowledged_at = now() - interval '1 day',
+                 updated_at = now() - interval '1 day'
+             WHERE user_id = $1 AND client_id = $2",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        // The server assignment change makes the prospective scope set version 3.
+        Spi::run_with_args(
+            "SELECT synchro_revoke_user_scope($1, $2)",
+            &[user_id.into(), "team:alpha".into()],
+        )
+        .unwrap();
+
+        let before = connect_durable_state(user_id, client_id);
+        assert_eq!(before["client"]["client_generation"], 1);
+        assert_eq!(before["client"]["scope_set_version"], 2);
+        assert_eq!(before["client"]["bucket_subs"], json!(["team:alpha", identity]));
+        assert_eq!(before["client"]["platform"], "test");
+        assert_eq!(before["history"].as_array().map(Vec::len), Some(2));
+        assert_eq!(before["checkpoints"][1]["bucket_id"], identity);
+        assert_eq!(before["checkpoints"][1]["position_kind"], "effect");
+        assert_eq!(before["push_batches"].as_array().map(Vec::len), Some(1));
+        assert_eq!(before["push_mutations"].as_array().map(Vec::len), Some(1));
+
+        let too_high = existing_connect(&schema, "android", "2.0.0", 4, &[identity, "team:alpha"]);
+        assert_eq!(too_high["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), before);
+
+        let forged = existing_connect(
+            &schema,
+            "android",
+            "2.0.0",
+            2,
+            &[identity, "team:alpha", "team:forged"],
+        );
+        assert_eq!(forged["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), before);
+
+        Spi::run_with_args(
+            "UPDATE sync_clients
+             SET generation_created_at = now() - interval '40 days',
+                 last_acknowledged_at = now() - interval '35 days',
+                 generation_expires_at = now() - interval '1 day'
+             WHERE user_id = $1 AND client_id = $2",
+            &[user_id.into(), client_id.into()],
+        )
+        .unwrap();
+        let expired = connect_durable_state(user_id, client_id);
+
+        let forged_after_expiry =
+            existing_connect(&schema, "android", "2.0.0", 2, &[identity, "team:forged"]);
+        assert_eq!(forged_after_expiry["error"]["code"], "invalid_request");
+        assert_eq!(connect_durable_state(user_id, client_id), expired);
+
+        // The expired generation's history classifies the revoked scope for removal.
+        let renewed = existing_connect(&schema, "test", "1.0.0", 2, &[identity, "team:alpha"]);
+        assert!(renewed.get("error").is_none(), "{renewed}");
+        assert_eq!(renewed["client_generation"], 2);
+        assert_eq!(renewed["scope_set_version"], 3);
+        assert_eq!(renewed["scopes"]["add"], json!([]));
+        assert_eq!(renewed["scopes"]["remove"], json!(["team:alpha"]));
+        assert_eq!(renewed["scope_cursor_updates"], json!({ identity: null }));
+
+        let after = connect_durable_state(user_id, client_id);
+        assert_eq!(after["client"]["client_generation"], 2);
+        assert_eq!(after["client"]["scope_set_version"], 3);
+        assert_eq!(after["client"]["bucket_subs"], json!([identity]));
+        assert_eq!(after["client"]["generation_expires_at"], Value::Null);
+        assert_eq!(after["client"]["last_acknowledged_at"], Value::Null);
+        assert_ne!(
+            after["client"]["generation_created_at"],
+            expired["client"]["generation_created_at"]
+        );
+        assert_eq!(
+            after["client"]["accepted_write_epoch"],
+            expired["client"]["accepted_write_epoch"]
+        );
+        assert_eq!(history_rows(&after, 1), history_rows(&expired, 1));
+        let renewed_history: Vec<Value> = history_rows(&after, 2)
+            .iter()
+            .map(|row| {
+                json!({
+                    "scope_id": row["scope_id"],
+                    "scope_set_version": row["scope_set_version"],
+                    "assigned": row["assigned"],
+                    "assignment_source": row["assignment_source"]
+                })
+            })
+            .collect();
+        assert_eq!(
+            renewed_history,
+            vec![json!({
+                "scope_id": identity,
+                "scope_set_version": 3,
+                "assigned": true,
+                "assignment_source": "identity"
+            })]
+        );
+        let renewed_checkpoints: Vec<Value> = after["checkpoints"]
+            .as_array()
+            .expect("renewed checkpoints")
+            .iter()
+            .map(|row| {
+                json!({ "bucket_id": row["bucket_id"], "position_kind": row["position_kind"] })
+            })
+            .collect();
+        assert_eq!(
+            renewed_checkpoints,
+            vec![json!({ "bucket_id": identity, "position_kind": "generation_start" })]
+        );
+        assert_eq!(after["push_batches"], expired["push_batches"]);
+        assert_eq!(after["push_mutations"], expired["push_mutations"]);
+    }
+
     #[pg_test]
     fn test_connect_serializes_with_pull_generation_renewal() {
         run_connect_generation_renewal_race(false);
@@ -3359,7 +3740,23 @@
         .expect("dblink asynchronous query result")
     }
 
+    // The renewal race commits a client through dblink and deletes it before
+    // its test transaction ends. It holds this lock exclusively for that whole
+    // time. A test that asserts on every committed scope holds it shared.
+    const COMMITTED_SCOPE_STATE_LOCK: i64 = 0x5359_4e43_5343_4f50;
+
+    fn lock_committed_scope_state(exclusive: bool) {
+        let statement = if exclusive {
+            "SELECT pg_advisory_xact_lock($1)"
+        } else {
+            "SELECT pg_advisory_xact_lock_shared($1)"
+        };
+        Spi::run_with_args(statement, &[COMMITTED_SCOPE_STATE_LOCK.into()])
+            .expect("lock committed scope state");
+    }
+
     fn run_connect_generation_renewal_race(rebuild: bool) {
+        lock_committed_scope_state(true);
         let user_id = if rebuild {
             "concurrent-rebuild-user"
         } else {
@@ -4273,4 +4670,296 @@
         assert_eq!(remaining, Some(0));
         let pages: Option<i64> = Spi::get_one("SELECT count(*) FROM sync_rebuild_pages").unwrap();
         assert_eq!(pages, Some(0));
+    }
+
+    const ORDERS_MEMBERSHIP_SQL: &str =
+        "$$SELECT 'user:' || (user_id #>> '{}') FROM synchro_projection.test_orders WHERE record_id = p_key::text$$";
+
+    fn register_orders_excluding(exclude_columns: &str) {
+        Spi::run(&format!(
+            "SELECT tests.register_test_table(
+                 'test_orders', {ORDERS_MEMBERSHIP_SQL}, 'single_scope',
+                 'id', 'updated_at', 'deleted_at', 'enabled', {exclude_columns}
+             )"
+        ))
+        .unwrap();
+    }
+
+    fn latest_validated_pending_generation() -> i64 {
+        Spi::get_one(
+            "SELECT generation
+             FROM sync_registry_generations
+             WHERE state = 'pending' AND validated
+             ORDER BY generation DESC
+             LIMIT 1",
+        )
+        .unwrap()
+        .expect("validated pending generation")
+    }
+
+    fn recorded_source_requirement(generation: i64) -> Option<i16> {
+        Spi::get_one_with_args(
+            "SELECT source_requirement FROM sync_registry_generations WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap()
+    }
+
+    fn pending_transition_class(generation: i64) -> String {
+        Spi::connect(|client| {
+            let pending = crate::schema::prepare_pending_manifest(client, generation)
+                .expect("prepare pending manifest")
+                .expect("pending manifest");
+            let body = serde_json::from_str::<Value>(&pending.canonical_body)
+                .expect("decode pending manifest");
+            Ok::<_, spi::Error>(body["transition_class"].as_str().unwrap().to_string())
+        })
+        .unwrap()
+    }
+
+    fn requires_projection_bootstrap(generation: i64) -> bool {
+        Spi::connect(|client| {
+            crate::schema::generation_requires_projection_bootstrap(client, generation)
+        })
+        .unwrap()
+    }
+
+    fn latest_published_class() -> String {
+        Spi::get_one(
+            "SELECT transition_class FROM sync_schema_manifest
+             ORDER BY schema_version DESC LIMIT 1",
+        )
+        .unwrap()
+        .expect("published manifest class")
+    }
+
+    #[pg_test]
+    fn test_reexposed_populated_field_requires_client_data_bootstrap() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title, internal_notes)
+             VALUES ('d5000000-0000-4000-8000-000000000001', 'reexpose-user', 'row', NULL),
+                    ('d5000000-0000-4000-8000-000000000002', 'reexpose-user', 'row', 'kept')",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY[]::text[]");
+        let generation = latest_validated_pending_generation();
+
+        assert_eq!(recorded_source_requirement(generation), Some(2));
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+        let activation_marker: Option<bool> = Spi::get_one_with_args(
+            "SELECT EXISTS (
+                 SELECT 1 FROM sync_registry_activation_requests
+                 WHERE registry_generation = $1
+             )",
+            &[generation.into()],
+        )
+        .unwrap();
+        assert_eq!(activation_marker, Some(false));
+    }
+
+    #[pg_test]
+    fn test_added_default_field_requires_client_data_bootstrap() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000003', 'default-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN filled_note TEXT DEFAULT 'filled'",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let generation = latest_validated_pending_generation();
+
+        assert_eq!(recorded_source_requirement(generation), Some(2));
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+    }
+
+    #[pg_test]
+    fn test_recorded_source_requirement_ignores_later_source_changes() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000004', 'frozen-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN null_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let direct = latest_validated_pending_generation();
+        Spi::run("UPDATE test_orders SET null_note = 'written after admission'").unwrap();
+
+        assert_eq!(recorded_source_requirement(direct), Some(0));
+        assert!(!requires_projection_bootstrap(direct));
+        assert_eq!(pending_transition_class(direct), "class_2");
+        activate_pending_registry_for_test();
+        assert_eq!(latest_published_class(), "class_2");
+
+        Spi::run(
+            "ALTER TABLE test_orders ADD COLUMN cleared_note TEXT;
+             UPDATE test_orders SET cleared_note = 'present at admission'",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let backfill = latest_validated_pending_generation();
+        Spi::run("UPDATE test_orders SET cleared_note = NULL").unwrap();
+
+        assert_eq!(recorded_source_requirement(backfill), Some(2));
+        assert!(requires_projection_bootstrap(backfill));
+        assert_eq!(pending_transition_class(backfill), "class_3");
+    }
+
+    #[pg_test]
+    fn test_pending_child_requirement_uses_its_stored_parent() {
+        setup_test_tables();
+        Spi::run(
+            "INSERT INTO test_orders (id, user_id, title)
+             VALUES ('d5000000-0000-4000-8000-000000000005', 'parent-user', 'row');
+             ALTER TABLE test_orders ADD COLUMN first_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let first = latest_validated_pending_generation();
+        Spi::run(
+            "UPDATE test_orders SET first_note = 'written after the first admission';
+             ALTER TABLE test_orders ADD COLUMN second_note TEXT",
+        )
+        .unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let second = latest_validated_pending_generation();
+        let parent: Option<i64> = Spi::get_one_with_args(
+            "SELECT parent_generation FROM sync_registry_generations WHERE generation = $1",
+            &[second.into()],
+        )
+        .unwrap();
+
+        assert_eq!(parent, Some(first));
+        assert_eq!(recorded_source_requirement(first), Some(0));
+        assert_eq!(recorded_source_requirement(second), Some(0));
+        assert!(!requires_projection_bootstrap(second));
+        activate_pending_registry_for_test();
+        assert_eq!(latest_published_class(), "class_2");
+    }
+
+    #[pg_test]
+    fn test_unknown_legacy_requirement_needs_verified_bootstrap() {
+        setup_test_tables();
+        Spi::run("ALTER TABLE test_orders ADD COLUMN legacy_note TEXT").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let generation = latest_validated_pending_generation();
+        assert_eq!(recorded_source_requirement(generation), Some(0));
+        Spi::run_with_args(
+            "UPDATE sync_registry_generations SET source_requirement = NULL WHERE generation = $1",
+            &[generation.into()],
+        )
+        .unwrap();
+
+        assert!(requires_projection_bootstrap(generation));
+        assert_eq!(pending_transition_class(generation), "class_3");
+    }
+
+    #[pg_test]
+    fn test_decimal_domain_change_follows_inclusion_rule() {
+        setup_test_tables();
+        Spi::run("ALTER TABLE test_orders ALTER COLUMN amount TYPE NUMERIC(17,3)").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let widened = latest_validated_pending_generation();
+        assert_eq!(pending_transition_class(widened), "class_2");
+        activate_pending_registry_for_test();
+
+        Spi::run("ALTER TABLE test_orders ALTER COLUMN amount TYPE NUMERIC(17,2)").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
+        let narrowed = latest_validated_pending_generation();
+        assert_eq!(pending_transition_class(narrowed), "class_4");
+    }
+
+    fn staged_window_state() -> Value {
+        Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_build_object(
+                 'generations', (
+                     SELECT jsonb_object_agg(generation::text, jsonb_build_array(state, validated))
+                     FROM sync_registry_generations
+                 ),
+                 'publication', (
+                     SELECT jsonb_build_array(attnames, rowfilter)
+                     FROM pg_publication_tables
+                     WHERE pubname = 'synchro_pub'
+                       AND schemaname = 'public'
+                       AND tablename = 'test_orders'
+                 )
+             )",
+        )
+        .unwrap()
+        .expect("staged window state")
+        .0
+    }
+
+    // A rejected drift must leave the active and the staged generation and the
+    // publication member unchanged.
+    fn staged_orders_window_rejects_drift(drift: &str, error: &str) {
+        setup_test_tables();
+        Spi::run("SELECT synchro_schema_manifest()").unwrap();
+        Spi::run("INSERT INTO test_orders (user_id, title) VALUES ('user-a', 'kept')").unwrap();
+        let active = active_orders_generation();
+        let staged = stage_orders_transition(true, true);
+        loaded_orders_registration_validates(active).expect("valid staged window");
+        Spi::run(drift).unwrap();
+        let before = staged_window_state();
+        assert_eq!(before["generations"][active.to_string()], json!(["active", true]), "{before}");
+        assert_eq!(before["generations"][staged.to_string()], json!(["pending", true]), "{before}");
+        assert!(before["publication"].is_array(), "{before}");
+
+        // No subtransaction rolls back the validation, so the state shows
+        // every write that it made before the rejection.
+        let rejection = PgTryBuilder::new(|| {
+            loaded_orders_registration_validates(active).map_err(|error| error.to_string())
+        })
+        .catch_others(|caught| match caught {
+            pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => Err(report.message().to_string()),
+            other => other.rethrow(),
+        })
+        .execute();
+        assert_eq!(rejection, Err(error.to_string()));
+        assert_eq!(staged_window_state(), before);
+    }
+
+    #[pg_test]
+    fn test_staged_window_rejects_trigger_drift() {
+        staged_orders_window_rejects_drift(
+            "ALTER TABLE test_orders DISABLE TRIGGER synchro_capture_fence",
+            "registered relation is missing required capture triggers",
+        );
+    }
+
+    #[pg_test]
+    fn test_staged_window_rejects_privilege_drift() {
+        staged_orders_window_rejects_drift(
+            "REVOKE SELECT ON test_orders FROM synchro_owner",
+            "synchro_owner direct relation privileges do not match the push policy",
+        );
+    }
+
+    #[pg_test]
+    fn test_staged_window_rejects_publication_drift() {
+        staged_orders_window_rejects_drift(
+            "ALTER PUBLICATION synchro_pub DROP TABLE test_orders;
+             ALTER PUBLICATION synchro_pub ADD TABLE test_orders (id, user_id, headline)",
+            "registered relation is not an exact publication member",
+        );
+    }
+
+    #[pg_test]
+    fn test_staged_window_rejects_key_drift() {
+        staged_orders_window_rejects_drift(
+            "ALTER TABLE test_orders DROP CONSTRAINT test_orders_pkey;
+             ALTER TABLE test_orders ADD PRIMARY KEY (id) DEFERRABLE",
+            "registered relation primary key must not be deferrable",
+        );
+    }
+
+    #[pg_test(error = "registered relation is missing required capture triggers")]
+    fn test_unchanged_registration_rejects_live_drift() {
+        setup_test_tables();
+        Spi::run("ALTER TABLE test_orders DISABLE TRIGGER synchro_capture_fence").unwrap();
+        register_orders_excluding("ARRAY['internal_notes']");
     }

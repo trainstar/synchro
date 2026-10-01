@@ -3,7 +3,7 @@
   "schema_version": 2,
   "id": "SCN-SCHEMA-QUEUED-MUTATION-001",
   "title": "Schema-incompatible queued intent preservation",
-  "description": "An incompatible schema change preserves complete authored intent as one durable blocked outcome across restart.",
+  "description": "A compatible schema change keeps and pushes queued intent. A later incompatible change preserves complete authored intent as one durable blocked outcome across restart.",
   "requirement_ids": [
     "SYNC-SCHEMA-002",
     "SYNC-SCHEMA-003",
@@ -429,7 +429,7 @@
           "installation": {
             "installed": true,
             "schema_name": "synchro",
-            "extension_version": "0.3.2",
+            "extension_version": "0.4.0-rc.1",
             "protocol_version": 3,
             "minimum_client_runtime": 3,
             "stale_client_interval_milliseconds": 3600000,
@@ -631,31 +631,36 @@
               "user_id": "user-a",
               "client_id": "client-a",
               "current_schema": {
-                "version": 2,
-                "hash": "fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2"
+                "version": 3,
+                "hash": "d5f10e99c8b564fadbce4b0d388db047ccef1649724dc80ee41df6f38b75ce9d"
               },
-              "queue_count": 1,
-              "outcome_count": 1,
+              "queue_count": 2,
+              "outcome_count": 2,
               "queue": [
                 {
                   "mutation_id": "00000000-0000-4000-8000-000000008001",
                   "table_id": "items",
                   "canonical_wire_json": "\"queued-s1-row\"",
                   "authored_schema": {
-                    "version": 1,
-                    "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+                    "version": 2,
+                    "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
                   },
                   "operation": "update",
-                  "base_version": "s1-base-version",
+                  "base_version": "compatible-write-version",
                   "client_version": "2026-08-11T01:02:03.000000Z",
                   "authored_columns": [
                     {
                       "field_id": "legacy_value",
                       "type": "string",
-                      "wire_json": "\"retain-this-s1-value\""
+                      "wire_json": "\"retain-this-s2-legacy-value\""
+                    },
+                    {
+                      "field_id": "note",
+                      "type": "string",
+                      "wire_json": "\"retain-this-s2-value\""
                     }
                   ],
-                  "local_order": 1,
+                  "local_order": 2,
                   "status": "server_rejected"
                 }
               ],
@@ -967,10 +972,10 @@
       }
     },
     {
-      "id": "STEP-SCHEMA-QUEUED-MUTATION-005",
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
       "phase": "exercise",
       "transport": "local",
-      "description": "Create the exact S1 update with a removed field, base version, and stable local order.",
+      "description": "Queue an S1 update before the compatible S2 change.",
       "native_binding": {
         "kind": "local-write",
         "user_id": "user-a",
@@ -982,7 +987,7 @@
         "payload": {
           "authenticated_user_id": "user-a",
           "client_id": "client-a",
-          "mutation_id": "00000000-0000-4000-8000-000000008001",
+          "mutation_id": "00000000-0000-4000-8000-000000008003",
           "table_id": "items",
           "pk": {
             "field_id": "id",
@@ -994,11 +999,11 @@
           },
           "operation": "update",
           "base_version": "s1-base-version",
-          "client_version": "2026-08-11T01:02:03.000000Z",
+          "client_version": "2026-08-11T01:01:00.000000Z",
           "columns": [
             {
               "field_id": "legacy_value",
-              "value": "retain-this-s1-value"
+              "value": "compatible-s1-value"
             }
           ]
         }
@@ -1008,10 +1013,10 @@
       }
     },
     {
-      "id": "STEP-SCHEMA-QUEUED-MUTATION-006",
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001",
       "phase": "exercise",
       "transport": "model",
-      "description": "Publish incompatible S2 after removing the authored S1 field.",
+      "description": "Publish compatible S2, which adds one nullable field.",
       "native_binding": {
         "kind": "controller"
       },
@@ -1021,11 +1026,11 @@
         "payload": {
           "schema": {
             "version": 2,
-            "hash": "fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2"
+            "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
           },
-          "body": "{\"compatibility_floor\":2,\"parent_schema\":{\"hash\":\"61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa\",\"version\":1},\"schema_hash\":\"fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2\",\"schema_version\":2,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"class_4\"}",
-          "transition_class": "class_4",
-          "compatibility_floor": 2,
+          "body": "{\"compatibility_floor\":1,\"parent_schema\":{\"hash\":\"61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa\",\"version\":1},\"schema_hash\":\"8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba\",\"schema_version\":2,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"legacy_value\",\"name\":\"legacy_value\",\"nullable\":false,\"type\":\"string\",\"writable\":true},{\"field_id\":\"note\",\"name\":\"note\",\"nullable\":true,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"class_2\"}",
+          "transition_class": "class_2",
+          "compatibility_floor": 1,
           "tables": [
             {
               "table_id": "items",
@@ -1047,6 +1052,241 @@
                   "decimal_precision": null,
                   "decimal_scale": null,
                   "default_wire_json": null
+                },
+                {
+                  "field_id": "legacy_value",
+                  "name": "legacy_value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
+                },
+                {
+                  "field_id": "note",
+                  "name": "note",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": true,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                }
+              ],
+              "indexes": [
+                {
+                  "index_id": "items-pk",
+                  "name": "items_pk",
+                  "field_ids": [
+                    "id"
+                  ],
+                  "unique": true
+                }
+              ]
+            }
+          ],
+          "affected_scopes": []
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Receive the compatible S2 replacement while the S1 update is queued.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_compatible",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "operation": {
+        "contract_operation": "connect",
+        "name": "send",
+        "payload": {
+          "user_id": "user-a",
+          "client_id": "client-a",
+          "runtime_version": 3,
+          "protocol_version": 3,
+          "client_generation": 1,
+          "schema_reset": false,
+          "schema": {
+            "version": 1,
+            "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+          },
+          "scope_set_version": 1,
+          "known_scopes": [
+            {
+              "scope_id": "scope-a"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001",
+      "phase": "exercise",
+      "transport": "http",
+      "description": "Push the retained S1 update under S2.",
+      "native_binding": {
+        "kind": "public-call",
+        "user_id": "user-a",
+        "client_id": "client-a",
+        "call_id": "schema_compatible",
+        "stage": "synchronous",
+        "method": "start",
+        "completion": "idle"
+      },
+      "operation": {
+        "contract_operation": "push",
+        "name": "submit",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "request": {
+            "client_id": "client-a",
+            "client_generation": 1,
+            "batch_id": "00000000-0000-4000-8000-000000008004",
+            "schema": {
+              "version": 2,
+              "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
+            },
+            "mutations": [
+              {
+                "mutation_id": "00000000-0000-4000-8000-000000008003",
+                "table": "items",
+                "pk": {
+                  "id": "queued-s1-row"
+                },
+                "authored_schema": {
+                  "version": 1,
+                  "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+                },
+                "op": "update",
+                "base_version": "s1-base-version",
+                "client_version": "2026-08-11T01:01:00.000000Z",
+                "columns": {
+                  "legacy_value": "compatible-s1-value"
+                }
+              }
+            ]
+          },
+          "delivery": "apply",
+          "commit_lsn": "15",
+          "end_lsn": "16"
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-005",
+      "phase": "exercise",
+      "transport": "local",
+      "description": "Create the exact S2 update of the added field and of a field that S3 keeps, with a base version and stable local order.",
+      "native_binding": {
+        "kind": "local-write",
+        "user_id": "user-a",
+        "client_id": "client-a"
+      },
+      "operation": {
+        "contract_operation": "local",
+        "name": "write",
+        "payload": {
+          "authenticated_user_id": "user-a",
+          "client_id": "client-a",
+          "mutation_id": "00000000-0000-4000-8000-000000008001",
+          "table_id": "items",
+          "pk": {
+            "field_id": "id",
+            "value": "queued-s1-row"
+          },
+          "authored_schema": {
+            "version": 2,
+            "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
+          },
+          "operation": "update",
+          "base_version": "compatible-write-version",
+          "client_version": "2026-08-11T01:02:03.000000Z",
+          "columns": [
+            {
+              "field_id": "legacy_value",
+              "value": "retain-this-s2-legacy-value"
+            },
+            {
+              "field_id": "note",
+              "value": "retain-this-s2-value"
+            }
+          ]
+        }
+      },
+      "expected_outcome": {
+        "disposition": "success"
+      }
+    },
+    {
+      "id": "STEP-SCHEMA-QUEUED-MUTATION-006",
+      "phase": "exercise",
+      "transport": "model",
+      "description": "Publish incompatible S3 after removing the authored S2 field.",
+      "native_binding": {
+        "kind": "controller"
+      },
+      "operation": {
+        "contract_operation": "model",
+        "name": "publish-schema",
+        "payload": {
+          "schema": {
+            "version": 3,
+            "hash": "d5f10e99c8b564fadbce4b0d388db047ccef1649724dc80ee41df6f38b75ce9d"
+          },
+          "body": "{\"compatibility_floor\":3,\"parent_schema\":{\"hash\":\"8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba\",\"version\":2},\"schema_hash\":\"d5f10e99c8b564fadbce4b0d388db047ccef1649724dc80ee41df6f38b75ce9d\",\"schema_version\":3,\"tables\":[{\"composition\":\"multi_scope\",\"fields\":[{\"field_id\":\"id\",\"name\":\"id\",\"nullable\":false,\"type\":\"string\",\"writable\":false},{\"field_id\":\"legacy_value\",\"name\":\"legacy_value\",\"nullable\":false,\"type\":\"string\",\"writable\":true}],\"indexes\":[{\"field_ids\":[\"id\"],\"index_id\":\"items-pk\",\"name\":\"items_pk\",\"unique\":true}],\"lifecycle\":{\"created_at_field_id\":null,\"deleted_at_field_id\":null,\"updated_at_field_id\":null},\"name\":\"items\",\"primary_key_field_id\":\"id\",\"relation_id\":\"public.items\",\"table_id\":\"items\"}],\"transition_class\":\"class_4\"}",
+          "transition_class": "class_4",
+          "compatibility_floor": 3,
+          "tables": [
+            {
+              "table_id": "items",
+              "relation_id": "public.items",
+              "name": "items",
+              "composition": "multi_scope",
+              "primary_key_field_id": "id",
+              "created_at_field_id": null,
+              "updated_at_field_id": null,
+              "deleted_at_field_id": null,
+              "fields": [
+                {
+                  "field_id": "id",
+                  "name": "id",
+                  "type": "string",
+                  "primary_key": true,
+                  "nullable": false,
+                  "writable": false,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": null
+                },
+                {
+                  "field_id": "legacy_value",
+                  "name": "legacy_value",
+                  "type": "string",
+                  "primary_key": false,
+                  "nullable": false,
+                  "writable": true,
+                  "decimal_precision": null,
+                  "decimal_scale": null,
+                  "default_wire_json": "\"\""
                 }
               ],
               "indexes": [
@@ -1093,8 +1333,8 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+            "version": 2,
+            "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
           },
           "scope_set_version": 1,
           "known_scopes": [
@@ -1112,7 +1352,7 @@
       "id": "STEP-SCHEMA-QUEUED-MUTATION-007",
       "phase": "exercise",
       "transport": "http",
-      "description": "Perform the explicit queue-preserving reset from S1 to S2.",
+      "description": "Perform the explicit queue-preserving reset from S2 to S3.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
@@ -1133,8 +1373,8 @@
           "client_generation": 1,
           "schema_reset": true,
           "schema": {
-            "version": 1,
-            "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+            "version": 2,
+            "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
           },
           "scope_set_version": 1,
           "known_scopes": [
@@ -1152,7 +1392,7 @@
       "id": "STEP-SCHEMA-QUEUED-MUTATION-008",
       "phase": "exercise",
       "transport": "http",
-      "description": "Submit under S2 while preserving the complete authored S1 mutation.",
+      "description": "Submit under S3 while preserving the complete authored S2 mutation.",
       "native_binding": {
         "kind": "public-call",
         "user_id": "user-a",
@@ -1172,8 +1412,8 @@
             "client_generation": 1,
             "batch_id": "00000000-0000-4000-8000-000000008002",
             "schema": {
-              "version": 2,
-              "hash": "fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2"
+              "version": 3,
+              "hash": "d5f10e99c8b564fadbce4b0d388db047ccef1649724dc80ee41df6f38b75ce9d"
             },
             "mutations": [
               {
@@ -1183,14 +1423,15 @@
                   "id": "queued-s1-row"
                 },
                 "authored_schema": {
-                  "version": 1,
-                  "hash": "61b9825f0d1c3274677069fe1a0cd2430831f7142665b0eb9ae78eb75a08b7aa"
+                  "version": 2,
+                  "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
                 },
                 "op": "update",
-                "base_version": "s1-base-version",
+                "base_version": "compatible-write-version",
                 "client_version": "2026-08-11T01:02:03.000000Z",
                 "columns": {
-                  "legacy_value": "retain-this-s1-value"
+                  "legacy_value": "retain-this-s2-legacy-value",
+                  "note": "retain-this-s2-value"
                 }
               }
             ]
@@ -1237,6 +1478,23 @@
       "retryable": false
     },
     {
+      "step_id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+      "contract_case": "connect_success",
+      "action": "replace",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
+      "step_id": "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001",
+      "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
+      "contract_case": "push_success",
+      "http_status": 200,
+      "error_code": null,
+      "retryable": false
+    },
+    {
       "step_id": "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
       "assertion_id": "ASSERT-SCHEMA-QUEUED-MUTATION-SEMANTIC-001",
       "contract_case": "connect_success",
@@ -1269,7 +1527,7 @@
       "requirement_ids": [
         "SYNC-SCHEMA-002"
       ],
-      "description": "One schema_incompatible outcome preserves the UUID, full S1 payload, base version, client version, and order in blocked durable state.",
+      "description": "One schema_incompatible outcome preserves the UUID, full authored payload, base version, client version, and order in blocked durable state.",
       "expectation_ids": [
         "EXPECT-SCHEMA-QUEUED-MUTATION-WIRE-001",
         "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
@@ -1325,7 +1583,9 @@
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
         "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
         "STEP-SCHEMA-QUEUED-MUTATION-007",
-        "STEP-SCHEMA-QUEUED-MUTATION-008"
+        "STEP-SCHEMA-QUEUED-MUTATION-008",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"
       ],
       "expectation_ids": []
     },
@@ -1339,6 +1599,23 @@
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-003",
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-BEGIN-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "schema",
+      "alias": "schema-two",
+      "value": {
+        "version": 2,
+        "hash": "8eeeb895c523b8881f3c41b54e2fac622ed15dda5d903628bd84f6bbc23b84ba"
+      },
+      "step_ids": [
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001",
         "STEP-SCHEMA-QUEUED-MUTATION-005",
         "STEP-SCHEMA-QUEUED-MUTATION-006",
         "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
@@ -1351,10 +1628,10 @@
     },
     {
       "kind": "schema",
-      "alias": "schema-two",
+      "alias": "schema-three",
       "value": {
-        "version": 2,
-        "hash": "fa2a37f786cc98123cd7ca1904ce4e034287eb806697e02223262c800ecf29e2"
+        "version": 3,
+        "hash": "d5f10e99c8b564fadbce4b0d388db047ccef1649724dc80ee41df6f38b75ce9d"
       },
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-006",
@@ -1374,7 +1651,8 @@
         "STEP-SCHEMA-QUEUED-MUTATION-004",
         "STEP-SCHEMA-QUEUED-MUTATION-BASELINE-FINALIZE-001",
         "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
-        "STEP-SCHEMA-QUEUED-MUTATION-007"
+        "STEP-SCHEMA-QUEUED-MUTATION-007",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001"
       ],
       "expectation_ids": []
     },
@@ -1396,7 +1674,8 @@
       "value": 1,
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-UNSUPPORTED-001",
-        "STEP-SCHEMA-QUEUED-MUTATION-007"
+        "STEP-SCHEMA-QUEUED-MUTATION-007",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-CONNECT-001"
       ],
       "expectation_ids": []
     },
@@ -1429,7 +1708,10 @@
         "STEP-SCHEMA-QUEUED-MUTATION-001",
         "STEP-SCHEMA-QUEUED-MUTATION-005",
         "STEP-SCHEMA-QUEUED-MUTATION-006",
-        "STEP-SCHEMA-QUEUED-MUTATION-008"
+        "STEP-SCHEMA-QUEUED-MUTATION-008",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUBLISH-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"
       ],
       "expectation_ids": [
         "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
@@ -1442,7 +1724,9 @@
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-001",
         "STEP-SCHEMA-QUEUED-MUTATION-005",
-        "STEP-SCHEMA-QUEUED-MUTATION-008"
+        "STEP-SCHEMA-QUEUED-MUTATION-008",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"
       ],
       "expectation_ids": [
         "EXPECT-SCHEMA-QUEUED-MUTATION-STATE-001"
@@ -1454,6 +1738,16 @@
       "value": "s1-base-version",
       "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-WRITE-001",
+        "STEP-SCHEMA-QUEUED-MUTATION-COMPATIBLE-PUSH-001"
+      ],
+      "expectation_ids": []
+    },
+    {
+      "kind": "row-version",
+      "alias": "compatible-write-version",
+      "value": "compatible-write-version",
+      "step_ids": [
         "STEP-SCHEMA-QUEUED-MUTATION-005",
         "STEP-SCHEMA-QUEUED-MUTATION-008"
       ],

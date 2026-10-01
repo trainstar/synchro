@@ -148,6 +148,127 @@ fn test_unverifiable_seed_receipt_degrades_to_rebuild() {
 }
 
 #[pg_test]
+fn test_seed_receipt_below_retention_floor_degrades_to_rebuild() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    fn seeded_cursor(client_id: &str, receipt: &str) -> Value {
+        let response = connect_client(
+            "floor-receipt-user",
+            json!({
+                "client_id": client_id,
+                "platform": "test",
+                "app_version": "1.0.0",
+                "protocol_version": 3,
+                "schema": { "version": 0, "hash": "" },
+                "scope_set_version": 0,
+                "known_scopes": {},
+                "seed_receipts": { "global": receipt }
+            }),
+        );
+        assert!(response.get("error").is_none(), "{}", response["error"]);
+        response["scopes"]["add"]
+            .as_array()
+            .and_then(|scopes| {
+                scopes
+                    .iter()
+                    .find(|scope| scope["id"].as_str() == Some("global"))
+            })
+            .map(|scope| scope["cursor"].clone())
+            .expect("portable scope assignment")
+    }
+    fn receipt_bindings() -> pgrx::JsonB {
+        Spi::get_one(
+            "SELECT jsonb_build_object(
+                 'stream_generation', scope.stream_generation,
+                 'membership_generation', scope.membership_generation,
+                 'retention_generation', scope.retention_generation,
+                 'registry_generation', progress.registry_generation
+             )
+             FROM sync_scope_state scope
+             JOIN sync_wal_progress progress
+               ON progress.singleton = true
+              AND progress.stream_generation = scope.stream_generation
+             WHERE scope.scope_id = 'global'",
+        )
+        .unwrap()
+        .expect("portable seed receipt bindings")
+    }
+
+    setup_test_tables();
+    register_shared_scope("global", true);
+    Spi::run(
+        "UPDATE sync_wal_progress
+         SET generation_start_lsn = COALESCE(generation_start_lsn, '0/1'),
+             materialized_commit_lsn = '0/20', materialized_end_lsn = '0/28',
+             processed_end_lsn = '0/28', acknowledged_end_lsn = NULL
+         WHERE singleton",
+    )
+    .unwrap();
+    let bindings = receipt_bindings();
+    let receipt = mint_portable_seed_receipt("global");
+    let payload: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(receipt.split('.').nth(1).expect("receipt payload segment"))
+            .expect("decode receipt payload"),
+    )
+    .expect("receipt payload JSON");
+    assert_eq!(
+        payload["snapshot_boundary"],
+        json!({ "position_kind": "transaction_end", "commit_lsn": "0/20" })
+    );
+    // The stream advances after the export, so only the floor decides continuation.
+    Spi::run(
+        "UPDATE sync_wal_progress
+         SET materialized_commit_lsn = '0/40', materialized_end_lsn = '0/48',
+             processed_end_lsn = '0/48'
+         WHERE singleton",
+    )
+    .unwrap();
+
+    Spi::run(
+        "UPDATE sync_scope_state
+         SET floor_position_kind = 'transaction_end', floor_commit_lsn = '0/20',
+             floor_event_ordinal = NULL, floor_effect_ordinal = NULL
+         WHERE scope_id = 'global'",
+    )
+    .unwrap();
+    assert_eq!(receipt_bindings().0, bindings.0);
+    let at_floor = seeded_cursor("floor-equal-client", &receipt);
+    let at_floor = at_floor
+        .as_str()
+        .expect("a receipt at the floor must continue");
+    let parsed = Spi::connect(|client| {
+        let context = test_scope_cursor_context(
+            client,
+            "floor-receipt-user",
+            "floor-equal-client",
+            "global",
+        );
+        crate::cursor_token::parse_scope_cursor(client, &context, at_floor)
+    })
+    .expect("the continued cursor must verify for its client");
+    assert_eq!(
+        parsed,
+        crate::cursor_token::ParsedScopeCursor::Current(
+            crate::stream_position::StreamPosition::transaction_end("0/20")
+                .expect("receipt position"),
+        )
+    );
+
+    Spi::run(
+        "UPDATE sync_scope_state
+         SET floor_position_kind = 'effect', floor_commit_lsn = '0/30',
+             floor_event_ordinal = 0, floor_effect_ordinal = 0
+         WHERE scope_id = 'global'",
+    )
+    .unwrap();
+    assert_eq!(receipt_bindings().0, bindings.0);
+    let below_floor = seeded_cursor("floor-below-client", &receipt);
+    assert!(below_floor.is_null(), "a receipt below the floor must rebuild");
+}
+
+#[pg_test]
 fn test_registration_attribute_change_advances_generation() {
     setup_test_tables();
     let active_generation: i64 = Spi::get_one(
@@ -373,12 +494,61 @@ fn test_private_scope_is_revocable_for_one_user() {
         .unwrap_or(false);
     assert!(held, "user does not hold its own private scope: {first}");
     let held_version = first["scope_set_version"].as_i64().expect("scope set version");
+    let record_id = "e5000000-0000-4000-8000-000000000001";
+    Spi::run_with_args(
+        "INSERT INTO test_orders (id, user_id, title) VALUES ($1::uuid, 'private-user', 'held')",
+        &[record_id.into()],
+    )
+    .unwrap();
+    insert_edge("test_orders", record_id, "user:private-user");
+    insert_changelog("user:private-user", "test_orders", record_id, 1);
 
     Spi::run_with_args(
         "SELECT synchro_revoke_user_scope($1, $2)",
         &["private-user".into(), "user:private-user".into()],
     )
     .unwrap();
+    Spi::run_with_args(
+        "SELECT synchro_grant_user_scope($1, $2)",
+        &["private-user".into(), "team:late-grant".into()],
+    )
+    .unwrap();
+
+    // Pull reconciles the scope set. The pull tests prove one grant and one
+    // revocation alone. Here the identity scope leaves and a grant arrives in
+    // one pull, which advances the version once and serves no revoked row.
+    let pulled = pull_client(
+        "private-user",
+        "private-client",
+        held_version,
+        json!({
+            "user:private-user": scope_cursor_ref("private-user", "private-client", "user:private-user", 0)
+        }),
+        100,
+    );
+    assert!(pulled.get("error").is_none(), "{pulled}");
+    assert_eq!(
+        pulled["scope_updates"],
+        json!({
+            "add": [{ "id": "team:late-grant", "cursor": null }],
+            "remove": ["user:private-user"]
+        }),
+        "{pulled}"
+    );
+    assert_eq!(pulled["scope_set_version"].as_i64(), Some(held_version + 1), "{pulled}");
+    assert_eq!(pulled["changes"], json!([]), "{pulled}");
+    // Rebuild does not reconcile. It serves only the stored set that the pull wrote.
+    let revoked_rebuild =
+        rebuild_client("private-user", "private-client", "user:private-user", None, 100);
+    assert_eq!(
+        revoked_rebuild["error"]["code"].as_str(),
+        Some("invalid_request"),
+        "{revoked_rebuild}"
+    );
+    let granted_rebuild =
+        rebuild_client("private-user", "private-client", "team:late-grant", None, 100);
+    assert!(granted_rebuild.get("error").is_none(), "{granted_rebuild}");
+    assert_eq!(granted_rebuild["records"], json!([]), "{granted_rebuild}");
 
     let revoked = connect_client(
         "private-user",

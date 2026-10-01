@@ -1,0 +1,12 @@
+diff --git a/extensions/synchro-pg/src/push.rs b/extensions/synchro-pg/src/push.rs
+--- a/extensions/synchro-pg/src/push.rs
++++ b/extensions/synchro-pg/src/push.rs
+@@ -1937,7 +1937,7 @@ fn evaluate_atomic_group(
+ ) -> Vec<EvaluatedMutation> {
+     let evaluated = run_in_subtransaction(|| {
+         client
+-            .update("SET CONSTRAINTS ALL DEFERRED", None, &[])
++            .update("SELECT 1", None, &[])
+             .unwrap_or_else(|_| pgrx::error!("deferring atomic group constraints failed"));
+         let mut evaluated = Vec::with_capacity(request.mutations.len());
+         for mutation in &request.mutations {

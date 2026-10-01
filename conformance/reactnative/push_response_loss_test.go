@@ -91,7 +91,7 @@ func TestNewPushResponseLossCoordinatorUsesHostLoopbackProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.NotFoundHandler())
 	defer upstream.Close()
 	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
-		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create response-loss coordinator: %v", err)
@@ -383,7 +383,7 @@ func TestPushResponseLossProxyWritesInvalidInitialResponseStart(t *testing.T) {
 	}))
 	defer upstream.Close()
 	coordinator, err := NewPushResponseLossCoordinator(PushResponseLossCoordinatorConfig{
-		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token", AppVersion: "0.3.0",
+		Scenario: loadPushResponseLossAuthoredScenario(t), Platform: "android", ServerURL: upstream.URL, AuthToken: "unit-token",
 	})
 	if err != nil {
 		t.Fatalf("create response-loss coordinator: %v", err)
@@ -440,13 +440,17 @@ func TestPushResponseLossSealedRetryRejectsChangedCanonicalBytes(t *testing.T) {
 		t.Fatalf("validate sealed retry evidence: %v", err)
 	}
 
-	changed := bytes.Replace(body, []byte(`"mutation-a"`), []byte(`"mutation-b"`), 1)
-	coordinator = &PushResponseLossCoordinator{}
-	if _, err := coordinator.beginPushRequest(body); err != nil {
-		t.Fatalf("record initial sealed request: %v", err)
-	}
-	if _, err := coordinator.beginPushRequest(changed); err == nil {
-		t.Fatal("changed sealed request bytes passed validation")
+	// A new batch of the same size is not a replay, whether it renews the
+	// mutation identities or reseals the same mutations under a new batch.
+	for _, replacement := range [][2]string{{`"mutation-a"`, `"mutation-b"`}, {`"batch-a"`, `"batch-b"`}} {
+		changed := bytes.Replace(body, []byte(replacement[0]), []byte(replacement[1]), 1)
+		coordinator = &PushResponseLossCoordinator{}
+		if _, err := coordinator.beginPushRequest(body); err != nil {
+			t.Fatalf("record initial sealed request: %v", err)
+		}
+		if _, err := coordinator.beginPushRequest(changed); err == nil {
+			t.Fatalf("sealed request with changed %s passed validation", replacement[0])
+		}
 	}
 }
 

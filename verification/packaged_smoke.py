@@ -35,6 +35,73 @@ APP_RESULT_PATH = "/result"
 APP_RESULT_MAX_BYTES = 4096
 APP_RESULT_MAX_ERROR_LENGTH = 512
 APP_RESULT_READ_TIMEOUT_SECONDS = 5.0
+# The consumer references two rows of the training dataset authored seed
+# (conformance/dataset/authored.go: OrgA and BackSquat). The fixture prepares
+# that seed with CLIENT_DATASET=1.
+DATASET_ORGANIZATION_ID = "00000001-0000-4000-8000-000000000001"
+DATASET_EXERCISE_ID = "00000004-0000-4000-8000-000000000001"
+DATASET_EXERCISE_NAME = "Back Squat"
+DATASET_EXERCISE_MUSCLE_GROUPS = ["quadriceps", "glutes"]
+# The installed consumer writes these rows through its public SQL path. While
+# the consumer is dead, the harness writes REMOTE_SETS, a new program title and
+# settings, and a new workout external_ref.
+AUTHORED_PROGRAM = {
+    "title": 'Packaged Block \u2705 "consumer"',
+    "description": "",
+    "visibility": "private",
+    "week_count": 6,
+    "settings": {"deload_week": 4},
+}
+AUTHORED_WORKOUT = {
+    "name": "Packaged Heavy Day",
+    "notes": 'Tiefe gut \u2705\nline "two"\\',
+    "scheduled_on": "2026-09-14",
+    "started_at": "2026-09-14T06:30:00.123456Z",
+    "duration_seconds": 3725,
+    # The server generates duration_minutes as duration_seconds / 60.
+    "duration_minutes": 62,
+    "external_ref": "9007199254740993",
+}
+AUTHORED_ENTRY = {"position": 1, "target": {"reps": [5, 5, 3], "sets": 3}}
+AUTHORED_TIMESTAMP = "2026-09-14T12:00:00.000000Z"
+DURABLE_TIMESTAMP = "2026-09-14T12:05:00.000000Z"
+# Each set is (set_index, reps, weight_kg, rpe, duration_ms, completed_at, note).
+CLIENT_SETS = (
+    (1, 5, "100", "7.5", "1", "2026-09-14T06:40:00.000001Z", ""),
+    (2, 5, "102.5", "8", "9007199254740993", "2026-09-14T06:45:00.000000Z", "solid"),
+    (3, 3, "110.25", "8.5", None, None, '\u65b0\u8a18\u9332 \U0001f389 "PR"'),
+)
+# The consumer queues one update and one delete offline before it is killed.
+# The client converts the delete of a table with deleted_at into a soft delete.
+DURABLE_SET_INDEX = 3
+DURABLE_REPS = 8
+DELETED_SET_INDEX = 1
+DURABLE_PENDING_CHANGES = 2
+REMOTE_SETS = (
+    (4, 2, "120", "9", None, None, "server \u00e9\u4e16"),
+    (5, 1, "125.5", "9.5", None, None, ""),
+)
+# Odd values above 2^53 change when a platform reads them through a double.
+REMOTE_EXTERNAL_REF = "9007199254740995"
+REMOTE_SETTINGS = {"deload_week": 5, "phases": ["base", "peak"]}
+# Hand-computed sums of reps * weight_kg. Only the server rollup trigger
+# writes workouts.total_volume_kg, and only a pull delivers it to the client.
+INITIAL_TOTAL_VOLUME_KG = "1343.25"  # 5 * 100 + 5 * 102.5 + 3 * 110.25
+REMOTE_TOTAL_VOLUME_KG = "1708.75"  # 1343.25 + 2 * 120 + 1 * 125.5
+FINAL_TOTAL_VOLUME_KG = "1760"  # 1708.75 + (8 - 3) * 110.25 - 5 * 100
+# The observed sets are the live local rows, so the deleted set 1 is absent.
+INITIAL_OBSERVED_SETS = "2:5:102.5,3:8:110.25"
+FINAL_OBSERVED_SETS = "2:5:102.5,3:8:110.25,4:2:120,5:1:125.5"
+CLIENT_RESUMED_WRITE = {"set_index": DURABLE_SET_INDEX, "reps": DURABLE_REPS, "deleted_set_index": DELETED_SET_INDEX}
+# Each app reports every observation column except converged as text.
+# The harness compares the JSON columns as parsed JSON values.
+OBSERVED_FIELDS = (
+    "exercise_name", "exercise_muscle_groups", "program_title", "program_settings",
+    "external_ref", "total_volume_kg", "sets",
+)
+JSON_OBSERVED_FIELDS = ("exercise_muscle_groups", "program_settings")
+# The server consumer uploads this customer insert only after the adapter restarts.
+SERVER_OFFLINE_WRITE = {"customer_id": "00000000-0000-4000-8000-000000000118", "customer_name": "Packaged server offline"}
 
 
 class EvidenceError(ValueError):
@@ -176,6 +243,7 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
         "phase",
         "status",
         "pending_change_count",
+        "observed",
         "error",
     }
     if set(value) != expected_keys:
@@ -202,6 +270,7 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
     if status == "passed":
         if pending_count is None or error is not None:
             raise EvidenceError("passed application phase result is incomplete")
+        validate_observed(value.get("observed"), f"{phase} application")
     elif (
         not isinstance(error, str)
         or not error
@@ -209,6 +278,24 @@ def validate_app_result(value: object, expected_phase: str | None = None) -> dic
     ):
         raise EvidenceError("failed application phase result has invalid error detail")
     return value
+
+
+def validate_observed(value: object, label: str) -> dict[str, str]:
+    """Validate the rows that the consumer read through its public query path."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != set(OBSERVED_FIELDS)
+        or not all(isinstance(item, str) for item in value.values())
+    ):
+        raise EvidenceError(f"{label} observed rows are invalid")
+    return value
+
+
+def json_value(text: str, label: str) -> object:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise EvidenceError(f"{label} is not JSON") from error
 
 
 def app_result_path(results_dir: Path, phase: str) -> Path:
@@ -372,8 +459,8 @@ def await_app_result(
     if result["status"] != "passed":
         raise EvidenceError(f"{phase} application reported failure: {result['error']}")
     pending_count = required_integer(result["pending_change_count"], f"{phase} application pending count")
-    if phase == "initial" and pending_count != 1:
-        raise EvidenceError("initial application did not report one durable pending change")
+    if phase == "initial" and pending_count != DURABLE_PENDING_CHANGES:
+        raise EvidenceError("initial application did not report its durable pending changes")
     if phase == "resume" and pending_count != 0:
         raise EvidenceError("resume application did not report a drained durable queue")
     write_json(
@@ -384,6 +471,7 @@ def await_app_result(
             "status": "passed",
             "pid": required_integer(pid, f"{phase} pid", 1),
             "pending_change_count": pending_count,
+            "observed": result["observed"],
         },
     )
 
@@ -392,7 +480,7 @@ def validate_phase(path: Path, expected_phase: str) -> dict[str, object]:
     value = load_json(path, f"{expected_phase} phase result")
     if not isinstance(value, dict):
         raise EvidenceError(f"{expected_phase} phase result must be an object")
-    expected_keys = {"schema_version", "phase", "status", "pid", "pending_change_count"}
+    expected_keys = {"schema_version", "phase", "status", "pid", "pending_change_count", "observed"}
     if set(value) != expected_keys:
         raise EvidenceError(f"{expected_phase} phase result has invalid members")
     if value.get("schema_version") != 1 or value.get("phase") != expected_phase:
@@ -401,7 +489,278 @@ def validate_phase(path: Path, expected_phase: str) -> dict[str, object]:
         raise EvidenceError(f"{expected_phase} phase did not pass")
     required_integer(value.get("pid"), f"{expected_phase} pid", 1)
     required_integer(value.get("pending_change_count"), f"{expected_phase} pending count")
+    validate_observed(value.get("observed"), f"{expected_phase} phase")
     return value
+
+
+def psql_rows(sql: str, variables: dict[str, str]) -> list[str]:
+    database_url = os.environ.get("ADAPTER_TEST_URL", "").strip()
+    if not database_url:
+        raise EvidenceError("ADAPTER_TEST_URL is required for independent server checks")
+    command = [os.environ.get("PACKAGED_SMOKE_PSQL", "").strip() or "psql", "--dbname", database_url, "-XAtq", "-v", "ON_ERROR_STOP=1"]
+    for name, item in variables.items():
+        command.extend(["-v", f"{name}={item}"])
+    try:
+        result = subprocess.run(command, input=sql, text=True, capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceError(f"independent server query did not run: {error}") from error
+    if result.returncode != 0:
+        raise EvidenceError("independent server query failed")
+    return result.stdout.splitlines()
+
+
+DATETIME_SQL = "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'"
+# The same canonical text as dataset.SourceRowsSQL: trimmed decimals, UTC
+# microsecond datetimes, and int64 as text so that no digit can round.
+SERVER_STATE_SQL = f"""SELECT json_build_object(
+  'program', (SELECT json_build_object(
+      'organization_id', organization_id::text, 'owner_id', owner_id, 'title', title,
+      'description', description, 'visibility', visibility, 'week_count', week_count,
+      'settings', settings, 'deleted', deleted_at IS NOT NULL)
+    FROM public.programs WHERE id = :'program_id'::uuid),
+  'workout', (SELECT json_build_object(
+      'program_id', program_id::text, 'owner_id', owner_id, 'name', name, 'notes', notes,
+      'scheduled_on', to_char(scheduled_on, 'YYYY-MM-DD'),
+      'started_at', to_char(started_at AT TIME ZONE 'UTC', {DATETIME_SQL}),
+      'duration_seconds', duration_seconds, 'duration_minutes', duration_minutes,
+      'total_volume_kg', trim_scale(total_volume_kg)::text, 'external_ref', external_ref::text,
+      'deleted', deleted_at IS NOT NULL)
+    FROM public.workouts WHERE id = :'workout_id'::uuid),
+  'entry', (SELECT json_build_object(
+      'workout_id', workout_id::text, 'program_id', program_id::text, 'exercise_id', exercise_id::text,
+      'owner_id', owner_id, 'position', position, 'target', target, 'deleted', deleted_at IS NOT NULL)
+    FROM public.workout_exercises WHERE id = :'entry_id'::uuid),
+  'sets', (SELECT json_agg(json_build_object(
+      'id', id::text, 'workout_id', workout_id::text, 'program_id', program_id::text,
+      'owner_id', owner_id, 'set_index', set_index, 'reps', reps,
+      'weight_kg', trim_scale(weight_kg)::text, 'rpe', rpe::text, 'duration_ms', duration_ms::text,
+      'completed_at', to_char(completed_at AT TIME ZONE 'UTC', {DATETIME_SQL}), 'note', note,
+      'deleted', deleted_at IS NOT NULL) ORDER BY set_index)
+    FROM public.exercise_sets WHERE workout_exercise_id = :'entry_id'::uuid));
+"""
+
+
+def dataset_ids(config: dict[str, object]) -> dict[str, str]:
+    return {name: str(config[name]) for name in ("program_id", "workout_id", "entry_id")}
+
+
+def server_rows(config: dict[str, object]) -> dict[str, object]:
+    rows = psql_rows(SERVER_STATE_SQL, dataset_ids(config))
+    if len(rows) != 1:
+        raise EvidenceError("server state query did not return one row")
+    value = json_value(rows[0], "server row state")
+    if not isinstance(value, dict):
+        raise EvidenceError("server row state is invalid")
+    return value
+
+
+def consumer_sets(config: dict[str, object], durable: bool, remote: bool) -> list[tuple[str, tuple, bool]]:
+    """Return the authored (set_id, values, deleted) rows of one consumer state."""
+    result = []
+    for set_id, values in zip(config["set_ids"], CLIENT_SETS):
+        if durable and values[0] == DURABLE_SET_INDEX:
+            values = (values[0], DURABLE_REPS, *values[2:])
+        result.append((str(set_id), values, durable and values[0] == DELETED_SET_INDEX))
+    if remote:
+        result.extend((str(set_id), values, False) for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS))
+    return result
+
+
+def expected_server_rows(config: dict[str, object], title: str, sets: list[tuple[str, tuple, bool]], total: str, remote: bool) -> dict[str, object]:
+    ids = dataset_ids(config)
+    owner = str(config["user_id"])
+    live = {"owner_id": owner, "deleted": False}
+    program = {**AUTHORED_PROGRAM, "settings": REMOTE_SETTINGS} if remote else AUTHORED_PROGRAM
+    workout = {**AUTHORED_WORKOUT, "external_ref": REMOTE_EXTERNAL_REF} if remote else AUTHORED_WORKOUT
+    return {
+        "program": {**program, "title": title, "organization_id": DATASET_ORGANIZATION_ID, **live},
+        "workout": {**workout, "program_id": ids["program_id"], "total_volume_kg": total, **live},
+        # The server BEFORE triggers copy the parent chain onto each child row.
+        "entry": {
+            **AUTHORED_ENTRY, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
+            "exercise_id": DATASET_EXERCISE_ID, **live,
+        },
+        "sets": [
+            {
+                "id": set_id, "workout_id": ids["workout_id"], "program_id": ids["program_id"],
+                "set_index": index, "reps": reps, "weight_kg": weight, "rpe": rpe,
+                "duration_ms": duration, "completed_at": completed, "note": note,
+                "owner_id": owner, "deleted": deleted,
+            }
+            for set_id, (index, reps, weight, rpe, duration, completed, note), deleted in sets
+        ],
+    }
+
+
+def differing_fields(actual: object, expected: object, path: str = "row") -> list[str]:
+    if isinstance(actual, dict) and isinstance(expected, dict) and set(actual) == set(expected):
+        return [field for key in sorted(expected) for field in differing_fields(actual[key], expected[key], f"{path}.{key}")]
+    if isinstance(actual, list) and isinstance(expected, list) and len(actual) == len(expected):
+        return [field for index, pair in enumerate(zip(actual, expected)) for field in differing_fields(*pair, f"{path}[{index}]")]
+    return [] if actual == expected else [path]
+
+
+def require_server_rows(config: dict[str, object], expected: dict[str, object], message: str) -> None:
+    actual = server_rows(config)
+    if actual != expected:
+        raise EvidenceError(f"{message}: {', '.join(differing_fields(actual, expected))}")
+
+
+def sql_literal(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, dict):
+        value = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def set_values_sql(values: tuple) -> str:
+    """Return set_index through note of one authored set as SQL literals."""
+    index, reps, weight, rpe, duration, completed, note = values
+    return ", ".join((str(index), str(reps), sql_literal(weight), rpe, duration or "NULL", sql_literal(completed), sql_literal(note)))
+
+
+def client_statements(config: dict[str, object]) -> dict[str, object]:
+    """Author the SQL that the installed consumer runs through its public API.
+
+    The statements carry only the consumer inputs, never an expected server
+    result. The parent-chain columns stay NULL, so the server triggers fill them.
+    """
+    user = sql_literal(config["user_id"])
+    ids = {name: sql_literal(value) for name, value in dataset_ids(config).items()}
+    stamp = sql_literal(AUTHORED_TIMESTAMP)
+    program, workout, entry = AUTHORED_PROGRAM, AUTHORED_WORKOUT, AUTHORED_ENTRY
+    sets = ", ".join(
+        f"({sql_literal(set_id)}, {ids['entry_id']}, NULL, NULL, {user}, {set_values_sql(values)}, {stamp}, {stamp}, NULL)"
+        for set_id, values, _ in consumer_sets(config, durable=False, remote=False)
+    )
+    durable_id = sql_literal(config["set_ids"][DURABLE_SET_INDEX - 1])
+    deleted_id = sql_literal(config["set_ids"][DELETED_SET_INDEX - 1])
+    live_sets = f"FROM exercise_sets WHERE workout_exercise_id = {ids['entry_id']} AND deleted_at IS NULL"
+    return {
+        "initial_sql": [
+            "INSERT INTO programs (id, organization_id, owner_id, title, description, visibility, week_count, settings, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['program_id']}, {sql_literal(DATASET_ORGANIZATION_ID)}, {user}, {sql_literal(program['title'])}, "
+            f"{sql_literal(program['description'])}, {sql_literal(program['visibility'])}, {program['week_count']}, "
+            f"{sql_literal(program['settings'])}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO workouts (id, program_id, owner_id, name, notes, scheduled_on, started_at, duration_seconds, total_volume_kg, external_ref, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['workout_id']}, {ids['program_id']}, {user}, {sql_literal(workout['name'])}, {sql_literal(workout['notes'])}, "
+            f"{sql_literal(workout['scheduled_on'])}, {sql_literal(workout['started_at'])}, {workout['duration_seconds']}, '0', "
+            f"{workout['external_ref']}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO workout_exercises (id, workout_id, program_id, exercise_id, owner_id, position, target, created_at, updated_at, deleted_at) "
+            f"VALUES ({ids['entry_id']}, {ids['workout_id']}, NULL, {sql_literal(DATASET_EXERCISE_ID)}, {user}, "
+            f"{entry['position']}, {sql_literal(entry['target'])}, {stamp}, {stamp}, NULL)",
+            "INSERT INTO exercise_sets (id, workout_exercise_id, workout_id, program_id, owner_id, set_index, reps, weight_kg, rpe, duration_ms, completed_at, note, created_at, updated_at, deleted_at) "
+            f"VALUES {sets}",
+        ],
+        "durable_sql": [
+            f"UPDATE exercise_sets SET reps = {DURABLE_REPS}, updated_at = {sql_literal(DURABLE_TIMESTAMP)} WHERE id = {durable_id}",
+            f"DELETE FROM exercise_sets WHERE id = {deleted_id}",
+        ],
+        # converged is '1' when the pulled server total equals the sum of the
+        # local live sets. It compares two local values and holds no expected one.
+        "observe_sql": (
+            f"SELECT (SELECT name FROM exercises WHERE id = {sql_literal(DATASET_EXERCISE_ID)}) AS exercise_name, "
+            f"(SELECT muscle_groups FROM exercises WHERE id = {sql_literal(DATASET_EXERCISE_ID)}) AS exercise_muscle_groups, "
+            f"(SELECT title FROM programs WHERE id = {ids['program_id']}) AS program_title, "
+            f"(SELECT settings FROM programs WHERE id = {ids['program_id']}) AS program_settings, "
+            f"(SELECT external_ref FROM workouts WHERE id = {ids['workout_id']}) AS external_ref, "
+            f"(SELECT total_volume_kg FROM workouts WHERE id = {ids['workout_id']}) AS total_volume_kg, "
+            "(SELECT group_concat(set_index || ':' || reps || ':' || weight_kg, ',') FROM "
+            f"(SELECT set_index, reps, weight_kg {live_sets} ORDER BY set_index)) AS sets, "
+            f"CASE WHEN (SELECT CAST(total_volume_kg AS REAL) FROM workouts WHERE id = {ids['workout_id']}) = "
+            f"(SELECT SUM(reps * CAST(weight_kg AS REAL)) {live_sets}) THEN '1' ELSE '0' END AS converged"
+        ),
+    }
+
+
+def load_config(path: Path) -> dict[str, object]:
+    value = load_json(path, "packaged smoke config")
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise EvidenceError("packaged smoke config is invalid")
+    return value
+
+
+def author_remote_value(config_path: Path, output: Path) -> None:
+    config = load_config(config_path)
+    # The durable offline write must still be absent, or the resume cannot prove its own upload.
+    require_server_rows(
+        config,
+        expected_server_rows(config, AUTHORED_PROGRAM["title"], consumer_sets(config, durable=False, remote=False), INITIAL_TOTAL_VOLUME_KG, remote=False),
+        "server does not hold exactly the initial upload before resume",
+    )
+    remote_title = f"Server authored {uuid.uuid4()} \u00e9\u4e16"
+    owner = sql_literal(config["user_id"])
+    entry = sql_literal(config["entry_id"])
+    sets = ", ".join(
+        f"({sql_literal(set_id)}, {entry}, {owner}, {set_values_sql(values)})"
+        for set_id, values in zip(config["remote_set_ids"], REMOTE_SETS)
+    )
+    # One multi-row statement fires the rollup AFTER ROW trigger for each row (#178).
+    rows = psql_rows(
+        f"""BEGIN;
+INSERT INTO public.exercise_sets (id, workout_exercise_id, owner_id, set_index, reps, weight_kg, rpe, duration_ms, completed_at, note)
+VALUES {sets};
+UPDATE public.programs SET title = :'remote_title', settings = :'remote_settings'::jsonb, updated_at = clock_timestamp()
+WHERE id = :'program_id'::uuid AND title = :'authored_title'
+RETURNING title;
+UPDATE public.workouts SET external_ref = :'remote_external_ref'::bigint, updated_at = clock_timestamp()
+WHERE id = :'workout_id'::uuid
+RETURNING external_ref::text;
+SELECT trim_scale(total_volume_kg)::text FROM public.workouts WHERE id = :'workout_id'::uuid;
+COMMIT;
+""",
+        {
+            **dataset_ids(config), "remote_title": remote_title, "authored_title": str(AUTHORED_PROGRAM["title"]),
+            "remote_settings": json.dumps(REMOTE_SETTINGS, separators=(",", ":"), sort_keys=True), "remote_external_ref": REMOTE_EXTERNAL_REF,
+        },
+    )
+    if rows != [remote_title, REMOTE_EXTERNAL_REF, REMOTE_TOTAL_VOLUME_KG]:
+        raise EvidenceError("server did not author exactly the remote sets, program, and workout values")
+    write_json(output, {"schema_version": 1, "remote_value": remote_title})
+
+
+def load_remote_value(path: Path) -> str:
+    value = load_json(path, "remote value record")
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "remote_value"}
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("remote_value"), str)
+        or not value["remote_value"].startswith("Server authored ")
+    ):
+        raise EvidenceError("remote value record is invalid")
+    return value["remote_value"]
+
+
+def verify_server_state(config_path: Path, remote_path: Path, output: Path) -> None:
+    config = load_config(config_path)
+    remote_title = load_remote_value(remote_path)
+    require_server_rows(
+        config,
+        expected_server_rows(config, remote_title, consumer_sets(config, durable=True, remote=True), FINAL_TOTAL_VOLUME_KG, remote=True),
+        "server does not hold exactly the resumed upload and the remote value",
+    )
+    write_json(output, server_verification(remote_title, CLIENT_RESUMED_WRITE))
+
+
+def server_verification(remote_value: str, resumed_write: dict[str, object]) -> dict[str, object]:
+    return {"schema_version": 1, "status": "passed", "remote_value": remote_value, "resumed_write": resumed_write}
+
+
+def validate_server_verification(path: Path, remote_value: str, resumed_write: dict[str, object]) -> None:
+    if load_json(path, "server verification") != server_verification(remote_value, resumed_write):
+        raise EvidenceError("server verification does not confirm the resumed upload and remote value")
+
+
+def require_observed(phase: dict[str, object], label: str, expected: dict[str, object]) -> None:
+    observed: dict[str, object] = dict(validate_observed(phase["observed"], label))
+    for field in JSON_OBSERVED_FIELDS:
+        observed[field] = json_value(str(observed[field]), f"{label} {field}")
+    if observed != expected:
+        raise EvidenceError(f"{label} consumer did not read the authored dataset state: {', '.join(differing_fields(observed, expected))}")
 
 
 def complete_cell(
@@ -413,11 +772,29 @@ def complete_cell(
     killed_pid: int,
     artifacts: list[Path],
     expected_hashes: list[str],
+    remote_path: Path,
+    server_path: Path,
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_phase(initial_path, "initial")
     resume = validate_phase(resume_path, "resume")
+    remote_title = load_remote_value(remote_path)
+    initial_observed = {
+        "exercise_name": DATASET_EXERCISE_NAME,
+        "exercise_muscle_groups": DATASET_EXERCISE_MUSCLE_GROUPS,
+        "program_title": str(AUTHORED_PROGRAM["title"]),
+        "program_settings": AUTHORED_PROGRAM["settings"],
+        "external_ref": AUTHORED_WORKOUT["external_ref"],
+        "total_volume_kg": INITIAL_TOTAL_VOLUME_KG,
+        "sets": INITIAL_OBSERVED_SETS,
+    }
+    require_observed(initial, "initial", initial_observed)
+    require_observed(resume, "resume", {
+        **initial_observed, "program_title": remote_title, "program_settings": REMOTE_SETTINGS,
+        "external_ref": REMOTE_EXTERNAL_REF, "total_volume_kg": FINAL_TOTAL_VOLUME_KG, "sets": FINAL_OBSERVED_SETS,
+    })
+    validate_server_verification(server_path, remote_title, CLIENT_RESUMED_WRITE)
     initial_pid = required_integer(initial["pid"], "initial pid", 1)
     resume_pid = required_integer(resume["pid"], "resume pid", 1)
     if killed_pid != initial_pid:
@@ -451,6 +828,8 @@ def complete_cell(
                 "resume_pid": resume_pid,
                 "durable_pending_before_kill": pending_before,
                 "durable_pending_after_resume": pending_after,
+                "remote_value_applied": True,
+                "server_resumed_write_verified": True,
             },
         },
     )
@@ -460,7 +839,7 @@ def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
     value = load_json(path, f"server {expected_phase} phase result")
     expected = {"schema_version", "phase", "status", "adapter_pid", "push_digest"}
     if expected_phase == "resume":
-        expected.add("replay_equal")
+        expected.update({"replay_equal", "observed_customer_name"})
     if not isinstance(value, dict) or set(value) != expected:
         raise EvidenceError(f"server {expected_phase} phase result has invalid members")
     if value.get("schema_version") != 1 or value.get("phase") != expected_phase or value.get("status") != "passed":
@@ -473,11 +852,15 @@ def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
     return value
 
 
-def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str]) -> None:
+def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str], remote_path: Path, server_path: Path) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_server_phase(initial_path, "initial")
     resume = validate_server_phase(resume_path, "resume")
+    remote_name = load_remote_value(remote_path)
+    if resume["observed_customer_name"] != remote_name:
+        raise EvidenceError("resumed server consumer did not pull the remote value")
+    validate_server_verification(server_path, remote_name, SERVER_OFFLINE_WRITE)
     initial_pid = required_integer(initial["adapter_pid"], "server initial adapter pid", 1)
     resume_pid = required_integer(resume["adapter_pid"], "server resume adapter pid", 1)
     if killed_pid != initial_pid or resume_pid == initial_pid:
@@ -503,6 +886,8 @@ def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_pa
                 "resume_pid": resume_pid,
                 "push_digest": initial["push_digest"],
                 "replay_equal": True,
+                "remote_value_applied": True,
+                "server_resumed_write_verified": True,
             },
         },
     )
@@ -580,8 +965,9 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
             raise EvidenceError(f"cell {expected_cell} process lifecycle is missing")
         kind = lifecycle.get("kind", "client")
         common_keys = {"initial_pid", "kill_signal", "resume_pid"}
-        client_keys = common_keys | {"durable_pending_before_kill", "durable_pending_after_resume"}
-        server_keys = common_keys | {"kind", "push_digest", "replay_equal"}
+        convergence_keys = {"remote_value_applied", "server_resumed_write_verified"}
+        client_keys = common_keys | convergence_keys | {"durable_pending_before_kill", "durable_pending_after_resume"}
+        server_keys = common_keys | convergence_keys | {"kind", "push_digest", "replay_equal"}
         lifecycle_keys = set(lifecycle)
         if lifecycle_keys != client_keys and lifecycle_keys != server_keys:
             raise EvidenceError(f"cell {expected_cell} process lifecycle has invalid members")
@@ -589,6 +975,8 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
         resume_pid = required_integer(lifecycle.get("resume_pid"), "resume pid", 1)
         if lifecycle.get("kill_signal") != 9 or initial_pid == resume_pid:
             raise EvidenceError(f"cell {expected_cell} process kill proof is invalid")
+        if lifecycle.get("remote_value_applied") is not True or lifecycle.get("server_resumed_write_verified") is not True:
+            raise EvidenceError(f"cell {expected_cell} did not prove bidirectional convergence")
         if kind == "server":
             if (
                 not isinstance(lifecycle.get("push_digest"), str)
@@ -835,7 +1223,7 @@ def bearer_token(subject: str) -> str:
     return f"{signing_input}.{base64url(signature)}"
 
 
-def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
+def smoke_config(cell_id: str, platform: str) -> dict[str, object]:
     server_url = os.environ.get("SYNCHRO_TEST_URL", "").strip().rstrip("/")
     parsed = urlsplit(server_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -843,7 +1231,7 @@ def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
     if parsed.query or parsed.fragment:
         raise EvidenceError("SYNCHRO_TEST_URL must not contain a query or fragment")
     user_id = str(uuid.uuid4())
-    return {
+    config: dict[str, object] = {
         "schema_version": 1,
         "cell_id": cell_id,
         "platform": platform,
@@ -851,10 +1239,15 @@ def smoke_config(cell_id: str, platform: str) -> dict[str, str | int]:
         "token": bearer_token(user_id),
         "user_id": user_id,
         "client_id": str(uuid.uuid4()),
-        "customer_id": str(uuid.uuid4()),
-        "order_id": str(uuid.uuid4()),
+        "program_id": str(uuid.uuid4()),
+        "workout_id": str(uuid.uuid4()),
+        "entry_id": str(uuid.uuid4()),
+        "set_ids": [str(uuid.uuid4()) for _ in CLIENT_SETS],
+        "remote_set_ids": [str(uuid.uuid4()) for _ in REMOTE_SETS],
         "phase": "initial",
     }
+    config.update(client_statements(config))
+    return config
 
 
 def write_config(
@@ -969,6 +1362,17 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--killed-pid", type=int, required=True)
     complete.add_argument("--artifact", action="append", type=Path, default=[])
     complete.add_argument("--expected-artifact-hash", action="append", default=[])
+    complete.add_argument("--remote", type=Path, required=True)
+    complete.add_argument("--server-verification", type=Path, required=True)
+
+    author = subparsers.add_parser("author-remote")
+    author.add_argument("--config", type=Path, required=True)
+    author.add_argument("--output", type=Path, required=True)
+
+    verify_server = subparsers.add_parser("verify-server")
+    verify_server.add_argument("--config", type=Path, required=True)
+    verify_server.add_argument("--remote", type=Path, required=True)
+    verify_server.add_argument("--output", type=Path, required=True)
 
     server_complete = subparsers.add_parser("complete-server-cell")
     for argument in ("--repo-root", "--cell", "--output", "--initial", "--resume"):
@@ -976,6 +1380,8 @@ def parse_args() -> argparse.Namespace:
     server_complete.add_argument("--killed-pid", type=int, required=True)
     server_complete.add_argument("--artifact", action="append", type=Path, default=[])
     server_complete.add_argument("--expected-artifact-hash", action="append", default=[])
+    server_complete.add_argument("--remote", type=Path, required=True)
+    server_complete.add_argument("--server-verification", type=Path, required=True)
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--repo-root", type=Path, required=True)
@@ -1039,9 +1445,15 @@ def main() -> int:
                 args.killed_pid,
                 [path.resolve() for path in args.artifact],
                 args.expected_artifact_hash,
+                args.remote.resolve(),
+                args.server_verification.resolve(),
             )
+        elif args.command == "author-remote":
+            author_remote_value(args.config.resolve(), args.output.resolve())
+        elif args.command == "verify-server":
+            verify_server_state(args.config.resolve(), args.remote.resolve(), args.output.resolve())
         elif args.command == "complete-server-cell":
-            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash)
+            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash, args.remote.resolve(), args.server_verification.resolve())
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":

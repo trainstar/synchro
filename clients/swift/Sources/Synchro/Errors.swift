@@ -17,6 +17,15 @@ public enum SynchroError: Error, Sendable {
     case invalidStateTransition(from: SyncStatus, to: SyncStatus)
     case alreadyStarted
     case notStarted
+    case atomicGroupInvalid(reason: AtomicGroupInvalidReason)
+}
+
+/// Gives the commit-time rule that an atomic write group does not satisfy.
+public enum AtomicGroupInvalidReason: String, Sendable {
+    case deleteFollowedByWrite
+    case tooManyMutations
+    case mutationTooLarge
+    case requestTooLarge
 }
 
 extension SynchroError: LocalizedError {
@@ -54,6 +63,8 @@ extension SynchroError: LocalizedError {
             return "Sync has already been started"
         case .notStarted:
             return "Sync has not been started"
+        case .atomicGroupInvalid(let reason):
+            return "Atomic write group is invalid: \(reason.rawValue)"
         }
     }
 }

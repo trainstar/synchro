@@ -2,124 +2,149 @@
   "schema_version": 1,
   "scenarios": [
     {
+      "scenario_id": "SCN-ATOMIC-GROUP-001",
+      "path": "conformance/scenarios/server/atomic-group-001.json",
+      "sha256": "ca09d404d424c5ec2a8bce68decde0a6be336e30eaed15433041ca435cc1f43b"
+    },
+    {
       "scenario_id": "SCN-MEMBERSHIP-REASSIGNMENT-001",
       "path": "conformance/scenarios/server/membership-reassignment-001.json",
-      "sha256": "17ad0f9fb18f8384d99bd365eb856d3aab83b061832489a023d5f9775bd03e39"
+      "sha256": "bda6cdc9c50dee4ef6872e0990562cc027e4309f225e60f1bfddf2ef624d5132"
     },
     {
       "scenario_id": "SCN-PERF-CONFIGURED-BOUNDS-001",
       "path": "conformance/scenarios/performance/configured-bounds-001.json",
-      "sha256": "0251ed5bdd8b7a6d9a7dfdca1db720c623e725b3130610b2ed9218273edb7dcf"
+      "sha256": "e3899c09bdb5ff5b49739be97b35fe822fbe5e4f019f90bf6be7f1266fcd7e81"
     },
     {
       "scenario_id": "SCN-PERF-CORE-SYNC-PATH-001",
       "path": "conformance/scenarios/performance/core-sync-path-001.json",
-      "sha256": "65e81bd937e96b45275f4b371632d5f6c33d468b835287f17f27ec376760c096"
+      "sha256": "f4c78968c3709f547304b64056e6d1cc1dcca2e48949b618472b29f9a2fc7de9"
     },
     {
       "scenario_id": "SCN-PERF-FANOUT-001",
       "path": "conformance/scenarios/performance/fanout-001.json",
-      "sha256": "ffbf4f7a4d5eb2344bc2676e1fe4d3d4c66995194b67ee44e68199e6aae7fe4e"
+      "sha256": "c9fe30700e71f16efbfd88a3cacb9ef9fe4e62f3403d2cca9e9c7bc2a9d6f4a4"
     },
     {
       "scenario_id": "SCN-PERF-MULTI-SCOPE-PROVENANCE-001",
       "path": "conformance/scenarios/performance/multi-scope-provenance-001.json",
-      "sha256": "a6681d1f4c7e1c85e1c8e946f54fc7b6757b197f3d77aeaea84f24deff16b82c"
+      "sha256": "a28acd824316c8543f282bed38189aef7174773b711b5a49ebc4cf226962da4b"
     },
     {
       "scenario_id": "SCN-PERF-PENDING-CYCLE-001",
       "path": "conformance/scenarios/performance/pending-cycle-001.json",
-      "sha256": "1c876d941af14063b39d152dadebdfe9820355f4db1907ef4f96c32357ee104e"
+      "sha256": "6d85255ac983b1f8ee4161cad956650fed4848c3580360521c68d9549810f463"
     },
     {
       "scenario_id": "SCN-PERF-QUEUE-REPLAY-001",
       "path": "conformance/scenarios/performance/queue-replay-001.json",
-      "sha256": "fb5f187b155d1430b9de284378e047ef38c9560343a33c22483a1dec3fae4ac1"
+      "sha256": "43123d6517400b2fbf2784ec9b0dffd7cbbd16f2c176a54f3b021da94fded5d3"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-APPLY-001",
       "path": "conformance/scenarios/performance/rebuild-apply-001.json",
-      "sha256": "2b784ab6a61d2af082da88164ba6f7f7b36fd5a500d5f279a201616f82267223"
+      "sha256": "356093f6693239aef016a1d563bf9ec5e539d3a8155828e21038ac1cf6c7ac5d"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-CARDINALITY-001",
       "path": "conformance/scenarios/performance/rebuild-cardinality-001.json",
-      "sha256": "8bbd2ec68b8daa986487d69d141cb10dfb98f415d99ab736d917225c04fb6501"
+      "sha256": "279fa7799b3efffc9f7a589bc9990fe05d6e4d7541aeac3f6ab6ae8215af50e4"
     },
     {
       "scenario_id": "SCN-PERF-REBUILD-REQUESTS-001",
       "path": "conformance/scenarios/performance/rebuild-requests-001.json",
-      "sha256": "042cf354e8b508a0586c7d251a0fa267f2991971db0f901f526368bda0f38b51"
+      "sha256": "cd207397b0c36012d9a10e9916989bf82a48d7b14df234750dfacf413f1265b5"
     },
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "path": "conformance/scenarios/performance/schema-check-001.json",
-      "sha256": "2a17ae3d5613640cb44ad6ef350f8a8dcaece3769a774c097c43ce745c636934"
+      "sha256": "aa88dfa4b53194c32510cd8ba8803f23b42c7514167fa640127842d271c8d8b9"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",
       "path": "conformance/scenarios/performance/seeded-empty-startup-001.json",
-      "sha256": "da56598e27ea7456d0a34f9380fe8e5d9d8f93df8bca60c9c324ef5935f29d68"
+      "sha256": "455e98373bba57269722ad6b76f4bcae71fd1d5bb7925682731b469dd62799fe"
     },
     {
       "scenario_id": "SCN-PERF-SHARED-PRIVATE-SCOPES-001",
       "path": "conformance/scenarios/performance/shared-private-scopes-001.json",
-      "sha256": "f0bf5353281bb959e86e2f6bf9913d69f0a1f0c9ca5a1179f89cc2834c5139f3"
+      "sha256": "a9b284d711c417943568cff6faeb92ed8e1715eeab78b92cc9c7f4f88de9fe2b"
     },
     {
       "scenario_id": "SCN-PERF-STEADY-PULL-001",
       "path": "conformance/scenarios/performance/steady-pull-001.json",
-      "sha256": "d1c25ab8b1bc6637dd951e245016df02954f52337961247c545eae7e306340b9"
+      "sha256": "4ca5f70b9538967b7e92a95d9ed9bcdc68becf2979b668c90168cb7dafe38ec5"
     },
     {
       "scenario_id": "SCN-PERF-WARM-CONNECT-001",
       "path": "conformance/scenarios/performance/warm-connect-001.json",
-      "sha256": "99d1e09b7f99a1c3e131543a1f606b6209f56d7c52db3a4e287dc0fc3cf449f9"
+      "sha256": "658c537f4d614b2eac22ffad05f114ffb2796ed3d16020b45e20129407d8acea"
     },
     {
       "scenario_id": "SCN-PULL-DIVERGENT-CHECKPOINTS-001",
       "path": "conformance/scenarios/server/pull-divergent-checkpoints-001.json",
-      "sha256": "bf2853f1caef224b178c1c012d54443f4545176418609e27afd7c745cd09e082"
+      "sha256": "e5438d4c9f259ff93219ae499245bb1105035657e411049f5e444242b273c11f"
     },
     {
       "scenario_id": "SCN-PULL-HYDRATION-FAILURE-001",
       "path": "conformance/scenarios/server/pull-hydration-failure-001.json",
-      "sha256": "9ad9ab5972697149036e8b98aec514a853d2ee262ec1f865a2db06007341a934"
+      "sha256": "3373a84b5cd6aed42aa7709f1b7e606ac97bb606f479f5a32898814398dcbe9d"
     },
     {
       "scenario_id": "SCN-PUSH-RESPONSE-LOSS-001",
       "path": "conformance/scenarios/server/push-response-loss-001.json",
-      "sha256": "8177b99f66bac6114932dd2b8cc5b7e934c02f1b6d5cb6fdc2e6e0d4c536d9e5"
+      "sha256": "c07eeb511238f425bbe894b573f78edda8b5fdda7a388a25c5951715b161c306"
+    },
+    {
+      "scenario_id": "SCN-PUSH-UNIT-CONSTRAINTS-001",
+      "path": "conformance/scenarios/server/push-unit-constraints-001.json",
+      "sha256": "3faefe03aff7e0e06191baa957fbc81fc1379f5b87dfb62a8facf19613cb5e3a"
     },
     {
       "scenario_id": "SCN-REBUILD-FORGED-CURSOR-001",
       "path": "conformance/scenarios/server/rebuild-forged-cursor-001.json",
-      "sha256": "7e822838b73a1e451776e6eff99906631488e7d23bc1d8ed9c7199a81b615207"
+      "sha256": "a89ed36d4bd063bcd30bd3e86e00c53d00bd57d11f87a868d2d685f593279002"
     },
     {
       "scenario_id": "SCN-REGISTRY-RELOAD-001",
       "path": "conformance/scenarios/server/registry-reload-001.json",
-      "sha256": "1ea84fe80f184f3f6dd669d53da73a54d922acbaf27fb8d83aa9aa33b6718ba4"
+      "sha256": "829495800070ff416de8ef20d7ac2847256e6b424e27b637c49783ea164733fd"
     },
     {
       "scenario_id": "SCN-RETENTION-RECONNECT-001",
       "path": "conformance/scenarios/server/retention-reconnect-001.json",
-      "sha256": "b37a756b15c8bf344b8d1464ae2307a8840b5391fb7a936ff68bd986f563e7aa"
+      "sha256": "affc2b6520037a53bc7040b337ec35e8f1b7bc305cf95be6f9b5ac47adb320eb"
     },
     {
       "scenario_id": "SCN-SCHEMA-QUEUED-MUTATION-001",
       "path": "conformance/scenarios/server/schema-queued-mutation-001.json",
-      "sha256": "0e01484c2baf851af13fc54f5076b01e14c0c51cc1cc9b371f4fb36067143c78"
+      "sha256": "628df62afe485a51fd354c1085357e59115f63c9055c8c13bd26eb9662c465f0"
+    },
+    {
+      "scenario_id": "SCN-SCOPE-ASSIGNMENT-BOUND-001",
+      "path": "conformance/scenarios/server/scope-assignment-bound-001.json",
+      "sha256": "5846fe220e25100f785bc2096cdee6d5a5ae62a4b8d0f449f4a409a0dd4264f5"
+    },
+    {
+      "scenario_id": "SCN-SCOPE-ASSIGNMENT-PULL-001",
+      "path": "conformance/scenarios/server/scope-assignment-pull-001.json",
+      "sha256": "97ea2c232f3dc9eaf4cb9469aa5ce4a3ff513224ad056e8670f673977b44536c"
+    },
+    {
+      "scenario_id": "SCN-SCOPE-EMPTY-PULL-001",
+      "path": "conformance/scenarios/server/scope-empty-pull-001.json",
+      "sha256": "95c39b9350a3d9cb2ae458155efddd04a1c067e2b6d0666cbd0627f3b32bb0d7"
     },
     {
       "scenario_id": "SCN-WAL-DECODE-FAILURE-001",
       "path": "conformance/scenarios/server/wal-decode-failure-001.json",
-      "sha256": "45f13488d09e0d1979175112f6fe5f1c935540ebeb9a500afa875b6c6e8a44fa"
+      "sha256": "861ae401c4dc590c6f0f20cb967a6c37ee44226dcc1f692cce296a4ec6c7f278"
     },
     {
       "scenario_id": "SCN-WAL-ORDER-001",
       "path": "conformance/scenarios/server/wal-order-001.json",
-      "sha256": "0f231b31558ec4fa7027704a3b93824211c163d4d31e059b48b3ab9b6627a64b"
+      "sha256": "1914554b188258df619d92c0698d7294c63d72f0dc2c1d4c13b15491f7fa5243"
     }
   ]
 }

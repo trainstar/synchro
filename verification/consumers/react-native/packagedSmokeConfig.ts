@@ -4,11 +4,11 @@ export interface PackagedSmokeConfig {
   platform: string;
   server_url: string;
   token: string;
-  user_id: string;
   client_id: string;
-  customer_id: string;
-  order_id: string;
   phase: 'initial' | 'resume';
+  initial_sql: readonly string[];
+  durable_sql: readonly string[];
+  observe_sql: string;
   result_url: string;
   result_token: string;
 }

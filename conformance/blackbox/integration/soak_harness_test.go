@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,20 @@ const (
 	soakPrivateScope   = "user:diagnostic-user"
 	soakSharedScope    = "cf:global"
 	soakBodyLimit      = int64(1 << 20)
+
+	// soakControlChecksum corrupts one held row digest after the pull control.
+	soakControlChecksum = "checksum-corruption"
+	// The delivered-row controls change the delivered WAL-restart row and forge
+	// matching digests and scope metadata, so only the source comparison can
+	// detect them. soakControlOmitDelivery drops the row.
+	// matching scope metadata, so only the source comparison can detect it.
+	soakControlOmitDelivery = "omit-delivered-row"
+	// soakControlWrongValue changes the held value field.
+	soakControlWrongValue = "wrong-delivered-value"
+	// soakControlWrongOwner changes the held owner_id field.
+	soakControlWrongOwner = "wrong-delivered-owner"
+	// The WAL restart control authors this exact private row.
+	soakProcessDeathValue = "restart-before-acknowledgement"
 )
 
 type liveSoakHarness struct {
@@ -39,16 +54,22 @@ type liveSoakHarness struct {
 	native   *blackbox.NativeController
 	recorder *blackbox.Recorder
 	client   blackbox.Client
+	observer *sql.DB
 	seed     uint64
 	root     string
+	control  string
 
 	mu                    sync.Mutex
 	closed                bool
 	identitySequence      uint64
 	clientVersionSequence uint64
 	schemaTransition      uint64
-	corruptNextChecksum   bool
+	controlApplied        bool
+	controlRow            string
 	authoredTable         map[string]any
+	// authored is the independent model of every source row the workload
+	// authored, keyed by table name and record ID.
+	authored map[string]soakAuthoredRow
 
 	protocol            soakProtocolClient
 	manifest            vectors.Manifest
@@ -93,6 +114,7 @@ type soakManifestTable struct {
 type soakManifestField struct {
 	Name string `json:"name"`
 	ID   string `json:"field_id"`
+	Type string `json:"type"`
 }
 
 type soakHeldRow struct {
@@ -101,6 +123,10 @@ type soakHeldRow struct {
 	Version     string
 	Digest      [32]byte
 	Memberships map[string]struct{}
+}
+
+type soakAuthoredRow struct {
+	table, id, scope, value string
 }
 
 type soakRecordedCall struct {
@@ -112,7 +138,12 @@ type soakRecordedCall struct {
 	clientID string
 }
 
-func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) (*liveSoakHarness, error) {
+func newLiveSoakHarness(ctx context.Context, seed uint64, control string) (*liveSoakHarness, error) {
+	switch control {
+	case "", soakControlChecksum, soakControlOmitDelivery, soakControlWrongValue, soakControlWrongOwner:
+	default:
+		return nil, fmt.Errorf("soak control %q is unsupported", control)
+	}
 	environment, err := blackbox.LoadEnvironment()
 	if err != nil {
 		return nil, fmt.Errorf("load soak environment: %w", err)
@@ -134,6 +165,15 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 	if err != nil {
 		return nil, fmt.Errorf("create soak native controller: %w", err)
 	}
+	observer, err := server.OpenObserver(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open soak source observer: %w", err)
+	}
+	defer func() {
+		if cleanupServer {
+			_ = observer.Close()
+		}
+	}()
 	attachmentRoot, err := os.MkdirTemp("", "synchro-soak-attachments-")
 	if err != nil {
 		return nil, fmt.Errorf("create soak attachment root: %w", err)
@@ -160,9 +200,11 @@ func newLiveSoakHarness(ctx context.Context, seed uint64, corruptChecksum bool) 
 		native:              native,
 		recorder:            recorder,
 		client:              (blackbox.Client{BaseURL: server.AdapterURL(), Tokens: tokenProvider}).WithRecorder(recorder, soakBodyLimit),
+		observer:            observer,
 		seed:                seed,
 		root:                attachmentRoot,
-		corruptNextChecksum: corruptChecksum,
+		control:             control,
+		authored:            make(map[string]soakAuthoredRow),
 		rows:                make(map[string]soakHeldRow),
 		scopeRows:           make(map[string]map[string]struct{}),
 		authoritativeDigest: make(map[string][32]byte),
@@ -283,10 +325,13 @@ func (h *liveSoakHarness) Close(ctx context.Context) error {
 	h.closed = true
 	h.mu.Unlock()
 	var closeErr error
+	if h.observer != nil {
+		closeErr = h.observer.Close()
+	}
 	if h.native != nil {
-		closeErr = h.native.Close(ctx)
+		closeErr = errors.Join(closeErr, h.native.Close(ctx))
 	} else if h.server != nil {
-		closeErr = h.server.Close(ctx)
+		closeErr = errors.Join(closeErr, h.server.Close(ctx))
 	}
 	if h.root != "" {
 		closeErr = errors.Join(closeErr, os.RemoveAll(h.root))
@@ -294,6 +339,9 @@ func (h *liveSoakHarness) Close(ctx context.Context) error {
 	return closeErr
 }
 
+// Execute runs one operation. Only a check that names one specific failure
+// returns a soak.StageError. Every other error stays unidentified, so replay of
+// that failure is inconclusive instead of matching a different failure.
 func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation) (soak.ObservationCapture, error) {
 	if ctx == nil {
 		return soak.ObservationCapture{}, errors.New("live soak operation context is required")
@@ -382,6 +430,17 @@ func (h *liveSoakHarness) Execute(ctx context.Context, operation soak.Operation)
 	case soak.OperationProcessDeath:
 		if err := h.executeProcessDeath(ctx); err != nil {
 			return soak.ObservationCapture{}, err
+		}
+		// The restart row reaches the client only through pull, so drain to
+		// reach the quiescent point that the source comparison requires.
+		if err := h.drainPulls(ctx); err != nil {
+			return soak.ObservationCapture{}, err
+		}
+		if h.controlRow != "" {
+			if err := h.applyDeliveredRowControl("cf_items", h.controlRow); err != nil {
+				return soak.ObservationCapture{}, err
+			}
+			h.controlRow = ""
 		}
 		h.faultActivation = &soak.FaultActivationObservation{
 			ControlID: string(operation.FaultPlan.ControlID), Target: operation.FaultPlan.Injection.Target,
@@ -491,9 +550,9 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		return soak.ObservationCapture{}, fmt.Errorf("capture soak server state: %w", err)
 	}
 	serverState := facts[0].StateFacts
-	// The native controller knows authored row aliases only. Keep its independent
-	// ledger and stream projection, and omit scope families it cannot observe for
-	// direct protocol rows.
+	// The native controller projects authored row aliases only, so its row and
+	// membership families do not describe direct protocol rows. The complete
+	// row and membership claim comes from captureSourceState instead.
 	serverState.Rows = nil
 	serverState.Scopes = nil
 	serverState.RowScopeEdges = nil
@@ -502,6 +561,10 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		return soak.ObservationCapture{}, err
 	}
 	client, err := h.captureClient()
+	if err != nil {
+		return soak.ObservationCapture{}, err
+	}
+	sourceState, err := h.captureSourceState(ctx)
 	if err != nil {
 		return soak.ObservationCapture{}, err
 	}
@@ -514,6 +577,7 @@ func (h *liveSoakHarness) capture(ctx context.Context, operation soak.Operation,
 		WireExchanges:   wires,
 		CursorPositions: positions,
 		FaultActivation: activation,
+		SourceState:     &sourceState,
 	}
 	if operation.Kind == soak.OperationPull || operation.Kind == soak.OperationRebuild {
 		capture.ServerRowIdentities = make([]invariants.ServerRowIdentityObservation, 0)
@@ -828,8 +892,14 @@ func (h *liveSoakHarness) submitInsert(ctx context.Context, scopeID, label strin
 	mutationID := h.nextUUID(label + "-mutation")
 	batchID := h.nextUUID(label + "-batch")
 	clientVersion := h.nextClientVersion()
+	value := fmt.Sprintf("soak-%d-%s", h.seed, label)
 	pk := map[string]any{table.PrimaryKeyField: recordID}
-	columns := map[string]any{table.ValueField: fmt.Sprintf("soak-%d-%s", h.seed, label)}
+	columns := map[string]any{table.ValueField: value}
+	// The installed write policy allows the owner to write private rows and
+	// rejects writes to the read-only shared scope.
+	if scopeID != soakSharedScope {
+		h.author(tableName, recordID, scopeID, value)
+	}
 	payload := map[string]any{
 		"client_id":         soakClientID,
 		"client_generation": h.protocol.Generation,
@@ -1012,9 +1082,11 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 	}
 	if operation.ScopeID == soakSharedScope {
 		recordID := h.nextUUID("pull-control-record")
+		value := fmt.Sprintf("soak-%d-pull-control", h.seed)
+		h.author("cf_global_items", recordID, soakSharedScope, value)
 		if err := h.server.Source().ExecContext(ctx,
 			"INSERT INTO cf_global_items (id, value) VALUES ($1, $2)",
-			recordID, fmt.Sprintf("soak-%d-pull-control", h.seed)); err != nil {
+			recordID, value); err != nil {
 			return nil, fmt.Errorf("insert soak shared pull control row: %w", err)
 		}
 		if err := h.waitForWALRecord(ctx, "cf_global_items", recordID); err != nil {
@@ -1066,7 +1138,7 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 	if err != nil {
 		return nil, err
 	}
-	if h.corruptNextChecksum {
+	if h.control == soakControlChecksum && !h.controlApplied {
 		keys := make([]string, 0, len(h.rows))
 		for key := range h.rows {
 			keys = append(keys, key)
@@ -1078,7 +1150,7 @@ func (h *liveSoakHarness) executePullControl(ctx context.Context, operation soak
 		row := h.rows[keys[0]]
 		row.Digest[0] ^= 1
 		h.rows[keys[0]] = row
-		h.corruptNextChecksum = false
+		h.controlApplied = true
 	}
 	ackWire, err := h.wireFromCall(operation, ackCall, false, false, false)
 	if err != nil {
@@ -1357,22 +1429,275 @@ func (h *liveSoakHarness) transitionSchema(ctx context.Context) (soakRecordedCal
 
 func (h *liveSoakHarness) executeProcessDeath(ctx context.Context) error {
 	recordID := h.nextUUID("process-death")
+	h.author("cf_items", recordID, soakPrivateScope, soakProcessDeathValue)
 	observation, err := h.server.Operator().RunWALReplayRestartControl(ctx, recordID)
 	if err != nil {
 		return fmt.Errorf("execute soak WAL process death: %w", err)
 	}
-	return validateSoakWALRestart(observation)
+	if err := validateSoakWALRestart(observation); err != nil {
+		return err
+	}
+	if h.control != "" && h.control != soakControlChecksum && !h.controlApplied {
+		h.controlRow = recordID
+	}
+	return nil
 }
 
+func (h *liveSoakHarness) author(table, id, scope, value string) {
+	h.authored[table+"\x00"+id] = soakAuthoredRow{table: table, id: id, scope: scope, value: value}
+}
+
+// applyDeliveredRowControl removes or changes one delivered row, then forges a
+// matching row digest and scope metadata.
+func (h *liveSoakHarness) applyDeliveredRowControl(tableName, recordID string) error {
+	table := h.protocol.Tables[tableName]
+	pk, err := json.Marshal(recordID)
+	if err != nil {
+		return err
+	}
+	identity, err := vectors.RowIdentity(h.manifest, table.ID, pk)
+	if err != nil {
+		return fmt.Errorf("compute controlled soak row identity: %w", err)
+	}
+	row, found := h.rows[string(identity)]
+	if !found {
+		return errors.New("soak delivered-row control has no delivered row")
+	}
+	switch h.control {
+	case soakControlOmitDelivery:
+		delete(h.rows, string(identity))
+	case soakControlWrongValue, soakControlWrongOwner:
+		field := "value"
+		if h.control == soakControlWrongOwner {
+			field = "owner_id"
+		}
+		fieldID, err := h.manifestFieldID(tableName, field)
+		if err != nil {
+			return err
+		}
+		changed := false
+		for index := range row.Row.Fields {
+			if row.Row.Fields[index].FieldID == fieldID {
+				row.Row.Fields[index].Value = json.RawMessage(`"soak-control-changed"`)
+				changed = true
+			}
+		}
+		if !changed {
+			return fmt.Errorf("soak delivered row has no %s field", field)
+		}
+		if row.Digest, err = vectors.RowDigest(h.manifest, row.TableID, row.Row, row.Version); err != nil {
+			return fmt.Errorf("forge controlled soak row digest: %w", err)
+		}
+		h.rows[string(identity)] = row
+	default:
+		return fmt.Errorf("soak control %q has no delivered-row change", h.control)
+	}
+	h.rebuildScopeIndex()
+	for scopeID := range row.Memberships {
+		if _, present := h.authoritativeDigest[scopeID]; !present {
+			continue
+		}
+		entries, err := h.scopeDigestEntries(scopeID)
+		if err != nil {
+			return err
+		}
+		forged, err := vectors.ScopeDigest(h.manifest.Hash(), scopeID, entries)
+		if err != nil {
+			return fmt.Errorf("forge controlled soak scope digest: %w", err)
+		}
+		h.authoritativeDigest[scopeID] = forged
+	}
+	h.controlApplied = true
+	return nil
+}
+
+func (h *liveSoakHarness) manifestTable(tableName string) (soakManifestTable, error) {
+	for _, table := range h.manifestDocument.Tables {
+		if table.Name == tableName {
+			return table, nil
+		}
+	}
+	return soakManifestTable{}, fmt.Errorf("soak manifest table %q is absent", tableName)
+}
+
+func (h *liveSoakHarness) manifestFieldID(tableName, fieldName string) (string, error) {
+	table, err := h.manifestTable(tableName)
+	if err != nil {
+		return "", err
+	}
+	for _, field := range table.Fields {
+		if field.Name == fieldName {
+			return field.ID, nil
+		}
+	}
+	return "", fmt.Errorf("soak manifest field %s.%s is absent", tableName, fieldName)
+}
+
+// soakSourceTables maps each workload table to its authored membership rule.
+var soakSourceTables = []struct {
+	name  string
+	scope func(columns map[string]json.RawMessage) (string, error)
+}{
+	{name: "cf_items", scope: func(columns map[string]json.RawMessage) (string, error) {
+		var owner string
+		if err := json.Unmarshal(columns["owner_id"], &owner); err != nil || owner == "" {
+			return "", errors.New("soak source cf_items row has no owner")
+		}
+		return "user:" + owner, nil
+	}},
+	{name: "cf_global_items", scope: func(map[string]json.RawMessage) (string, error) { return soakSharedScope, nil }},
+}
+
+// captureSourceState reads every live workload row directly from the isolated
+// source tables. Each synced manifest field is rendered in its wire form from
+// the source column of the same name. Scope membership comes from the authored
+// business rule of each table, not from Synchro membership output.
+func (h *liveSoakHarness) captureSourceState(ctx context.Context) (soak.SourceStateObservation, error) {
+	const maximumRows = 10000
+	state := soak.SourceStateObservation{Names: make(map[string]string)}
+	for _, source := range soakSourceTables {
+		table, err := h.manifestTable(source.name)
+		if err != nil {
+			return soak.SourceStateObservation{}, err
+		}
+		state.Names[table.ID] = table.Name
+		for _, field := range table.Fields {
+			state.Names[field.ID] = field.Name
+		}
+		rows, err := h.observer.QueryContext(ctx,
+			"SELECT to_jsonb(source) FROM public."+source.name+" AS source WHERE deleted_at IS NULL LIMIT 10001")
+		if err != nil {
+			return soak.SourceStateObservation{}, fmt.Errorf("read soak source rows: %w", err)
+		}
+		for rows.Next() {
+			var raw []byte
+			var columns map[string]json.RawMessage
+			if err := rows.Scan(&raw); err != nil || json.Unmarshal(raw, &columns) != nil {
+				rows.Close()
+				return soak.SourceStateObservation{}, errors.New("scan soak source row failed")
+			}
+			row, err := soakSourceRow(table, columns, source.scope)
+			if err != nil {
+				rows.Close()
+				return soak.SourceStateObservation{}, err
+			}
+			state.Source = append(state.Source, row)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return soak.SourceStateObservation{}, fmt.Errorf("read soak source rows: %w", err)
+		}
+	}
+	if len(state.Source) > maximumRows {
+		return soak.SourceStateObservation{}, errors.New("soak source rows exceed their bound")
+	}
+	keys := make([]string, 0, len(h.authored))
+	for key := range h.authored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		authored, err := h.authoredSourceRow(h.authored[key])
+		if err != nil {
+			return soak.SourceStateObservation{}, err
+		}
+		state.Authored = append(state.Authored, authored)
+	}
+	return state, nil
+}
+
+func soakSourceRow(table soakManifestTable, columns map[string]json.RawMessage, scope func(map[string]json.RawMessage) (string, error)) (soak.SourceRow, error) {
+	scopeID, err := scope(columns)
+	if err != nil {
+		return soak.SourceRow{}, err
+	}
+	row := soak.SourceRow{TableID: table.ID, ScopeIDs: []string{scopeID}, Fields: make(map[string]json.RawMessage, len(table.Fields))}
+	for _, field := range table.Fields {
+		raw, found := columns[field.Name]
+		if !found {
+			return soak.SourceRow{}, fmt.Errorf("soak source %s has no column for synced field %s", table.Name, field.Name)
+		}
+		value, err := soakWireValue(field.Type, raw)
+		if err != nil {
+			return soak.SourceRow{}, fmt.Errorf("render soak source %s.%s: %w", table.Name, field.Name, err)
+		}
+		row.Fields[field.ID] = value
+		if field.ID == table.PrimaryKeyFieldID {
+			row.PrimaryKey = value
+		}
+	}
+	if len(row.PrimaryKey) == 0 {
+		return soak.SourceRow{}, fmt.Errorf("soak source %s has no primary key", table.Name)
+	}
+	return row, nil
+}
+
+// soakWireValue renders one PostgreSQL JSON value in the protocol wire form of
+// its declared portable type. The workload tables use only these types.
+func soakWireValue(portableType string, raw json.RawMessage) (json.RawMessage, error) {
+	if string(raw) == "null" {
+		return raw, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, errors.New("source value is not text")
+	}
+	switch portableType {
+	case "string":
+		return json.Marshal(text)
+	case "datetime":
+		parsed, err := time.Parse(time.RFC3339Nano, text)
+		if err != nil {
+			return nil, errors.New("source timestamp is invalid")
+		}
+		return json.Marshal(parsed.UTC().Format("2006-01-02T15:04:05.000000Z"))
+	default:
+		return nil, fmt.Errorf("portable type %q is not used by the workload", portableType)
+	}
+}
+
+// authoredSourceRow holds only the business fields that the workload authored.
+func (h *liveSoakHarness) authoredSourceRow(row soakAuthoredRow) (soak.SourceRow, error) {
+	table, err := h.manifestTable(row.table)
+	if err != nil {
+		return soak.SourceRow{}, err
+	}
+	pk, pkErr := json.Marshal(row.id)
+	value, valueErr := json.Marshal(row.value)
+	if pkErr != nil || valueErr != nil {
+		return soak.SourceRow{}, errors.New("encode soak authored row failed")
+	}
+	fields := map[string]json.RawMessage{}
+	valueField, err := h.manifestFieldID(row.table, "value")
+	if err != nil {
+		return soak.SourceRow{}, err
+	}
+	fields[valueField] = value
+	if row.table == "cf_items" {
+		ownerField, err := h.manifestFieldID(row.table, "owner_id")
+		if err != nil {
+			return soak.SourceRow{}, err
+		}
+		fields[ownerField], _ = json.Marshal(soakUserID)
+	}
+	return soak.SourceRow{TableID: table.ID, PrimaryKey: pk, ScopeIDs: []string{row.scope}, Fields: fields}, nil
+}
+
+// validateSoakWALRestart names each semantic failure with a bounded identity,
+// so replay distinguishes a missing boundary, a wrong acknowledgement, and a
+// changed durable result at the same operation.
 func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) error {
+	failure := func(class, message string) error {
+		return &soak.StageError{Stage: "wal-restart", Class: class, Err: errors.New(message)}
+	}
 	if !observation.WorkerExitedBeforeAcknowledgement || !observation.WorkerRestarted ||
 		!observation.PriorProgress.SlotMatchesProgress ||
 		len(observation.BeforeRestart.Records) != 1 || len(observation.AfterRestart.Records) != 1 ||
 		observation.BeforeRestart.ContiguousAcknowledged || observation.BeforeRestart.BlockingPoison ||
 		!observation.AfterRestart.WorkerRunning || observation.AfterRestart.BlockingPoison ||
-		!observation.AfterRestart.ContiguousAcknowledged ||
-		!observation.AfterRestart.AcknowledgementMatchesObservedEnd || !observation.AfterRestart.SlotMatchesObservedEnd {
-		return errors.New("soak WAL restart lacks an observed replay boundary")
+		!observation.AfterRestart.ContiguousAcknowledged || !observation.AfterRestart.SlotMatchesAcknowledgement {
+		return failure("replay-boundary-missing", "soak WAL restart lacks an observed replay boundary")
 	}
 	before := observation.BeforeRestart.Records[0]
 	after := observation.AfterRestart.Records[0]
@@ -1381,15 +1706,16 @@ func validateSoakWALRestart(observation blackbox.WALReplayRestartObservation) er
 		before.ReplayCount != 0 || after.ReplayCount != 1 ||
 		observation.BeforeRestart.AcknowledgedEndLSN != observation.PriorProgress.AcknowledgedEndLSN ||
 		observation.BeforeRestart.SlotConfirmedFlushLSN != observation.PriorProgress.SlotConfirmedFlushLSN ||
-		observation.AfterRestart.AcknowledgedEndLSN != before.EndLSN {
-		return errors.New("soak WAL restart acknowledgement is invalid")
+		!realWALLSNAtOrAfter(observation.AfterRestart.AcknowledgedEndLSN, before.EndLSN) ||
+		observation.AfterRestart.ProcessedEndLSN != observation.AfterRestart.AcknowledgedEndLSN {
+		return failure("acknowledgement-invalid", "soak WAL restart acknowledgement is invalid")
 	}
 	after.ReplayCount = before.ReplayCount
 	expectedStages := blackbox.WALRecordStageObservation{
 		FenceCount: 1, EventCount: 1, ProjectionCount: 1, CapturedCount: 1, EdgeCount: 1, ChangeCount: 1,
 	}
 	if before != after || observation.BeforeStages != expectedStages || observation.AfterStages != expectedStages {
-		return errors.New("soak WAL replay changed its durable result")
+		return failure("durable-result-changed", "soak WAL replay changed its durable result")
 	}
 	return nil
 }
@@ -1781,13 +2107,22 @@ func parseSoakSeed(raw string) (uint64, error) {
 	return seed, nil
 }
 
-func parseSoakDuration(raw string) (time.Duration, error) {
+func parseSoakOperations(raw string) (int, error) {
 	if strings.TrimSpace(raw) == "" {
-		return time.Second, nil
+		return soak.MinimumCoverageOperations, nil
 	}
-	duration, err := time.ParseDuration(raw)
-	if err != nil || duration <= 0 || duration > soak.MaximumSoakDuration {
-		return 0, fmt.Errorf("SOAK_DURATION must be greater than zero and at most %s", soak.MaximumSoakDuration)
+	operations, err := strconv.Atoi(raw)
+	if err != nil || operations < soak.MinimumCoverageOperations || operations > soak.MaximumOperationCount {
+		return 0, fmt.Errorf("SOAK_OPERATIONS must be an integer from %d to %d", soak.MinimumCoverageOperations, soak.MaximumOperationCount)
 	}
-	return duration, nil
+	return operations, nil
+}
+
+// retainWire copies the original recorder bodies into caller-owned evidence
+// before cleanup removes the attachment root.
+func (h *liveSoakHarness) retainWire(destination string) error {
+	if h == nil || h.root == "" {
+		return nil
+	}
+	return os.CopyFS(destination, os.DirFS(h.root))
 }

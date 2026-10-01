@@ -46,6 +46,7 @@
              )
              UPDATE synchro.sync_wal_progress progress
              SET generation_start_lsn = slot.confirmed_flush_lsn,
+                 processed_end_lsn = slot.confirmed_flush_lsn,
                  materialized_commit_lsn = NULL,
                  materialized_end_lsn = NULL,
                  acknowledged_end_lsn = NULL,
@@ -103,9 +104,14 @@
             configuration.clone(),
         )
         .detail();
-        let default_limits_accepted = ["heartbeat", "wal_byte_lag", "wal_time_lag"]
+        // This cluster has no replication slot, so it cannot reach a complete
+        // ready state. Each check that a rejection below targets starts ok, so
+        // each rejection is attributable to its own change. The real-server
+        // readiness test owns the slot and materialization-progress checks.
+        let targeted_checks_start_ok = ["capture_triggers", "publication", "heartbeat", "poison"]
             .into_iter()
-            .all(|check| default_detail["checks"][check]["reason"].as_str() != Some("invalid_limit"));
+            .all(|check| default_detail["checks"][check]["state"].as_str() == Some("ok"))
+            && default_detail["checks"]["wal_byte_lag"]["state"].as_str() != Some("failed");
 
         Spi::run(
             "ALTER TABLE public.test_orders DISABLE TRIGGER synchro_capture_fence",
@@ -234,75 +240,8 @@
             && invalid_limit_detail["checks"]["wal_byte_lag"]["reason"].as_str()
                 == Some("invalid_limit");
 
-        Spi::run("UPDATE synchro.sync_runtime_state SET active_slot_name = 'synchro_missing_slot'")
-            .expect("hide default health test slot");
-        let missing_slot_detail = crate::health::load_readiness_status_with_configuration(
-            configuration.clone(),
-        )
-        .detail();
-        let missing_slot_rejected = !missing_slot_detail["ready"].as_bool().unwrap_or(true)
-            && missing_slot_detail["checks"]["replication_slot"]["state"].as_str()
-                == Some("failed")
-            && missing_slot_detail["checks"]["wal_byte_lag"]["state"].as_str()
-                == Some("unknown");
-        Spi::run_with_args(
-            "UPDATE synchro.sync_runtime_state SET active_slot_name = $1 WHERE singleton",
-            &[slot.into()],
-        )
-        .expect("restore default health test slot");
 
-        Spi::run(
-            "INSERT INTO synchro.sync_wal_transactions (
-                 stream_generation, commit_lsn, end_lsn, source_xid,
-                 registry_generation, event_count, effect_count, content_hash,
-                 commit_timestamp
-             )
-             SELECT runtime.stream_generation, '0/A', '0/B', '1'::xid,
-                    progress.registry_generation, 0, 0,
-                    pg_catalog.decode(repeat('00', 32), 'hex'), now()
-             FROM synchro.sync_runtime_state runtime
-             CROSS JOIN synchro.sync_wal_progress progress
-             WHERE runtime.singleton AND progress.singleton;
-             UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = '0/A',
-                 materialized_end_lsn = '0/B',
-                 acknowledged_end_lsn = NULL,
-                 updated_at = now()
-             WHERE singleton;
-             UPDATE synchro.sync_wal_worker_state
-             SET materialized_commit_lsn = '0/A',
-                 materialized_end_lsn = '0/B',
-                 heartbeat_at = now(),
-                 updated_at = now()
-             WHERE worker_id = 'synchro_wal_consumer'",
-        )
-        .expect("create nonacknowledged health test progress");
-        let progress_detail = crate::health::load_readiness_status_with_configuration(
-            configuration.clone(),
-        )
-        .detail();
-        let nonacknowledged_progress_rejected =
-            !progress_detail["ready"].as_bool().unwrap_or(true)
-                && progress_detail["checks"]["materialization_progress"]["state"].as_str()
-                    == Some("failed");
-        Spi::run(
-            "DELETE FROM synchro.sync_wal_transactions WHERE commit_lsn = '0/A';
-             UPDATE synchro.sync_wal_progress
-             SET materialized_commit_lsn = NULL,
-                 materialized_end_lsn = NULL,
-                 acknowledged_end_lsn = NULL,
-                 updated_at = now()
-             WHERE singleton;
-             UPDATE synchro.sync_wal_worker_state
-             SET materialized_commit_lsn = NULL,
-                 materialized_end_lsn = NULL,
-                 heartbeat_at = now(),
-                 updated_at = now()
-             WHERE worker_id = 'synchro_wal_consumer'",
-        )
-        .expect("restore health test progress");
-
-        let bounded_detail = missing_slot_detail.to_string().len() < 4096;
+        let bounded_detail = poison_detail.to_string().len() < 4096;
 
         Spi::run("DELETE FROM synchro.sync_wal_worker_state WHERE worker_id = 'synchro_wal_consumer'")
             .expect("remove health test worker state");
@@ -313,15 +252,16 @@
         .expect("remove health test identity");
 
         assert!(guc_defaults_visible);
-        assert!(default_limits_accepted);
+        assert!(
+            targeted_checks_start_ok,
+            "targeted health checks do not start ok: {default_detail}"
+        );
         assert!(disabled_trigger_rejected);
         assert!(extra_publication_relation_rejected);
         assert!(stale_heartbeat_rejected);
         assert!(oldest_commit_age_reported);
         assert!(poison_rejected);
         assert!(invalid_limit_rejected);
-        assert!(missing_slot_rejected);
-        assert!(nonacknowledged_progress_rejected);
         assert!(bounded_detail, "detailed health exposed unbounded or sensitive state");
     }
 
@@ -644,4 +584,278 @@
             crate::build_fingerprint::library_fingerprint()
         );
         assert_eq!(contract.0["installed_build_fingerprint"], stale);
+    }
+
+    const POSITION_ORDER_WORKER: &str = "synchro_position_order_worker";
+    const POSITION_ORDER_MATERIALIZED: Option<(&str, &str)> = Some(("0/2800", "0/3000"));
+
+    fn position_order_check(check: &str) -> Value {
+        let database: String = Spi::get_one("SELECT current_database()::text")
+            .expect("load position order database")
+            .expect("position order database");
+        crate::health::load_readiness_status_with_configuration(
+            crate::health::ReadinessConfiguration {
+                database: Some(database),
+                publication: Some("synchro_pub".to_string()),
+                worker_login: Some(POSITION_ORDER_WORKER.to_string()),
+                max_heartbeat_age_seconds: 30,
+                max_wal_lag_bytes: i32::MAX,
+                max_wal_lag_seconds: 30,
+            },
+        )
+        .detail()["checks"][check]
+            .clone()
+    }
+
+    fn position_order_generation() -> i64 {
+        Spi::get_one("SELECT registry_generation FROM synchro.sync_wal_progress WHERE singleton")
+            .expect("load position order registry generation")
+            .expect("position order registry generation")
+    }
+
+    fn set_position_order_progress(
+        registry_generation: i64,
+        materialized: Option<(&str, &str)>,
+        acknowledged: Option<&str>,
+    ) {
+        Spi::run_with_args(
+            "UPDATE synchro.sync_wal_progress
+             SET registry_generation = $1,
+                 generation_start_lsn = '0/1000',
+                 materialized_commit_lsn = $2::pg_lsn,
+                 materialized_end_lsn = $3::pg_lsn,
+                 acknowledged_end_lsn = $4::pg_lsn,
+                 processed_end_lsn = '0/3000',
+                 updated_at = now()
+             WHERE singleton",
+            &[
+                registry_generation.into(),
+                materialized.map(|(commit, _)| commit).into(),
+                materialized.map(|(_, end)| end).into(),
+                acknowledged.into(),
+            ],
+        )
+        .expect("set position order progress");
+    }
+
+    /// Returns the active, a prior, and a later registry generation.
+    fn setup_position_order_worker() -> (i64, i64, i64) {
+        Spi::run(&format!(
+            "CREATE ROLE {POSITION_ORDER_WORKER}
+                 LOGIN REPLICATION NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             GRANT synchro_worker TO {POSITION_ORDER_WORKER}"
+        ))
+        .expect("provision position order worker");
+        setup_test_tables();
+        let active = position_order_generation();
+        let prior: i64 = Spi::get_one_with_args(
+            "SELECT max(generation) FROM synchro.sync_registry_generations WHERE generation < $1",
+            &[active.into()],
+        )
+        .expect("load prior registry generation")
+        .expect("prior registry generation");
+        let later: i64 = Spi::get_one(
+            "INSERT INTO synchro.sync_registry_generations (
+                 stream_generation, state, validated, parent_generation
+             )
+             SELECT stream_generation, 'pending', true, generation
+             FROM synchro.sync_registry_generations
+             WHERE state = 'active'
+             RETURNING generation",
+        )
+        .expect("create later registry generation")
+        .expect("later registry generation");
+        (active, prior, later)
+    }
+
+    fn position_order_worker_check(
+        progress_generation: i64,
+        progress_materialized: Option<(&str, &str)>,
+        worker_state: &str,
+        worker_generation: i64,
+        worker_materialized: Option<(&str, &str)>,
+    ) -> Value {
+        set_position_order_progress(progress_generation, progress_materialized, Some("0/2000"));
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_wal_worker_state (
+                 worker_id, database_oid, database_name, worker_login_oid,
+                 backend_pid, state, registry_generation,
+                 materialized_commit_lsn, materialized_end_lsn,
+                 wal_observed_at, heartbeat_at, updated_at
+             )
+             SELECT 'synchro_wal_consumer', database.oid, database.datname,
+                    worker_role.oid, pg_backend_pid(), $1, $2,
+                    $3::pg_lsn, $4::pg_lsn, now(), now(), now()
+             FROM pg_catalog.pg_database database
+             CROSS JOIN pg_catalog.pg_roles worker_role
+             WHERE database.datname = current_database()
+               AND worker_role.rolname = $5
+             ON CONFLICT (worker_id) DO UPDATE
+             SET state = EXCLUDED.state,
+                 registry_generation = EXCLUDED.registry_generation,
+                 materialized_commit_lsn = EXCLUDED.materialized_commit_lsn,
+                 materialized_end_lsn = EXCLUDED.materialized_end_lsn",
+            &[
+                worker_state.into(),
+                worker_generation.into(),
+                worker_materialized.map(|(commit, _)| commit).into(),
+                worker_materialized.map(|(_, end)| end).into(),
+                POSITION_ORDER_WORKER.into(),
+            ],
+        )
+        .expect("set position order worker copy");
+        position_order_check("worker")
+    }
+
+    #[pg_test]
+    fn readiness_progress_accepts_acknowledgement_before_processed_end() {
+        let generation = position_order_generation();
+        Spi::run_with_args(
+            "INSERT INTO synchro.sync_wal_transactions (
+                 stream_generation, commit_lsn, end_lsn, source_xid,
+                 registry_generation, event_count, effect_count, content_hash,
+                 content_hash_format, commit_timestamp
+             )
+             SELECT runtime.stream_generation, boundary.commit_lsn, boundary.end_lsn,
+                    '1'::xid, $1, 0, 0, pg_catalog.decode(repeat('00', 32), 'hex'), 2, now()
+             FROM synchro.sync_runtime_state runtime
+             CROSS JOIN (
+                 VALUES ('0/1800'::pg_lsn, '0/2000'::pg_lsn),
+                        ('0/2800'::pg_lsn, '0/3000'::pg_lsn)
+             ) AS boundary (commit_lsn, end_lsn)
+             WHERE runtime.singleton",
+            &[generation.into()],
+        )
+        .expect("create position order transactions");
+
+        // The CHECK constraint sync_wal_progress_acknowledged_processed rejects
+        // an acknowledgement outside [generation_start_lsn, processed_end_lsn].
+        // The generation start is the lowest acknowledgement that it permits.
+        for (label, acknowledged) in [
+            ("NULL acknowledgement", None),
+            ("acknowledgement at the generation start", Some("0/1000")),
+            ("acknowledgement before the processed end", Some("0/2000")),
+        ] {
+            set_position_order_progress(generation, POSITION_ORDER_MATERIALIZED, acknowledged);
+            let check = position_order_check("materialization_progress");
+            // No runtime slot exists, so valid progress gives an unknown slot check.
+            assert_eq!(check["state"], "unknown", "{label}: {check}");
+            assert_eq!(
+                check["reason"], "slot_acknowledgement_unknown",
+                "{label}: {check}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn readiness_worker_accepts_heartbeat_copy_behind_progress() {
+        let (active, prior, _) = setup_position_order_worker();
+        for (label, worker_generation, worker_materialized) in [
+            (
+                "copy equal to progress",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+            (
+                "LSN copy behind progress",
+                active,
+                Some(("0/1800", "0/2000")),
+            ),
+            ("NULL LSN copy", active, None),
+            (
+                "generation copy behind progress",
+                prior,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+        ] {
+            let check = position_order_worker_check(
+                active,
+                POSITION_ORDER_MATERIALIZED,
+                "running",
+                worker_generation,
+                worker_materialized,
+            );
+            assert_eq!(check["state"], "ok", "{label}: {check}");
+        }
+    }
+
+    #[pg_test]
+    fn readiness_worker_rejects_copy_that_a_worker_never_commits() {
+        let (active, prior, later) = setup_position_order_worker();
+        let baseline = position_order_worker_check(
+            active,
+            POSITION_ORDER_MATERIALIZED,
+            "running",
+            active,
+            POSITION_ORDER_MATERIALIZED,
+        );
+        assert_eq!(baseline["state"], "ok", "baseline: {baseline}");
+
+        for (
+            label,
+            progress_generation,
+            progress_materialized,
+            state,
+            worker_generation,
+            worker_materialized,
+        ) in [
+            (
+                "commit copy after progress",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+                "running",
+                active,
+                Some(("0/2900", "0/3000")),
+            ),
+            (
+                "end copy after progress",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+                "running",
+                active,
+                Some(("0/2800", "0/3800")),
+            ),
+            (
+                "generation copy after progress",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+                "running",
+                later,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+            (
+                "LSN copy without a progress position",
+                active,
+                None,
+                "running",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+            (
+                "progress generation that is not active",
+                prior,
+                POSITION_ORDER_MATERIALIZED,
+                "running",
+                prior,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+            (
+                "blocked worker",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+                "blocked",
+                active,
+                POSITION_ORDER_MATERIALIZED,
+            ),
+        ] {
+            let check = position_order_worker_check(
+                progress_generation,
+                progress_materialized,
+                state,
+                worker_generation,
+                worker_materialized,
+            );
+            assert_eq!(check["state"], "failed", "{label}: {check}");
+            assert_eq!(check["reason"], "worker_state_invalid", "{label}: {check}");
+        }
     }

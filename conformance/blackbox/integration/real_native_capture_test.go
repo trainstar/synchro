@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -354,5 +355,373 @@ func pushNativeCaptureMutation(t *testing.T, ctx context.Context, harness *black
 	status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", phase4PushPayload(client, batchID, []map[string]any{mutation}))
 	if status != http.StatusOK || len(requireOutcomeList(t, response, "accepted")) != 1 || len(requireOutcomeList(t, response, "rejected")) != 0 {
 		t.Fatalf("native capture mutation push status = %d, response = %#v", status, response)
+	}
+}
+
+// TestRealNativeMaterializationBindsEachSourceTransaction proves that a
+// materialization wait observes the WAL transaction of its own source commit.
+// Rebuild workload steps 2 and 3 update the same row with the same operation,
+// so an identity match on the row alone binds the step 2 WAL transaction. The
+// wait must also poll through its whole budget: it must return promptly after
+// the worker materializes, not on a coarse retry schedule. Accepted
+// application pushes have no source transaction ID, so each binds through its
+// own write fences: a second same-value push binds its own fence, an insert
+// with a same-row trigger update binds its whole fence chain, and a rejected
+// mutation in a mixed push keeps its row binding.
+func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	controller, err := blackbox.NewNativeController(blackbox.NativeControllerConfig{Harness: harness})
+	if err != nil {
+		t.Fatalf("create native materialization controller: %v", err)
+	}
+	t.Cleanup(func() {
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if err := controller.Close(closeContext); err != nil {
+			t.Errorf("close native materialization controller: %v", err)
+		}
+	})
+	scenario, err := scenarios.LoadFile(ctx, "../../..", "conformance/scenarios/performance/rebuild-cardinality-001.json")
+	if err != nil {
+		t.Fatalf("load rebuild workload: %v", err)
+	}
+	if err := controller.Install(ctx, scenario.Model.Setup[0]); err != nil {
+		t.Fatalf("install rebuild workload contract: %v", err)
+	}
+	inputs, err := scenarios.BuildRebuildWorkloadInputs(scenario)
+	if err != nil || len(inputs) < 3 {
+		t.Fatalf("build rebuild workload inputs: %d, %v", len(inputs), err)
+	}
+	// Each step input starts with its source commit and its materialization.
+	commit := func(step int) {
+		t.Helper()
+		if observation, err := controller.ApplyStep(ctx, inputs[step].Operations[0]); err != nil || observation.Disposition != "success" {
+			t.Fatalf("commit step %d source transaction: observation=%#v err=%v", step+1, observation, err)
+		}
+	}
+	for step := 0; step < 2; step++ {
+		commit(step)
+		if observation, err := controller.ProcessStep(ctx, nil, inputs[step].Operations[1]); err != nil || observation.Disposition != "success" {
+			t.Fatalf("materialize step %d: observation=%#v err=%v", step+1, observation, err)
+		}
+	}
+
+	database, err := sql.Open("pgx", harness.DatabaseURL())
+	if err != nil {
+		t.Fatalf("open materialization database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	// pausedBarrier commits one transaction while the WAL worker is paused. The
+	// materialization wait must still be pending when the worker resumes 22
+	// seconds later. The test then polls the write fences of that transaction.
+	// The wait must return within 4 seconds after the test first sees every
+	// fence materialized. A wait that retried only every 10 seconds would
+	// return about 8 seconds late.
+	pausedBarrier := func(name string, commit func() scenarios.Operation) {
+		t.Helper()
+		resumeWAL, err := controller.PauseWALMaterialization(ctx)
+		if err != nil {
+			t.Fatalf("pause WAL materialization before %s: %v", name, err)
+		}
+		walPaused := true
+		defer func() {
+			if walPaused {
+				cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cleanupCancel()
+				_ = resumeWAL(cleanupContext)
+			}
+		}()
+		materialize := commit()
+		// The worker is paused, so the pending fences are the fences of this
+		// transaction alone.
+		var fences []string
+		rows, err := database.QueryContext(ctx, `
+			SELECT fence_id::text FROM synchro.sync_write_fences WHERE coverage = 'pending'`)
+		if err != nil {
+			t.Fatalf("read the pending fences of %s: %v", name, err)
+		}
+		for rows.Next() {
+			var fence string
+			if err := rows.Scan(&fence); err != nil {
+				t.Fatalf("scan a pending fence of %s: %v", name, err)
+			}
+			fences = append(fences, fence)
+		}
+		if err := rows.Close(); err != nil || rows.Err() != nil || len(fences) == 0 {
+			t.Fatalf("read the pending fences of %s: fences=%v err=%v", name, fences, rows.Err())
+		}
+		type result struct {
+			observation blackbox.NativeStepObservation
+			err         error
+			returned    time.Time
+		}
+		materialized := make(chan result, 1)
+		go func() {
+			observation, err := controller.ProcessStep(ctx, nil, materialize)
+			materialized <- result{observation, err, time.Now()}
+		}()
+		select {
+		case early := <-materialized:
+			t.Fatalf("%s materialized while the WAL worker was paused: observation=%#v err=%v", name, early.observation, early.err)
+		case <-time.After(22 * time.Second):
+		}
+		if err := resumeWAL(ctx); err != nil {
+			t.Fatalf("resume WAL materialization after %s: %v", name, err)
+		}
+		walPaused = false
+		var seen time.Time
+		for seen.IsZero() {
+			var count int
+			if err := database.QueryRowContext(ctx, `
+				SELECT count(*) FROM synchro.sync_write_fences
+				WHERE fence_id::text = ANY($1::text[]) AND coverage = 'materialized'`, fences).Scan(&count); err != nil {
+				t.Fatalf("read the fence coverage of %s: %v", name, err)
+			}
+			if count == len(fences) {
+				seen = time.Now()
+				break
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("the fences of %s did not materialize: %v", name, ctx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		late := <-materialized
+		if late.err != nil || late.observation.Disposition != "success" {
+			t.Fatalf("materialize %s after the worker resumed within the wait budget: observation=%#v err=%v", name, late.observation, late.err)
+		}
+		delay := late.returned.Sub(seen)
+		t.Logf("%s: the materialization wait returned %.2f seconds after the test saw its fences materialized", name, delay.Seconds())
+		if delay > 4*time.Second {
+			t.Fatalf("materialization wait of %s returned %.1f seconds after its fences materialized", name, delay.Seconds())
+		}
+	}
+	pausedBarrier("step 3", func() scenarios.Operation { commit(2); return inputs[2].Operations[1] })
+
+	// The application pushes below bind through their write fences, because an
+	// accepted push has no source transaction ID.
+	token, err := harness.NativeBearerToken(ctx, "user-a", time.Now())
+	if err != nil {
+		t.Fatalf("sign application push token: %v", err)
+	}
+	client := connectRealProtocolClient(t, ctx, harness, token, "client-a", "user:user-a")
+	var tableAlias scenarios.NativeIdentityAlias
+	for _, alias := range scenario.NativeIdentityAliases {
+		if alias.Alias == "items-table" {
+			tableAlias = alias
+		}
+	}
+	identities, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{
+		tableAlias,
+		{Kind: "primary-key", Alias: "pushed-row", Value: json.RawMessage(`"cardinality-000001"`)},
+	})
+	if err != nil || len(identities) != 2 {
+		t.Fatalf("resolve the runtime table and row: %#v, %v", identities, err)
+	}
+	table := requireRealTable(t, client, identities[0].ApplicationIdentifier)
+	var runtimeRecordID string
+	if err := json.Unmarshal(identities[1].RuntimeValue, &runtimeRecordID); err != nil || runtimeRecordID == "" {
+		t.Fatalf("decode the runtime row identity: %v", err)
+	}
+	authoredSchema := scenario.Steps[0].NativeBinding.Workload.AuthoredSchema
+	var materializedStep struct {
+		StreamGeneration string `json:"stream_generation"`
+	}
+	if err := json.Unmarshal(inputs[2].Operations[1].Payload, &materializedStep); err != nil || materializedStep.StreamGeneration == "" {
+		t.Fatalf("read the authored stream generation: %v", err)
+	}
+	stream := materializedStep.StreamGeneration
+	currentVersion := func(runtimeRecordID string) string {
+		t.Helper()
+		var version string
+		if err := database.QueryRowContext(ctx, `
+			SELECT row_version::text FROM synchro.sync_captured_rows WHERE record_id = $1`, runtimeRecordID).Scan(&version); err != nil {
+			t.Fatalf("read the captured version of %s: %v", runtimeRecordID, err)
+		}
+		return version
+	}
+	type pushedMutation struct {
+		op, authoredKey, runtimeKey, baseVersion, value string
+	}
+	pushes := 0
+	// push sends one application push, requires its accepted and rejected
+	// counts, and binds the authored push with the given commit position.
+	push := func(commitLSN, endLSN string, accepted, rejected int, mutations ...pushedMutation) scenarios.Operation {
+		t.Helper()
+		pushes++
+		batchID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", pushes*10)
+		runtimeMutations := make([]map[string]any, 0, len(mutations))
+		authoredMutations := make([]any, 0, len(mutations))
+		for index, mutation := range mutations {
+			mutationID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", pushes*10+index+1)
+			runtime := map[string]any{
+				"mutation_id": mutationID, "table": table.ID, "pk": map[string]any{table.PrimaryKeyField: mutation.runtimeKey},
+				"authored_schema": client.Schema, "op": mutation.op, "client_version": phase4ClientVersion,
+			}
+			authored := map[string]any{
+				"mutation_id": mutationID, "table": "items", "pk": map[string]any{"id": mutation.authoredKey},
+				"authored_schema": authoredSchema, "op": mutation.op, "client_version": phase4ClientVersion,
+			}
+			if mutation.op != "insert" {
+				runtime["base_version"] = mutation.baseVersion
+				authored["base_version"] = "authored-base-version"
+			}
+			if mutation.op != "delete" {
+				runtime["columns"] = map[string]any{table.ValueField: mutation.value}
+				authored["columns"] = map[string]any{"value": mutation.value}
+			}
+			runtimeMutations = append(runtimeMutations, runtime)
+			authoredMutations = append(authoredMutations, authored)
+		}
+		status, response := postSync(t, ctx, harness.AdapterURL(), token, "/sync/push", phase4PushPayload(client, batchID, runtimeMutations))
+		if status != http.StatusOK || len(requireOutcomeList(t, response, "accepted")) != accepted || len(requireOutcomeList(t, response, "rejected")) != rejected {
+			t.Fatalf("application push %d status = %d, response = %#v", pushes, status, response)
+		}
+		payload, err := json.Marshal(map[string]any{
+			"authenticated_user_id": "user-a",
+			"request": map[string]any{
+				"client_id": "client-a", "client_generation": 1, "batch_id": batchID, "schema": authoredSchema,
+				"mutations": authoredMutations,
+			},
+			"delivery": "apply", "commit_lsn": commitLSN, "end_lsn": endLSN,
+		})
+		if err != nil {
+			t.Fatalf("encode authored application push %d: %v", pushes, err)
+		}
+		operation := scenarios.Operation{ContractOperation: "push", Name: "submit", Payload: payload}
+		if err := controller.BindApplicationPush(operation); err != nil {
+			t.Fatalf("bind authored application push %d: %v", pushes, err)
+		}
+		return scenarios.Operation{
+			ContractOperation: "process", Name: "materialize-source-transaction",
+			Payload: json.RawMessage(fmt.Sprintf(`{"stream_generation":%q,"commit_lsn":%q}`, stream, commitLSN)),
+		}
+	}
+
+	// Two accepted application pushes write the same value to the same row.
+	// The row values of the second push equal the first push, so only its own
+	// write fence can bind it.
+	const pushedValue = "application-push-same-value"
+	sameValue := func() pushedMutation {
+		return pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: pushedValue}
+	}
+	if observation, err := controller.ProcessStep(ctx, nil, push("40", "41", 1, 0, sameValue())); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the first application push: observation=%#v err=%v", observation, err)
+	}
+	pausedBarrier("the second same-value application push", func() scenarios.Operation { return push("50", "51", 1, 0, sameValue()) })
+
+	// An accepted insert whose same-row trigger updates the row writes an
+	// insert fence and then an update fence. The accepted outcome carries the
+	// version of the update fence.
+	relation := `"public"."` + identities[0].ApplicationIdentifier + `"`
+	for _, statement := range []string{
+		`CREATE FUNCTION public.zz_barrier_same_row_update() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF pg_trigger_depth() = 1 THEN
+				UPDATE ` + relation + ` SET value = NEW.value WHERE id = NEW.id;
+			END IF;
+			RETURN NULL;
+		END
+		$$`,
+		`CREATE TRIGGER zz_barrier_same_row_update AFTER INSERT ON ` + relation + `
+		FOR EACH ROW EXECUTE FUNCTION public.zz_barrier_same_row_update()`,
+	} {
+		if _, err := database.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("install the same-row insert trigger: %v", err)
+		}
+	}
+	write, err := json.Marshal(map[string]any{
+		"authenticated_user_id": "user-a", "client_id": "client-a", "mutation_id": "00000000-0000-4000-8e00-000000000999",
+		"table_id": "items", "pk": map[string]any{"field_id": "id", "value": "cardinality-trigger"},
+		"authored_schema": authoredSchema, "operation": "insert", "client_version": phase4ClientVersion,
+		"columns": map[string]any{"value": "trigger"}, "origin": "application",
+	})
+	if err != nil {
+		t.Fatalf("encode the insert row identity: %v", err)
+	}
+	runtimeWrite, err := controller.ApplicationWrite(scenarios.Operation{ContractOperation: "local", Name: "write", Payload: write})
+	if err != nil {
+		t.Fatalf("resolve the runtime identity of the inserted row: %v", err)
+	}
+	var runtimeInsert struct {
+		PK map[string]string `json:"pk"`
+	}
+	if err := json.Unmarshal(runtimeWrite.Payload, &runtimeInsert); err != nil || len(runtimeInsert.PK) != 1 {
+		t.Fatalf("decode the runtime identity of the inserted row: %v", err)
+	}
+	var insertedKey string
+	for _, value := range runtimeInsert.PK {
+		insertedKey = value
+	}
+	pausedBarrier("the accepted insert with a same-row trigger update", func() scenarios.Operation {
+		return push("60", "61", 1, 0, pushedMutation{op: "insert", authoredKey: "cardinality-trigger", runtimeKey: insertedKey, value: "trigger"})
+	})
+
+	// One push has an accepted update and a conflicting delete of the inserted
+	// row. The server keeps the inserted row, so its binding must remain.
+	if observation, err := controller.ProcessStep(ctx, nil, push("70", "71", 1, 1,
+		pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-mixed"},
+		pushedMutation{op: "delete", authoredKey: "cardinality-trigger", runtimeKey: insertedKey, baseVersion: "00000000-0000-4000-8000-000000000000"},
+	)); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the mixed application push: observation=%#v err=%v", observation, err)
+	}
+	captured, err := controller.Capture(ctx, nil, []string{"server-state"})
+	if err != nil || len(captured) != 1 {
+		t.Fatalf("capture server state after the mixed application push: %v", err)
+	}
+	conflictingRowBound := false
+	for _, row := range captured[0].StateFacts.Rows {
+		if row.TableID == "items" && row.CanonicalWireJSON == `"cardinality-trigger"` {
+			conflictingRowBound = true
+		}
+	}
+	if !conflictingRowBound {
+		t.Fatal("the rejected delete removed the binding of a row that the server kept")
+	}
+
+	// awaitFence waits until the worker materializes the fence of the last
+	// push, so the next push reads that push's row as its base version.
+	awaitFence := func(name string) {
+		t.Helper()
+		mutationID := fmt.Sprintf("00000000-0000-4000-8e00-%012d", pushes*10+1)
+		for {
+			var materialized bool
+			if err := database.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM synchro.sync_write_fences
+					WHERE mutation_id = $1 AND coverage = 'materialized'
+				)`, mutationID).Scan(&materialized); err != nil {
+				t.Fatalf("read the materialization of the %s push: %v", name, err)
+			}
+			if materialized {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("the %s push did not materialize: %v", name, ctx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	// A later write replaces the captured row of an earlier accepted push
+	// before the earlier push is materialized. The earlier push binds through
+	// its sealed outcome and fence chain, so it still materializes.
+	earlier := push("80", "81", 1, 0, pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-earlier"})
+	awaitFence("earlier")
+	// The later push also writes the inserted row, so its batch shape differs
+	// and each authored push binds one runtime batch.
+	later := push("90", "91", 2, 0,
+		pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-later"},
+		pushedMutation{op: "update", authoredKey: "cardinality-trigger", runtimeKey: insertedKey, baseVersion: currentVersion(insertedKey), value: "application-push-later"},
+	)
+	awaitFence("later")
+	if observation, err := controller.ProcessStep(ctx, nil, earlier); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the earlier push after a later write replaced its row: observation=%#v err=%v", observation, err)
+	}
+	if observation, err := controller.ProcessStep(ctx, nil, later); err != nil || observation.Disposition != "success" {
+		t.Fatalf("materialize the later push: observation=%#v err=%v", observation, err)
 	}
 }
