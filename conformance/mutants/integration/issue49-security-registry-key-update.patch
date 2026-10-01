@@ -1,6 +1,6 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
 @@ -1751,10 +1751,7 @@
  SET search_path = pg_catalog, synchro, pg_temp
  AS $$

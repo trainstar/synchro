@@ -2453,9 +2453,9 @@ PODS:
     - React-utils (= 0.83.0)
     - SocketRocket
   - SocketRocket (0.7.1)
-  - Synchro (0.4.0):
+  - Synchro (0.4.0-rc.1):
     - GRDB.swift (~> 7.0)
-  - SynchroReactNative (0.4.0):
+  - SynchroReactNative (0.4.0-rc.1):
     - boost
     - DoubleConversion
     - fast_float
@@ -2482,9 +2482,9 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.4.0)
+    - Synchro (= 0.4.0-rc.1)
     - Yoga
-  - SynchroReactNative/Tests (0.4.0):
+  - SynchroReactNative/Tests (0.4.0-rc.1):
     - boost
     - DoubleConversion
     - fast_float
@@ -2511,7 +2511,7 @@ PODS:
     - ReactCommon/turbomodule/bridging
     - ReactCommon/turbomodule/core
     - SocketRocket
-    - Synchro (= 0.4.0)
+    - Synchro (= 0.4.0-rc.1)
     - Yoga
   - Yoga (0.0.0)
 
@@ -2852,8 +2852,8 @@ SPEC CHECKSUMS:
   ReactCodegen: 10a61330b137caaad6f7fbe7f5d0e7a40d621700
   ReactCommon: c6cd81778336e767e27fe63c6707dd6b735fff5c
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: 42fd7b811f7f94e1c0896cbd6997a3de92947a59
-  SynchroReactNative: 7d24b19787f5f81a6062c8ec716b6aecf938871b
+  Synchro: 668a797b89a41bbfb905faed976eb6204e8d768c
+  SynchroReactNative: e31b85b83b5c14eaa2be7933fab948a7903ee7d0
   Yoga: 7a9f26c70daf0b08d82ec2f862e9a8872442129e
 
 PODFILE CHECKSUM: 998a4402881d1f26904986555a044010b453070d

@@ -4,6 +4,8 @@ description: Update the synchro_pg PostgreSQL extension from the 0.3.1 baseline 
 ---
 
 This procedure updates an installed `synchro_pg` extension to a new version.
+The [changelog](https://github.com/trainstar/synchro/blob/master/CHANGELOG.md)
+lists the changes in each version.
 
 The supported update path starts at the `0.3.1` baseline.
 A state before `0.3.1` has no update path.
@@ -95,6 +97,15 @@ these steps before you update:
 4. Release the application code that calls the atomic API. The
    [server version requirement](/synchro/clients/application-sql/#server-version-requirement)
    of the atomic API applies.
+
+Version 0.4.0 evaluates each membership and impact function as its owner in a
+security-restricted operation. The update does not check the functions that
+are already registered. If the owner cannot read a relation that the function
+reads, evaluation fails and capture of the registered relation stops. Before
+you update, give each function owner SELECT on each relation that its function
+reads, and USAGE on the schema of that relation. See
+[ADR 004](/synchro/architecture/decisions/004-membership-schema-and-retention/)
+for the evaluation rules.
 
 Version 0.4.0 rejects a database-generated key for a registration with push
 policy `enabled`. Clients cannot write an identity `ALWAYS` column. Clients can

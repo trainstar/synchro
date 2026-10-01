@@ -25,6 +25,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # A release candidate X.Y.Z-rc.N publishes without becoming the default install.
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?$")
+LINK_REFERENCE = re.compile(r"^\[[^\]]+\]: \S+$")
 SLSA_PROVENANCE = re.compile(r"^https://slsa[.]dev/provenance/v[0-9]+(?:[.][0-9]+)?$")
 MAVEN_STATES = {"PENDING", "VALIDATING", "VALIDATED", "PUBLISHING", "PUBLISHED", "FAILED"}
 NPM_PACKAGE = "@trainstar/synchro-react-native"
@@ -387,6 +388,25 @@ def classify_npm(identity: dict[str, Any], npm: Any) -> str:
     if latest is not None and (not VERSION.fullmatch(latest) or version_key(latest) > version_key(version)):
         raise PublicationError(f"npm latest points to competing version {latest} and needs explicit resolution")
     return "published-candidate"
+
+
+def release_notes(changelog: str, version: str) -> str:
+    if not VERSION.fullmatch(version):
+        raise PublicationError("release notes version is invalid")
+    heading = re.compile(rf"^## \[{re.escape(version)}\] - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$")
+    lines = changelog.splitlines()
+    starts = [index for index, line in enumerate(lines) if heading.fullmatch(line)]
+    if len(starts) != 1:
+        raise PublicationError(f"CHANGELOG.md needs exactly one dated section for {version}")
+    section = []
+    for line in lines[starts[0] + 1:]:
+        if line.startswith("## ") or LINK_REFERENCE.fullmatch(line):
+            break
+        section.append(line)
+    body = "\n".join(section).strip()
+    if not body:
+        raise PublicationError(f"CHANGELOG.md section for {version} is empty")
+    return body + "\n"
 
 
 def is_prerelease(version: str) -> bool:
@@ -837,6 +857,10 @@ def main() -> int:
     receipt_parser.add_argument("--release-manifest", type=Path, required=True)
     receipt_parser.add_argument("--expected-run-id", required=True)
     receipt_parser.add_argument("--output", type=Path, required=True)
+    notes_parser = subparsers.add_parser("release-notes")
+    notes_parser.add_argument("--changelog", type=Path, required=True)
+    notes_parser.add_argument("--version", required=True)
+    notes_parser.add_argument("--output", type=Path, required=True)
     candidate_parser = subparsers.add_parser("validate-candidate")
     candidate_parser.add_argument("--source-commit", required=True)
     candidate_parser.add_argument("--version", required=True)
@@ -896,6 +920,9 @@ def main() -> int:
                     args.expected_run_id,
                 ),
             )
+        elif args.command == "release-notes":
+            changelog = args.changelog.read_text(encoding="utf-8")
+            args.output.write_text(release_notes(changelog, args.version), encoding="utf-8")
         elif args.command == "validate-candidate":
             validate_candidate_identity(args.source_commit, args.version)
         else:

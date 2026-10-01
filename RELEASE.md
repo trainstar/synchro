@@ -74,12 +74,13 @@ Do not continue when a required control, credential, or runtime is unavailable.
 9. Keep only the `Synchro` and `SynchroReactNative` changes in that `Podfile.lock`.
 10. Run `make version-check`.
 11. Confirm the support matrix in `conformance/support-matrix.json`.
-12. Merge the preparation changes into `dev` through a pull request.
-13. Promote `dev` into `master` through a checked pull request with a merge commit.
-14. Record the exact merged `master` SHA.
-15. Confirm Candidate CI passed for that exact `master` commit.
-16. Dispatch Release from the `master` head.
-17. Merge `master` back into `dev` through a pull request with a merge commit.
+12. Move the `Unreleased` entries of `CHANGELOG.md` into the version section. Use "At release preparation" in "Release Notes".
+13. Merge the preparation changes into `dev` through a pull request.
+14. Promote `dev` into `master` through a checked pull request with a merge commit.
+15. Record the exact merged `master` SHA.
+16. Confirm Candidate CI passed for that exact `master` commit.
+17. Dispatch Release from the `master` head.
+18. Merge `master` back into `dev` through a pull request with a merge commit.
 
 The Release workflow rejects a `master` commit without a successful Candidate run.
 It also rejects a version without exactly one matching milestone.
@@ -134,6 +135,49 @@ Set `ORIGINAL_RUN_ID` to the decimal ID of the original Release run that owns th
 `resume_run_id` must identify that run.
 It does not authorize a different candidate, version, source SHA, or artifact set.
 Recovery requires the original candidate's successful `master` CI evidence.
+
+## Release Notes
+
+`CHANGELOG.md` is the sole source of release notes.
+It uses the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) format.
+Write each entry for application developers and operators, not for repository maintainers.
+
+### During development
+
+1. Keep one `## [Unreleased]` section at the top of `CHANGELOG.md`.
+2. Add an entry under `Unreleased` in each pull request that changes observable behavior.
+3. Put the entry under `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security`.
+
+A pull request that changes only tests, CI, or internal structure needs no entry.
+
+### Entry rules
+
+- State the observable behavior. Do not copy pull request titles, merges, or commit messages.
+- Start each breaking entry with `Breaking:`, and link the upgrade procedure.
+- Put a deprecation in a release before the release that removes the item.
+- Link the issue of each entry.
+- Use absolute links. The release body cannot resolve a repository-relative link.
+- Omit an empty subsection.
+
+### At release preparation
+
+1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` or `## [X.Y.Z-rc.N] - YYYY-MM-DD`. Use the preparation date.
+2. Add a new empty `## [Unreleased]` section above it.
+3. Update the comparison links at the end of the file:
+   - `[X.Y.Z]: https://github.com/trainstar/synchro/compare/v<previous>...vX.Y.Z`
+   - `[Unreleased]: https://github.com/trainstar/synchro/compare/vX.Y.Z...HEAD`
+4. Review every entry against the merged issues of the release milestone.
+
+A release candidate section lists the changes since the previous published version.
+The `X.Y.Z` section lists every change since the previous release, including the changes of its candidates.
+Consumers that skip the candidates then see the complete change set.
+Do not edit the section of a published version.
+
+### Workflow enforcement
+
+The Release workflow requires exactly one dated section for `VERSION`.
+The candidate job fails before the build when that section is missing or empty.
+The publish job uses that section from the candidate commit as the GitHub release body.
 
 ## Release Candidate
 
@@ -284,7 +328,7 @@ The manifest records candidate environment resolution in `release-manifest.json`
 6. Attest the sealed files with the exact sealed release manifest.
 7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry. A release candidate does not need `NPM_DIST_TAG_TOKEN`.
 8. Create immutable `v<version>` and `api/go/v<version>` tags.
-9. Publish GitHub assets without marking them latest. Mark a release candidate as a GitHub prerelease.
+9. Publish GitHub assets without marking them latest. The release body is the `CHANGELOG.md` section of the version. Mark a release candidate as a GitHub prerelease.
 10. Verify source and asset access.
 11. Publish Maven and verify public consumption.
 12. Publish npm through trusted OIDC under the `candidate` dist-tag, or under `next` for a release candidate.

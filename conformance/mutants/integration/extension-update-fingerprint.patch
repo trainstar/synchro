@@ -10,9 +10,9 @@ diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.1--0.3.2.sql b/extensions
 -SET installed_fingerprint = synchro.synchro_build_fingerprint(),
 -    installed_at = pg_catalog.now()
 -WHERE singleton;
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0-rc.1.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0-rc.1.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.3.2--0.4.0-rc.1.sql
 @@ -367,8 +367,3 @@ ALTER TABLE synchro.sync_wal_progress
                     AND acknowledged_end_lsn <= processed_end_lsn));
  

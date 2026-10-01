@@ -1653,7 +1653,7 @@ fn projection_view_update_rebuild_matches_prepared_definition() {
     )
     .expect("replace projection view with a prior definition");
     let prior = definition();
-    let script = include_str!("../../sql/synchro_pg--0.3.2--0.4.0.sql");
+    let script = include_str!("../../sql/synchro_pg--0.3.2--0.4.0-rc.1.sql");
     let rebuild = &script[script
         .find("DO $rebuild$")
         .expect("update script rebuilds projection views")..];
