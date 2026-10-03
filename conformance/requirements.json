@@ -808,7 +808,7 @@
       "id": "SYNC-SCOPE-004",
       "title": "Deterministic scope function contract",
       "category": "scope",
-      "statement": "Membership, impact, and assignment functions satisfy the registered signatures and restrictions, including schema qualification, LANGUAGE SQL, STABLE, SECURITY INVOKER, declared dependencies, and positive bounds, before activation and throughout use.",
+      "statement": "Membership and impact functions satisfy their registered signatures and restrictions before activation and throughout use. Their requirements include schema qualification, LANGUAGE SQL, STABLE, SECURITY INVOKER, declared dependencies, and positive bounds. Assignment functions satisfy their separate signature and restrictions. Their result count bound is 1 through 1000, or SQL NULL for administrator-selected unbounded evaluation.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#deterministic-scope-function-contract" }]
@@ -1015,7 +1015,7 @@
       "id": "SYNC-SCOPE-008",
       "title": "Assignment function contract",
       "category": "scope",
-      "statement": "At most one registered assignment function contributes scopes, registration rejects every rule violation, and an evaluation with a changed definition, an invalid result, or more results than max_scopes fails the connect or pull with sync_integrity_failure and no assignment change.",
+      "statement": "At most one registered assignment function contributes scopes. Registration rejects every rule violation. The default bound is 1000. Each explicit non-NULL bound is an integer from 1 through 1000. An administrator can select SQL NULL to evaluate the complete DISTINCT result set without an assignment-result count limit. Authorization, function restrictions, definition hash checks, result validation, and reconciliation remain required. A NULL function name returns SQL NULL and changes no registration, also when the bound is NULL or invalid. Both modes reject NULL or blank scope results and scope results that start with user:. A changed definition, an invalid result, or bounded overflow fails the complete connect or pull with sync_integrity_failure and no assignment change.",
       "required_proof_types": ["server-black-box"],
       "applicable_components": ["postgresql-server"],
       "normative_references": [{ "path": "docs/src/content/docs/spec/04-invariants.mdx", "anchor": "#registered-scope-assignment-function" }]

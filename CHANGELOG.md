@@ -9,6 +9,10 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+### Added
+
+- Operators can register an assignment function with a SQL NULL bound to return all distinct assigned scopes. ([#300](https://github.com/trainstar/synchro/issues/300))
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.

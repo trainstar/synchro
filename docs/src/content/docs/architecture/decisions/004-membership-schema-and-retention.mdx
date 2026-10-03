@@ -286,8 +286,18 @@ An operator registers one assignment function with
 `synchro_register_assignment_function(p_function text, p_max_scopes integer
 DEFAULT 1000)` and removes it with `synchro_unregister_assignment_function()`.
 Only `synchro_operator` can execute both functions. A second registration
-replaces the first in the same transaction. `p_max_scopes` is an integer from 1
-through 1000. The registration actor is the outer session user.
+replaces the first in the same transaction. The registration function returns
+`void`. The registration actor is the outer session user.
+
+The default `p_max_scopes` is 1000.
+A non-NULL value must be an integer from 1 through 1000.
+An operator can select SQL NULL to remove the assignment-result count limit.
+That choice requires evaluation of the complete DISTINCT result set.
+It changes no authorization, function restriction, definition hash check,
+result validation, or reconciliation rule.
+
+A NULL `p_function` returns SQL NULL and changes no registration.
+This rule also applies when `p_max_scopes` is NULL or invalid.
 
 ```text
 assignment_function(p_user_id text)
@@ -331,8 +341,11 @@ hashes differ, so the stored hash identifies the checked definition. Connect
 and pull call the function once with the canonical user ID. Before the call,
 the server confirms that the OID exists and that the definition hash is
 unchanged. Each result must be
-non-null, must be nonempty after trim, and must not start with `user:`. More
-than `max_scopes` distinct results is a failure. A failure aborts the connect
+non-null, must be nonempty after trim, and must not start with `user:`.
+These result rules apply to bounded and unbounded evaluation.
+If `max_scopes` is non-NULL, more than `max_scopes` distinct results is a failure.
+If `max_scopes` is NULL, evaluation returns the complete DISTINCT result set.
+A failure aborts the connect
 or pull transaction and returns `500 sync_integrity_failure`. Health reports a
 missing function or a changed definition hash as a failed check.
 

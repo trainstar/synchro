@@ -122,12 +122,28 @@ Schema-qualify every application relation in the function body.
 
 Only one assignment function can be registered.
 A second registration replaces the first registration.
-The second argument sets `max_scopes`, from 1 through 1000. The default is 1000.
+The registration function keeps its `(text, integer)` identity and returns `void`.
+Only `synchro_operator` can execute registration and removal.
+The second argument sets `max_scopes`. The default is 1000.
+Each non-NULL bound must be an integer from 1 through 1000.
+An operator can select SQL NULL for the complete DISTINCT results without an assignment-result count limit:
+
+```sql
+SELECT synchro.synchro_register_assignment_function('public.project_scopes', NULL);
+```
+
+This choice removes only the result count limit.
+Authorization, function restrictions, definition hash checks, result validation, and reconciliation remain required.
+A NULL function name returns SQL NULL and changes no registration.
+This rule also applies when the bound is NULL or invalid.
 Use `synchro.synchro_unregister_assignment_function()` to remove the registration.
 
 Connect and pull call the function once with the canonical user ID.
 Each result must be non-null and nonempty after trim. A result must not start with `user:`.
-More than `max_scopes` distinct results is a failure.
+A NULL bound does not permit a NULL scope result.
+These result rules apply to bounded and unbounded evaluation.
+If `max_scopes` is non-NULL, more than `max_scopes` distinct results is a failure.
+If `max_scopes` is NULL, evaluation returns the complete DISTINCT result set.
 The server also confirms that the function exists and that its definition is unchanged since registration.
 A failure aborts the connect or pull and returns `500 sync_integrity_failure`. It changes no assignment state.
 After you change the function definition, register the function again.
