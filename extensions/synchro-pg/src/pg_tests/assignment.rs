@@ -756,7 +756,7 @@ fn assignment_results_above_bound_fail_connect() {
 }
 
 #[pg_test]
-fn unbounded_assignment_delivers_all_distinct_scopes_only_to_their_user() {
+fn unbounded_assignment_delivers_distinct_scopes_by_user() {
     setup_test_tables();
     create_assignment_members();
     create_valid_assignment_function("assigned_scopes");
