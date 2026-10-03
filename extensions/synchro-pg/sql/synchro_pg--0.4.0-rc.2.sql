@@ -687,7 +687,7 @@ CREATE TABLE IF NOT EXISTS sync_assignment_function (
     function_oid OID NOT NULL,
     function_schema TEXT NOT NULL,
     function_name TEXT NOT NULL,
-    max_scopes INTEGER NOT NULL CHECK (max_scopes BETWEEN 1 AND 1000),
+    max_scopes INTEGER CHECK (max_scopes BETWEEN 1 AND 1000),
     definition_sha256 TEXT NOT NULL CHECK (definition_sha256 ~ '^[0-9a-f]{64}$'),
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -2178,7 +2178,7 @@ AS 'MODULE_PATHNAME', 'synchro_mark_stream_reset_snapshot_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:510
+-- synchro-pg/src/portable_seed.rs:520
 -- synchro_pg::portable_seed::synchro_portable_seed_manifest
 CREATE  FUNCTION "synchro_portable_seed_manifest"(
 	"p_page_limit" INT DEFAULT 1000 /* i32 */
@@ -2189,7 +2189,7 @@ AS 'MODULE_PATHNAME', 'synchro_portable_seed_manifest_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:683
+-- synchro-pg/src/portable_seed.rs:693
 -- synchro_pg::portable_seed::synchro_portable_seed_scope
 CREATE  FUNCTION "synchro_portable_seed_scope"(
 	"p_scope_id" TEXT, /* &str */
@@ -2371,10 +2371,9 @@ AS 'MODULE_PATHNAME', 'synchro_rebuild_contract_wrapper';
 -- synchro-pg/src/portable_seed.rs:293
 -- synchro_pg::portable_seed::synchro_register_assignment_function
 CREATE  FUNCTION "synchro_register_assignment_function"(
-	"p_function" TEXT, /* &str */
-	"p_max_scopes" INT DEFAULT 1000 /* i32 */
-) RETURNS void
-STRICT
+	"p_function" TEXT, /* core::option::Option<&str> */
+	"p_max_scopes" INT DEFAULT 1000 /* core::option::Option<i32> */
+) RETURNS VOID /* core::option::Option<()> */
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
@@ -2527,7 +2526,7 @@ AS 'MODULE_PATHNAME', 'synchro_tables_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:329
+-- synchro-pg/src/portable_seed.rs:336
 -- synchro_pg::portable_seed::synchro_unregister_assignment_function
 CREATE  FUNCTION "synchro_unregister_assignment_function"() RETURNS void
 STRICT
@@ -2536,7 +2535,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/portable_seed.rs:469
+-- synchro-pg/src/portable_seed.rs:479
 -- synchro_pg::portable_seed::synchro_unregister_shared_scope
 CREATE  FUNCTION "synchro_unregister_shared_scope"(
 	"p_scope_id" TEXT /* &str */
