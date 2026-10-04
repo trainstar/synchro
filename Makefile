@@ -149,6 +149,7 @@
 	rn-watchman-reset \
 	rn-ios-pods \
 	android-emulator-prepare \
+	test-android-emulator-prepare \
 	test-rn-e2e-ios-build \
 	test-rn-e2e-ios-run \
 	test-rn-e2e-ios \
@@ -466,6 +467,7 @@ help:
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
 	@echo "  android-emulator-prepare - Keep the booted Android test device awake and focused"
+	@echo "  test-android-emulator-prepare - Test Android preparation without a device"
 	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter for ADAPTER_TEST_URL"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
@@ -1061,6 +1063,9 @@ test-release-artifacts: test-python-runner
 test-release-publish: test-python-runner
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish
 
+test-android-emulator-prepare: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_android_emulator_prepare
+
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
 
@@ -1114,6 +1119,7 @@ ci-source-quality:
 	$(MAKE) test-local-postgres
 	$(MAKE) test-release-artifacts
 	$(MAKE) test-release-publish
+	$(MAKE) test-android-emulator-prepare
 	$(MAKE) test-server-consumer-helper
 	$(MAKE) test-packaged-smoke-structure
 	$(MAKE) test-ci-process-lifecycle
@@ -1966,24 +1972,28 @@ android-emulator-prepare:
 		set -- "$$adb"; \
 		if [ -n "$$serial" ]; then set -- "$$@" -s "$$serial"; fi; \
 		"$$@" wait-for-device; \
+		"$$@" shell 'for required_command in svc settings input wm am cmd dumpsys; do command -v "$$required_command" >/dev/null 2>&1 || { echo "Required Android command missing: $$required_command" >&2; exit 1; }; done'; \
 		"$$@" shell svc power stayon true; \
 		"$$@" shell settings put system screen_off_timeout 2147483647; \
 		"$$@" shell settings put global hide_error_dialogs 1; \
-		"$$@" shell locksettings set-disabled true >/dev/null; \
 		"$$@" shell input keyevent 224; \
 		"$$@" shell wm dismiss-keyguard; \
 		"$$@" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null; \
 		"$$@" shell input keyevent 3; \
-		home_component="$$("$$@" shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tr -d '\r' | tail -n 1)"; \
-		home_package="$${home_component%%/*}"; \
-		test -n "$$home_package"; \
+		home_resolution="$$("$$@" shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME)"; \
+		home_component="$$(printf '%s\n' "$$home_resolution" | tr -d '\r' | tail -n 1)"; \
+		case "$$home_component" in */*) home_package="$${home_component%%/*}"; home_component="$${home_component#*/}" ;; *) home_package="" ;; esac; \
+		if [ -z "$$home_package" ] || [ -z "$$home_component" ] || [ "$$home_component" != "$${home_component#*/}" ]; then \
+			echo "Android Home resolution must return package/component. Check the device Home activity." >&2; exit 1; \
+		fi; \
 		for _ in $$(seq 1 30); do \
-			if "$$@" shell dumpsys window | grep -F 'mCurrentFocus=' | grep -F "$$home_package" >/dev/null; then exit 0; fi; \
+			window_output="$$("$$@" shell dumpsys window)"; \
+			if printf '%s\n' "$$window_output" | grep -F 'mCurrentFocus=' | grep -F "$$home_package" >/dev/null; then exit 0; fi; \
 			sleep 1; \
 		done; \
 		echo "Android Home did not receive window focus" >&2; \
 		"$$@" shell dumpsys power | grep -E 'mWakefulness=|mStayOn=' >&2 || true; \
-		"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
+		if window_output="$$("$$@" shell dumpsys window)"; then printf '%s\n' "$$window_output" | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; fi; \
 		exit 1
 
 .PHONY: test-rn-e2e-android-smoke
