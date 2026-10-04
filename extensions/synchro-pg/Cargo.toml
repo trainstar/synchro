@@ -36,4 +36,4 @@ sha2 = "0.10"
 sha2 = "0.10"
 
 [dev-dependencies]
-pgrx-tests = "0.17"
+pgrx-tests = "0.19"
