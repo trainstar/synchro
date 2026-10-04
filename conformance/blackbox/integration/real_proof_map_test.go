@@ -142,6 +142,7 @@ var nonScenarioRealTests = map[string]string{
 	"TestRealExtensionReinstallRebindsWorkerSlot":                   "regression",
 	"TestRealFloatWire":                                             "regression",
 	"TestRealHTTPHarness":                                           "framework",
+	"TestRealLargeScopeAssignmentLifecycle":                         "regression",
 	"TestRealMutationControlMutationConservation":                   "adversarial",
 	"TestRealNativeCaptureServerObservationSignals":                 "regression",
 	"TestRealNativeMaterializationBindsEachSourceTransaction":       "regression",

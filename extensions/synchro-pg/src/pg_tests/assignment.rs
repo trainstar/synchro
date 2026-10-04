@@ -181,6 +181,12 @@ fn assert_connect_rejected(user_id: &str, client_id: &str) {
     )
     .expect("count rejected clients");
     assert_eq!(clients, Some(0));
+    let history = Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM synchro.sync_client_scope_history WHERE user_id = $1",
+        &[user_id.into()],
+    )
+    .expect("count rejected assignment history");
+    assert_eq!(history, Some(0));
 }
 
 fn assignment_sources(user_id: &str, client_id: &str) -> Value {
@@ -213,6 +219,61 @@ fn assignment_registration_stores_valid_function() {
             "definition_matches": true
         }))
     );
+}
+
+#[pg_test]
+fn assignment_registration_stores_unbounded_function() {
+    create_assignment_members();
+    create_valid_assignment_function("assigned_scopes");
+
+    let registered = Spi::get_one::<bool>(
+        "SELECT synchro.synchro_register_assignment_function(
+             'public.assigned_scopes', NULL
+         ) IS NOT NULL",
+    )
+    .expect("register assignment function without a bound");
+
+    assert_eq!(registered, Some(true));
+    assert_eq!(
+        assignment_registration(),
+        Some(json!({
+            "function": "public.assigned_scopes(p_user_id text)",
+            "function_schema": "public",
+            "function_name": "assigned_scopes",
+            "max_scopes": null,
+            "definition_matches": true
+        }))
+    );
+}
+
+#[pg_test]
+fn assignment_registration_with_null_name_preserves_complete_state() {
+    create_assignment_members();
+    create_valid_assignment_function("assigned_scopes");
+    register_assignment_function("assigned_scopes", 5);
+    let before = Spi::get_one::<String>(
+        "SELECT to_jsonb(registration)::text
+         FROM synchro.sync_assignment_function AS registration",
+    )
+    .expect("load complete assignment registration");
+    assert!(before.is_some());
+
+    for call in [
+        "synchro.synchro_register_assignment_function(NULL)",
+        "synchro.synchro_register_assignment_function(NULL, NULL)",
+        "synchro.synchro_register_assignment_function(NULL, 0)",
+    ] {
+        let returned_null = Spi::get_one::<bool>(&format!("SELECT {call} IS NULL"))
+            .expect("register assignment function with a null name");
+        let after = Spi::get_one::<String>(
+            "SELECT to_jsonb(registration)::text
+             FROM synchro.sync_assignment_function AS registration",
+        )
+        .expect("load complete assignment registration after null name");
+
+        assert_eq!(returned_null, Some(true), "{call}");
+        assert_eq!(after, before, "{call}");
+    }
 }
 
 #[pg_test]
@@ -488,11 +549,17 @@ fn assignment_registration_rejects_relation_without_owner_select() {
     create_valid_assignment_function("assigned_scopes");
     transfer_assignment_function("assigned_scopes", owner);
 
-    as_assignment_owner(owner, || reject_assignment_registration("assigned_scopes", 1000));
+    as_assignment_owner(owner, || {
+        reject_assignment_registration("assigned_scopes", 1000)
+    });
     let rejected = assignment_registration();
-    Spi::run(&format!("GRANT SELECT ON public.assignment_members TO {owner}"))
-        .expect("grant assignment relation select");
-    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+    Spi::run(&format!(
+        "GRANT SELECT ON public.assignment_members TO {owner}"
+    ))
+    .expect("grant assignment relation select");
+    as_assignment_owner(owner, || {
+        register_assignment_function("assigned_scopes", 1000)
+    });
 
     assert_eq!(rejected, None);
     assert!(assignment_registration().is_some());
@@ -523,11 +590,17 @@ fn assignment_registration_rejects_schema_without_owner_usage() {
     restrict_assignment_function("assigned_scopes", "TEXT");
     transfer_assignment_function("assigned_scopes", owner);
 
-    as_assignment_owner(owner, || reject_assignment_registration("assigned_scopes", 1000));
+    as_assignment_owner(owner, || {
+        reject_assignment_registration("assigned_scopes", 1000)
+    });
     let rejected = assignment_registration();
-    Spi::run(&format!("GRANT USAGE ON SCHEMA assignment_private TO {owner}"))
-        .expect("grant private assignment schema usage");
-    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+    Spi::run(&format!(
+        "GRANT USAGE ON SCHEMA assignment_private TO {owner}"
+    ))
+    .expect("grant private assignment schema usage");
+    as_assignment_owner(owner, || {
+        register_assignment_function("assigned_scopes", 1000)
+    });
 
     assert_eq!(rejected, None);
     assert!(assignment_registration().is_some());
@@ -548,7 +621,9 @@ fn assignment_evaluation_runs_as_function_owner() {
     );
     restrict_assignment_function("assigned_scopes", "TEXT");
     transfer_assignment_function("assigned_scopes", owner);
-    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+    as_assignment_owner(owner, || {
+        register_assignment_function("assigned_scopes", 1000)
+    });
 
     let response = register_client("u1", "c1");
 
@@ -577,7 +652,9 @@ fn assignment_evaluation_query_to_xml_cannot_read_synchro() {
     );
     restrict_assignment_function("assigned_scopes", "TEXT");
     transfer_assignment_function("assigned_scopes", owner);
-    as_assignment_owner(owner, || register_assignment_function("assigned_scopes", 1000));
+    as_assignment_owner(owner, || {
+        register_assignment_function("assigned_scopes", 1000)
+    });
 
     assert!(assignment_registration().is_some());
     assert_connect_rejected("u1", "c1");
@@ -676,6 +753,74 @@ fn assignment_results_above_bound_fail_connect() {
         vec!["team:alpha", "team:beta", "user:u1"]
     );
     assert_connect_rejected("u2", "c2");
+}
+
+#[pg_test]
+fn unbounded_assignment_delivers_distinct_scopes_by_user() {
+    setup_test_tables();
+    create_assignment_members();
+    create_valid_assignment_function("assigned_scopes");
+    Spi::run(
+        "INSERT INTO public.assignment_members (user_id, scope_id)
+         SELECT 'u1', 'team:' || scope_number::text
+         FROM generate_series(1, 1001) AS scope_number;
+         INSERT INTO public.assignment_members (user_id, scope_id)
+         VALUES ('u1', 'team:1'), ('u2', 'team:other')",
+    )
+    .expect("insert assignment members above the default bound");
+    Spi::run("SELECT synchro.synchro_register_assignment_function('public.assigned_scopes')")
+        .expect("register assignment function with default bound");
+
+    assert_connect_rejected("u1", "c1");
+
+    Spi::run("SELECT synchro.synchro_register_assignment_function('public.assigned_scopes', NULL)")
+        .expect("register assignment function without a bound");
+    let response = register_client("u1", "c1");
+    assert!(response.get("error").is_none(), "{response}");
+    let mut expected_scopes = (1..=1001)
+        .map(|scope_number| format!("team:{scope_number}"))
+        .collect::<Vec<_>>();
+    expected_scopes.push("user:u1".to_string());
+    expected_scopes.sort();
+    assert_eq!(client_scope_ids("u1", "c1"), expected_scopes);
+    let sources = assignment_sources("u1", "c1");
+    assert_eq!(
+        sources.as_object().expect("assignment source map").len(),
+        1002
+    );
+    assert_eq!(sources["user:u1"], "identity");
+    for scope_number in 1..=1001 {
+        assert_eq!(sources[format!("team:{scope_number}")], "assignment_rule");
+    }
+
+    let other_response = register_client("u2", "c2");
+    assert!(other_response.get("error").is_none(), "{other_response}");
+    assert_eq!(client_scope_ids("u2", "c2"), vec!["team:other", "user:u2"]);
+    assert_eq!(
+        assignment_sources("u2", "c2"),
+        json!({ "team:other": "assignment_rule", "user:u2": "identity" })
+    );
+}
+
+#[pg_test]
+fn unbounded_assignment_rejects_invalid_results_atomically() {
+    setup_test_tables();
+    create_assignment_members();
+    create_valid_assignment_function("assigned_scopes");
+    Spi::run("SELECT synchro.synchro_register_assignment_function('public.assigned_scopes', NULL)")
+        .expect("register assignment function without a bound");
+    insert_assignment_members(&[
+        ("u1", Some("team:alpha")),
+        ("u1", None),
+        ("u2", Some("team:beta")),
+        ("u2", Some("  ")),
+        ("u3", Some("team:gamma")),
+        ("u3", Some("user:u4")),
+    ]);
+
+    assert_connect_rejected("u1", "c1");
+    assert_connect_rejected("u2", "c2");
+    assert_connect_rejected("u3", "c3");
 }
 
 #[pg_test]
@@ -796,6 +941,10 @@ fn assignment_health_fails_for_changed_or_missing_definition() {
     let unregistered = assignment_check();
     register_assignment_function("assigned_scopes", 1000);
     let registered = assignment_check();
+    Spi::run("SELECT synchro.synchro_register_assignment_function('public.assigned_scopes', NULL)")
+        .expect("register assignment function without a bound");
+    let unbounded = assignment_check();
+    register_assignment_function("assigned_scopes", 1000);
     Spi::run(
         "CREATE OR REPLACE FUNCTION public.assigned_scopes(p_user_id TEXT)
          RETURNS SETOF TEXT LANGUAGE sql STABLE SET search_path = pg_catalog, synchro
@@ -812,6 +961,7 @@ fn assignment_health_fails_for_changed_or_missing_definition() {
 
     assert_eq!(unregistered, ok);
     assert_eq!(registered, ok);
+    assert_eq!(unbounded, ok);
     assert_eq!(changed, drifted);
     assert_eq!(reregistered, ok);
     assert_eq!(missing, drifted);

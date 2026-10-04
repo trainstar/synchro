@@ -3,4 +3,4 @@
 package release
 
 // Version is the release version. synchro-version keeps it equal to VERSION.
-const Version = "0.4.0-rc.1"
+const Version = "0.4.0-rc.2"

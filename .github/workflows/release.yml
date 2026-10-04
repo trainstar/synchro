@@ -347,11 +347,11 @@ jobs:
           cells = [
               {"id": "SUP-PG-LINUX-X64-001", "environment": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"}},
               {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "xcode": "16.4"}},
-              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "26.5", "xcode": "26.6"}},
-              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04"}},
-              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04"}},
-              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "26.5", "react_native": "0.83.10", "xcode": "26.6"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04", "react_native": "0.83.10"}},
+              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
+              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.83.10", "xcode": "27.0"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.83.10", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
           PY
@@ -499,6 +499,7 @@ jobs:
     if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
+    timeout-minutes: 240
     permissions:
       actions: read
       contents: read
@@ -507,11 +508,14 @@ jobs:
       matrix:
         include:
           - cell: SUP-ANDROID-MIN-001
-            api: 24
+            api: '24'
+            support_api: '24'
           - cell: SUP-ANDROID-CURRENT-001
-            api: 36
+            api: '37.0'
+            support_api: '37'
           - cell: SUP-RN-ANDROID-CURRENT-001
-            api: 36
+            api: '37.0'
+            support_api: '37'
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -639,10 +643,22 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Check original Android serial selection
+        run: |
+          set -eu
+          original_android_serial=${ANDROID_SERIAL:-}
+          original_kotlin_android_serial=${KOTLIN_ANDROID_SERIAL:-}
+          if [ -n "$original_android_serial" ] && [ -n "$original_kotlin_android_serial" ] && [ "$original_android_serial" != "$original_kotlin_android_serial" ]; then
+            echo "Original ANDROID_SERIAL and KOTLIN_ANDROID_SERIAL values disagree" >&2
+            exit 1
+          fi
+
       - name: Run Android package cell
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: ${{ matrix.api }}
+          system-image-api-level: ${{ matrix.api }}
+          emulator-build: '16428233'
           arch: x86_64
           target: google_apis
           profile: pixel_2
@@ -652,7 +668,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.api }}"
+          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.support_api }}"
 
       - name: Stop local fixture
         if: always()
@@ -691,15 +707,15 @@ jobs:
             xcode: '16.4'
             runner: macos-15
           - cell: SUP-IOS-CURRENT-001
-            ios: '26.5'
-            support: '26.5'
-            xcode: '26.6'
-            runner: macos-26
+            ios: '27.0'
+            support: '27.0'
+            xcode: '27.0'
+            runner: xcode-27
           - cell: SUP-RN-IOS-CURRENT-001
-            ios: '26.5'
-            support: '26.5'
-            xcode: '26.6'
-            runner: macos-26
+            ios: '27.0'
+            support: '27.0'
+            xcode: '27.0'
+            runner: xcode-27
     steps:
       - name: Checkout candidate
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
