@@ -1046,6 +1046,7 @@ release-run-support-cell:
 				SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
 				CLIENT_ARTIFACT_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" CLIENT_ARTIFACTS_PREPARED=1 \
 				PACKAGED_SMOKE_CELL_DIR="$(abspath $(RELEASE_EVIDENCE_DIR))/cells" \
+				PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
 				PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$$artifacts" PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
 				SYNCHRO_CONSUMER_RESOLUTION=prepublication \
 				SYNCHRO_PREPUBLICATION_GIT_URL="file://$(abspath $(RELEASE_CONSUMER_DIR))/source.git" ;; \
@@ -2172,6 +2173,7 @@ test-consumer-swift: client-consumer-apple-artifact
 
 test-consumer-swift-ios: client-consumer-apple-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -2238,6 +2240,7 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \

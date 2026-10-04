@@ -21,6 +21,13 @@ case "$platform" in
   *) printf '%s\n' "unsupported React Native consumer platform: $platform" >&2; exit 1 ;;
 esac
 
+if [ "$platform" = "ios" ] && [ "$mode" = "smoke" ]; then
+  environment_dir="$cell_result.environments"
+  release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
+  test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+  : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
+fi
+
 tarball="$artifact_dir/npm/trainstar-synchro-react-native-$version.tgz"
 maven_dir="$artifact_dir/maven"
 case "$resolution" in
@@ -143,6 +150,7 @@ fi
 
 case "$platform" in
   ios)
+    if [ "$mode" = "smoke" ]; then simulator_udid=$IOS_SIMULATOR_UDID; fi
     ruby - "$work_dir/app/ios/Podfile" "$version" "$synchro_git_url" <<'RUBY'
 podfile, version, synchro_git_url = ARGV
 content = File.read(podfile)
@@ -176,11 +184,16 @@ RUBY
         CODE_SIGNING_ALLOWED=NO \
         DEBUG_INFORMATION_FORMAT=dwarf \
         build
+      set --
+      if [ "$mode" = "smoke" ]; then
+        set -- -destination "platform=iOS Simulator,id=$simulator_udid"
+      fi
       FORCE_BUNDLING=1 xcodebuild \
         -workspace SynchroConsumer.xcworkspace \
         -scheme SynchroConsumer \
         -configuration Release \
         -sdk iphonesimulator \
+        "$@" \
         -derivedDataPath "$work_dir/derived-data" \
         PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
         IPHONEOS_DEPLOYMENT_TARGET=16.0 \
@@ -191,14 +204,6 @@ RUBY
     if [ "$mode" = "build-only" ]; then
       printf '%s\n' "Packaged React Native iOS consumer build passed"
       exit 0
-    fi
-    simulator_udid=${IOS_SIMULATOR_UDID:-$(xcrun simctl list devices booted -j | ruby -rjson -e 'devices = JSON.parse(STDIN.read).fetch("devices").values.flatten; device = devices.find { |item| item["state"] == "Booted" }; abort "no booted iOS simulator" unless device; puts device.fetch("udid")')}
-    if [ -n "${SUPPORT_PLATFORM_VERSION:-}" ]; then
-      simulator_version=$(xcrun simctl list devices -j | ruby -rjson -e 'udid = ARGV.fetch(0); JSON.parse(STDIN.read).fetch("devices").each { |runtime, devices| if devices.any? { |device| device["udid"] == udid }; puts runtime.sub(/^.*\.iOS-/, "").tr("-", "."); exit; end }; abort "simulator runtime was not found"' "$simulator_udid")
-      case "$SUPPORT_PLATFORM_VERSION" in
-        *.*) test "$simulator_version" = "$SUPPORT_PLATFORM_VERSION" ;;
-        *) test "${simulator_version%%.*}" = "$SUPPORT_PLATFORM_VERSION" ;;
-      esac
     fi
     app_path="$work_dir/derived-data/Build/Products/Release-iphonesimulator/SynchroConsumer.app"
     test -f "$app_path/main.jsbundle"
@@ -221,6 +226,9 @@ RUBY
         sleep 15
       done
     }
+    probe="$repo_root/verification/probe_support_environment.py"
+    python3 "$probe" ios --cell "$cell_id" --simulator-udid "$simulator_udid" \
+      --react-native-app "$work_dir/app" --output "$environment_dir/initial.json"
     launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     initial_pid=${launch_output##*: }
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS initial process id is invalid" >&2; exit 1 ;; esac
@@ -256,6 +264,8 @@ RUBY
       exit 1
     fi
     python3 "$tool" author-remote --config "$work_dir/config.json" --output "$work_dir/remote.json"
+    python3 "$probe" ios --cell "$cell_id" --simulator-udid "$simulator_udid" \
+      --react-native-app "$work_dir/app" --output "$environment_dir/resume.json"
     launch_output=$(launch_ios_app "$simulator_udid" dev.synchro.consumer)
     resume_pid=${launch_output##*: }
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native iOS resume process id is invalid" >&2; exit 1 ;; esac
@@ -421,6 +431,10 @@ set -- python3 "$tool" complete-cell \
   --killed-pid "$initial_pid" \
   --remote "$work_dir/remote.json" \
   --server-verification "$work_dir/server.json"
+if [ "$platform" = "ios" ]; then
+  set -- "$@" --initial-environment "$environment_dir/initial.json" \
+    --resume-environment "$environment_dir/resume.json" --release-manifest "$release_manifest"
+fi
 distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-"$tarball $native_artifact"}
 for artifact in $distribution_artifacts; do
   set -- "$@" --artifact "$artifact"
