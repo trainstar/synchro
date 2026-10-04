@@ -1058,7 +1058,7 @@ test-python-runner:
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_run_python_tests
 
 test-release-artifacts: test-python-runner
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts verification.test_support_environments
 
 test-release-publish: test-python-runner
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish
