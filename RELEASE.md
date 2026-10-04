@@ -317,6 +317,8 @@ The gate fails when it cannot prove a public identity.
 A successful build never replaces missing byte or integrity proof.
 
 The manifest records candidate environment resolution in `release-manifest.json`.
+Apple cell evidence records the executed iOS Simulator runtime and Xcode version.
+Candidate preparation checks current stable device releases separately.
 
 ## Automated Release Sequence
 
