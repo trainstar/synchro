@@ -21,11 +21,13 @@ case "$platform" in
   *) printf '%s\n' "unsupported React Native consumer platform: $platform" >&2; exit 1 ;;
 esac
 
-if [ "$platform" = "ios" ] && [ "$mode" = "smoke" ]; then
+if [ "$mode" = "smoke" ]; then
   environment_dir="$cell_result.environments"
   release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
   test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
-  : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
+  if [ "$platform" = "ios" ]; then
+    : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
+  fi
 fi
 
 tarball="$artifact_dir/npm/trainstar-synchro-react-native-$version.tgz"
@@ -44,6 +46,20 @@ fi
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$source_dir/../../.." && pwd -P)
 tool="$repo_root/verification/packaged_smoke.py"
+probe="$repo_root/verification/probe_support_environment.py"
+adb=
+serial=
+if [ "$platform" = "android" ] && [ "$mode" = "smoke" ]; then
+  adb="${ANDROID_HOME:?ANDROID_HOME is required}/platform-tools/adb"
+  test -x "$adb"
+  serial=$(python3 "$probe" resolve-android-serial --sdk-root "$ANDROID_HOME")
+  ANDROID_SERIAL=$serial
+  KOTLIN_ANDROID_SERIAL=$serial
+  export ANDROID_SERIAL KOTLIN_ANDROID_SERIAL
+fi
+adb_command() {
+  "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
+}
 tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
 mkdir -p "$tmp_root"
 work_dir=$(mktemp -d "$tmp_root/synchro-rn-consumer.XXXXXX")
@@ -59,7 +75,6 @@ else
 fi
 installed_platform=
 simulator_udid=
-adb=
 reverse_port=
 collector_reverse_port=
 collector_pid=
@@ -67,15 +82,15 @@ cleanup() {
   case "$installed_platform" in
     ios) xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true ;;
     android)
-      "$adb" shell am force-stop com.synchroconsumer >/dev/null 2>&1 || true
-      "$adb" uninstall com.synchroconsumer >/dev/null 2>&1 || true
+      adb_command shell am force-stop com.synchroconsumer >/dev/null 2>&1 || true
+      adb_command uninstall com.synchroconsumer >/dev/null 2>&1 || true
       ;;
   esac
   if [ -n "$adb" ] && [ -n "$reverse_port" ]; then
-    "$adb" reverse --remove "tcp:$reverse_port" >/dev/null 2>&1 || true
+    adb_command reverse --remove "tcp:$reverse_port" >/dev/null 2>&1 || true
   fi
   if [ -n "$adb" ] && [ -n "$collector_reverse_port" ]; then
-    "$adb" reverse --remove "tcp:$collector_reverse_port" >/dev/null 2>&1 || true
+    adb_command reverse --remove "tcp:$collector_reverse_port" >/dev/null 2>&1 || true
   fi
   if [ -n "$collector_pid" ]; then
     kill "$collector_pid" >/dev/null 2>&1 || true
@@ -347,23 +362,24 @@ GRADLE
       printf '%s\n' "Packaged React Native Android consumer build passed"
       exit 0
     fi
-    adb="${ANDROID_HOME:?ANDROID_HOME is required}/platform-tools/adb"
-    test -x "$adb"
-    "$adb" get-state >/dev/null
+    adb_command get-state >/dev/null
     server_url=$(python3 "$tool" config-value --config "$work_dir/config.json" --field server_url)
     reverse_port=$(python3 -c 'import sys, urllib.parse; value=urllib.parse.urlsplit(sys.argv[1]); print(value.port or (443 if value.scheme == "https" else 80)) if value.hostname in {"127.0.0.1", "localhost"} else None' "$server_url")
     if [ -n "$reverse_port" ]; then
-      "$adb" reverse "tcp:$reverse_port" "tcp:$reverse_port"
+      adb_command reverse "tcp:$reverse_port" "tcp:$reverse_port"
     fi
     collector_reverse_port=$(python3 -c 'import sys, urllib.parse; value=urllib.parse.urlsplit(sys.argv[1]); print(value.port)' "$collector_url")
-    "$adb" reverse "tcp:$collector_reverse_port" "tcp:$collector_reverse_port"
-    "$adb" uninstall com.synchroconsumer >/dev/null 2>&1 || true
-    "$adb" install "$work_dir/app/android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
+    adb_command reverse "tcp:$collector_reverse_port" "tcp:$collector_reverse_port"
+    adb_command uninstall com.synchroconsumer >/dev/null 2>&1 || true
+    adb_command install "$work_dir/app/android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
     installed_platform=android
-    "$adb" shell pm clear com.synchroconsumer >/dev/null
-    "$adb" shell am force-stop com.synchroconsumer
-    "$adb" shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
-    initial_pid=$("$adb" shell pidof com.synchroconsumer | tr -d '\r')
+    adb_command shell pm clear com.synchroconsumer >/dev/null
+    adb_command shell am force-stop com.synchroconsumer
+    python3 "$probe" android --cell "$cell_id" --sdk-root "$ANDROID_HOME" --serial "$serial" \
+      --react-native-app "$work_dir/app" --output "$environment_dir/initial.json" \
+      --identity-output "$environment_dir/initial-identity.json"
+    adb_command shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
+    initial_pid=$(adb_command shell pidof com.synchroconsumer | tr -d '\r')
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android initial process id is invalid" >&2; exit 1 ;; esac
     if ! python3 "$tool" await-app-result \
       --result "$result_dir/initial.json" \
@@ -374,19 +390,19 @@ GRADLE
       printf '%s\n' "Packaged React Native Android initial application result did not pass" >&2
       exit 1
     fi
-    current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+    current_pid=$(adb_command shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
     if [ "$current_pid" != "$initial_pid" ]; then
       printf '%s\n' "Packaged React Native Android initial process changed after reporting its result" >&2
       exit 1
     fi
     set +e
-    "$adb" shell run-as com.synchroconsumer kill -9 "$initial_pid"
+    adb_command shell run-as com.synchroconsumer kill -9 "$initial_pid"
     kill_status=$?
     set -e
     case "$kill_status" in 0|137) ;; *) printf '%s\n' "React Native Android kill command failed" >&2; exit 1 ;; esac
     killed=0
     for _ in $(seq 1 30); do
-      current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+      current_pid=$(adb_command shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
       if [ "$current_pid" != "$initial_pid" ]; then killed=1; break; fi
       sleep 1
     done
@@ -395,8 +411,12 @@ GRADLE
       exit 1
     fi
     python3 "$tool" author-remote --config "$work_dir/config.json" --output "$work_dir/remote.json"
-    "$adb" shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
-    resume_pid=$("$adb" shell pidof com.synchroconsumer | tr -d '\r')
+    python3 "$probe" android --cell "$cell_id" --sdk-root "$ANDROID_HOME" --serial "$serial" \
+      --react-native-app "$work_dir/app" --output "$environment_dir/resume.json" \
+      --identity-output "$environment_dir/resume-identity.json" \
+      --initial-identity "$environment_dir/initial-identity.json" --initial-environment "$environment_dir/initial.json"
+    adb_command shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
+    resume_pid=$(adb_command shell pidof com.synchroconsumer | tr -d '\r')
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android resume process id is invalid" >&2; exit 1 ;; esac
     if [ "$resume_pid" = "$initial_pid" ]; then
       printf '%s\n' "Packaged React Native Android resume reused the killed process" >&2
@@ -411,12 +431,12 @@ GRADLE
       printf '%s\n' "Packaged React Native Android resume application result did not pass" >&2
       exit 1
     fi
-    current_pid=$("$adb" shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+    current_pid=$(adb_command shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
     if [ "$current_pid" != "$resume_pid" ]; then
       printf '%s\n' "Packaged React Native Android resume process changed after reporting its result" >&2
       exit 1
     fi
-    "$adb" shell am force-stop com.synchroconsumer
+    adb_command shell am force-stop com.synchroconsumer
     native_artifact="$maven_dir/fit/trainstar/synchro/$version/synchro-$version.aar"
     ;;
 esac
@@ -431,10 +451,8 @@ set -- python3 "$tool" complete-cell \
   --killed-pid "$initial_pid" \
   --remote "$work_dir/remote.json" \
   --server-verification "$work_dir/server.json"
-if [ "$platform" = "ios" ]; then
-  set -- "$@" --initial-environment "$environment_dir/initial.json" \
-    --resume-environment "$environment_dir/resume.json" --release-manifest "$release_manifest"
-fi
+set -- "$@" --initial-environment "$environment_dir/initial.json" \
+  --resume-environment "$environment_dir/resume.json" --release-manifest "$release_manifest"
 distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-"$tarball $native_artifact"}
 for artifact in $distribution_artifacts; do
   set -- "$@" --artifact "$artifact"
