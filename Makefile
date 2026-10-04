@@ -1021,6 +1021,7 @@ release-run-support-cell:
 			hashes="$$(python3 scripts/release-artifacts.py print-payload-hashes --release-dir "$$release" --version "$(VERSION)" \
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--role pg-extension --role adapter --role seed-tool)"; \
+			PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
 			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--source-commit "$$(git rev-parse --verify HEAD)" -- \
@@ -1073,6 +1074,7 @@ test-server-consumer-helper:
 # The same server lifecycle as release-run-support-cell SUP-PG-LINUX-X64-001, with
 # locally built adapter, seed, and provisioner and the conformance extension artifact.
 test-consumer-server: build-local-postgres
+	@test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }
 	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
 	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in PGRX_PG_BIN_DIR" >&2; exit 1; }
 	@set -eu; \
@@ -1084,6 +1086,7 @@ test-consumer-server: build-local-postgres
 		result="$(PACKAGED_SMOKE_CELL_DIR)/SUP-PG-LINUX-X64-001.json"; \
 		python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" --cell SUP-PG-LINUX-X64-001 --output "$$result"; \
 		hashes="$$(shasum -a 256 "$$work/extension.tar.gz" "$$work/synchrod-pg" "$$work/synchro-seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$work/extension.tar.gz" \
 			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$work/synchrod-pg" "$$work/synchro-seed" \
 			"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" SUP-PG-LINUX-X64-001 "$$result" "$$hashes"
