@@ -18,7 +18,20 @@ apk="$repo_root/verification/consumers/kotlin/app/build/outputs/apk/debug/app-de
 aar="$artifact_dir/maven/fit/trainstar/synchro/$version/synchro-$version.aar"
 
 adb_command() {
-  "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
+  python3 -c '
+import subprocess
+import sys
+
+try:
+    status = subprocess.run(sys.argv[1:], timeout=180).returncode
+except subprocess.TimeoutExpired:
+    print("Android ADB client deadline exceeded", file=sys.stderr)
+    sys.exit(124)
+except OSError:
+    print("Android ADB client invocation failed", file=sys.stderr)
+    sys.exit(127)
+sys.exit(status if status >= 0 else 128 - status)
+' "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
 }
 
 test -x "$adb"

@@ -58,7 +58,20 @@ if [ "$platform" = "android" ] && [ "$mode" = "smoke" ]; then
   export ANDROID_SERIAL KOTLIN_ANDROID_SERIAL
 fi
 adb_command() {
-  "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
+  python3 -c '
+import subprocess
+import sys
+
+try:
+    status = subprocess.run(sys.argv[1:], timeout=180).returncode
+except subprocess.TimeoutExpired:
+    print("Android ADB client deadline exceeded", file=sys.stderr)
+    sys.exit(124)
+except OSError:
+    print("Android ADB client invocation failed", file=sys.stderr)
+    sys.exit(127)
+sys.exit(status if status >= 0 else 128 - status)
+' "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
 }
 tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
 mkdir -p "$tmp_root"
@@ -378,8 +391,13 @@ GRADLE
     python3 "$probe" android --cell "$cell_id" --sdk-root "$ANDROID_HOME" --serial "$serial" \
       --react-native-app "$work_dir/app" --output "$environment_dir/initial.json" \
       --identity-output "$environment_dir/initial-identity.json"
-    adb_command shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
-    initial_pid=$(adb_command shell pidof com.synchroconsumer | tr -d '\r')
+    adb_command shell am start -n com.synchroconsumer/.MainActivity >/dev/null
+    initial_pid=""
+    for _ in $(seq 1 30); do
+      initial_pid=$(adb_command shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+      [ -n "$initial_pid" ] && break
+      sleep 1
+    done
     case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android initial process id is invalid" >&2; exit 1 ;; esac
     if ! python3 "$tool" await-app-result \
       --result "$result_dir/initial.json" \
@@ -410,13 +428,20 @@ GRADLE
       printf '%s\n' "Packaged React Native Android process kill was not observed" >&2
       exit 1
     fi
+    # Stop any automatically restarted foreground instance before resume.
+    adb_command shell am force-stop com.synchroconsumer
     python3 "$tool" author-remote --config "$work_dir/config.json" --output "$work_dir/remote.json"
     python3 "$probe" android --cell "$cell_id" --sdk-root "$ANDROID_HOME" --serial "$serial" \
       --react-native-app "$work_dir/app" --output "$environment_dir/resume.json" \
       --identity-output "$environment_dir/resume-identity.json" \
       --initial-identity "$environment_dir/initial-identity.json" --initial-environment "$environment_dir/initial.json"
-    adb_command shell am start -W -n com.synchroconsumer/.MainActivity >/dev/null
-    resume_pid=$(adb_command shell pidof com.synchroconsumer | tr -d '\r')
+    adb_command shell am start -n com.synchroconsumer/.MainActivity >/dev/null
+    resume_pid=""
+    for _ in $(seq 1 30); do
+      resume_pid=$(adb_command shell pidof com.synchroconsumer 2>/dev/null | tr -d '\r' || true)
+      [ -n "$resume_pid" ] && break
+      sleep 1
+    done
     case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "React Native Android resume process id is invalid" >&2; exit 1 ;; esac
     if [ "$resume_pid" = "$initial_pid" ]; then
       printf '%s\n' "Packaged React Native Android resume reused the killed process" >&2
