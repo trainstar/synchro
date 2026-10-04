@@ -348,10 +348,10 @@ jobs:
               {"id": "SUP-PG-LINUX-X64-001", "environment": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"}},
               {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "xcode": "16.4"}},
               {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
-              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04"}},
-              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04"}},
+              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.83.10", "xcode": "27.0"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.83.10"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.83.10", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
           PY
@@ -499,6 +499,7 @@ jobs:
     if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
+    timeout-minutes: 240
     permissions:
       actions: read
       contents: read
@@ -641,6 +642,16 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Check original Android serial selection
+        run: |
+          set -eu
+          original_android_serial=${ANDROID_SERIAL:-}
+          original_kotlin_android_serial=${KOTLIN_ANDROID_SERIAL:-}
+          if [ -n "$original_android_serial" ] && [ -n "$original_kotlin_android_serial" ] && [ "$original_android_serial" != "$original_kotlin_android_serial" ]; then
+            echo "Original ANDROID_SERIAL and KOTLIN_ANDROID_SERIAL values disagree" >&2
+            exit 1
+          fi
 
       - name: Run Android package cell
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
