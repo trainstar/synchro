@@ -9,7 +9,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,6 +23,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 from verification import packaged_smoke
+from verification.test_support_environments import valid_records as selected_environments
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +49,272 @@ RESUME_OBSERVED = {
 }
 
 
+def measured_environment(cell_id: str) -> dict[str, str]:
+    # Independently authored measurement fixtures; never derive these from the manifest.
+    return {
+        "SUP-PG-LINUX-X64-001": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"},
+        "SUP-IOS-MIN-001": {"ios": "16.4", "xcode": "16.4"},
+        "SUP-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0"},
+        "SUP-RN-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.10"},
+        "SUP-ANDROID-MIN-001": {
+            "android_api": "24", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27",
+            "emulator_version": "37.2.12", "emulator_build": "16428233",
+        },
+        "SUP-ANDROID-CURRENT-001": {
+            "android_api": "37", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
+            "emulator_version": "37.2.12", "emulator_build": "16428233",
+        },
+        "SUP-RN-ANDROID-CURRENT-001": {
+            "android_api": "37", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
+            "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.83.10",
+        },
+    }[cell_id]
+
+
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def test_all_completed_profiles_retain_independent_measurements(self) -> None:
+        for cell_id in packaged_smoke.required_cells(REPO_ROOT):
+            with self.subTest(cell=cell_id), tempfile.TemporaryDirectory() as directory:
+                arguments = self.completion_arguments(Path(directory), cell_id)
+                self.complete_fixture(arguments)
+                cell = packaged_smoke.load_json(arguments[2], "completed cell")
+                self.assertEqual(cell["environment"], measured_environment(cell_id))
+                validated = packaged_smoke.validate_cell(cell, cell_id, packaged_smoke.source_commit(REPO_ROOT))
+                self.assertEqual(validated["environment"], measured_environment(cell_id))
+                self.assertEqual(len(cell["operations"]), 5)
+
+    def test_changed_initial_resume_or_selected_environment_rejects_completion(self) -> None:
+        for cell_id, changes in (
+            ("SUP-PG-LINUX-X64-001", {"postgresql": "18.4"}),
+            ("SUP-IOS-MIN-001", {"ios": "16.5"}),
+            ("SUP-IOS-CURRENT-001", {"ios": "27.0.1"}),
+            ("SUP-IOS-CURRENT-001", {"xcode": "27.0.1"}),
+            ("SUP-ANDROID-CURRENT-001", {"android_api": "38", "system_image": "system-images;android-38;google_apis;x86_64"}),
+            ("SUP-ANDROID-CURRENT-001", {"system_image_revision": "7"}),
+            ("SUP-ANDROID-CURRENT-001", {"system_image": "system-images;android-37;google_apis;x86_64"}),
+            ("SUP-ANDROID-CURRENT-001", {"emulator_version": "37.2.13"}),
+            ("SUP-ANDROID-CURRENT-001", {"emulator_build": "16428234"}),
+            ("SUP-RN-IOS-CURRENT-001", {"react_native": "0.83.11"}),
+            ("SUP-RN-ANDROID-CURRENT-001", {"react_native": "0.83.11"}),
+        ):
+            for phase in ("initial", "resume", "both"):
+                with self.subTest(cell=cell_id, changes=changes, phase=phase), tempfile.TemporaryDirectory() as directory:
+                    arguments = self.completion_arguments(Path(directory), cell_id)
+                    paths = arguments[10:12] if phase == "both" else [arguments[10 if phase == "initial" else 11]]
+                    for path in paths:
+                        record = packaged_smoke.load_json(path, "measurement")
+                        record["environment"].update(changes)
+                        packaged_smoke.write_json(path, record)
+                    message = "does not match sealed" if phase == "both" else "initial and resume measured environments differ"
+                    with self.assertRaisesRegex(packaged_smoke.EvidenceError, message):
+                        self.complete_fixture(arguments)
+                    self.assertFalse(arguments[2].exists())
+
+    def test_completion_rejects_wrong_ids_source_and_incomplete_or_duplicate_input(self) -> None:
+        for cell_id in ("SUP-PG-LINUX-X64-001", "SUP-IOS-CURRENT-001"):
+            for mutation in ("initial-id", "resume-id", "source", "duplicate-cell", "missing-cell",
+                             "duplicate-member", "missing-field", "missing-file", "record-array"):
+                with self.subTest(cell=cell_id, mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                    arguments = self.completion_arguments(Path(directory), cell_id)
+                    initial, resume, manifest_path = arguments[10:13]
+                    if mutation in {"initial-id", "resume-id"}:
+                        packaged_smoke.write_json(initial if mutation == "initial-id" else resume, {
+                            "id": "SUP-IOS-MIN-001", "environment": measured_environment("SUP-IOS-MIN-001"),
+                        })
+                    elif mutation == "duplicate-member":
+                        text = initial.read_text()
+                        field = "postgresql" if cell_id == "SUP-PG-LINUX-X64-001" else "ios"
+                        actual = measured_environment(cell_id)[field]
+                        initial.write_text(text.replace(f'"{field}": "{actual}"', f'"{field}": "{actual}", "{field}": "{actual}"', 1))
+                    elif mutation == "missing-field":
+                        record = packaged_smoke.load_json(initial, "measurement")
+                        record["environment"].pop(next(iter(record["environment"])))
+                        packaged_smoke.write_json(initial, record)
+                    elif mutation == "missing-file":
+                        initial.unlink()
+                    elif mutation == "record-array":
+                        packaged_smoke.write_json(initial, [packaged_smoke.load_json(initial, "measurement")])
+                    else:
+                        manifest = packaged_smoke.load_json(manifest_path, "manifest")
+                        if mutation == "source":
+                            manifest["source"]["commit"] = "a" * 40
+                        elif mutation == "duplicate-cell":
+                            manifest["resolved_support_cells"].append(copy.deepcopy(manifest["resolved_support_cells"][0]))
+                        else:
+                            manifest["resolved_support_cells"].pop()
+                        packaged_smoke.write_json(manifest_path, manifest)
+                    with self.assertRaises(packaged_smoke.EvidenceError):
+                        self.complete_fixture(arguments)
+                    self.assertFalse(arguments[2].exists())
+
+    def test_passed_cells_reject_missing_malformed_and_unknown_environments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = self.completion_arguments(Path(directory), "SUP-IOS-CURRENT-001")
+            self.complete_fixture(arguments)
+            cell = packaged_smoke.load_json(arguments[2], "cell")
+            for mutation in ("missing", "empty", "nonstring", "unknown-field", "unknown-cell"):
+                bad = copy.deepcopy(cell)
+                expected = bad["cell_id"]
+                if mutation == "missing":
+                    del bad["environment"]
+                elif mutation == "empty":
+                    bad["environment"] = {}
+                elif mutation == "nonstring":
+                    bad["environment"]["ios"] = 27
+                elif mutation == "unknown-field":
+                    bad["environment"]["unknown"] = "27.0"
+                else:
+                    expected = bad["cell_id"] = "SUP-MACOS-CURRENT-001"
+                with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.validate_cell(bad, expected, packaged_smoke.source_commit(REPO_ROOT))
+
+    def test_complete_summary_preserves_seven_measurements_and_35_obligations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, output = self.completed_summary(Path(directory))
+            summary = packaged_smoke.load_json(output, "summary")
+            self.assertEqual(summary["status"], "passed")
+            self.assertEqual(summary["resolved_support_cells"], [
+                {"id": cell_id, "environment": measured_environment(cell_id)}
+                for cell_id in sorted(packaged_smoke.required_cells(REPO_ROOT))
+            ])
+            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertNotIn("missing_environment_cells", summary)
+            packaged_smoke.verify_summary(REPO_ROOT, output)
+
+    def test_passed_summaries_reject_invalid_environment_collections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, output = self.completed_summary(Path(directory))
+            original = packaged_smoke.load_json(output, "summary")
+            for mutation in ("missing-member", "missing-cell", "duplicate", "unknown", "excluded", "tested", "missing-field",
+                             "unknown-field", "wrong-type", "unresolved", "nonrecord", "current-mismatch"):
+                bad = copy.deepcopy(original)
+                records = bad["resolved_support_cells"]
+                if mutation == "missing-member":
+                    del bad["resolved_support_cells"]
+                elif mutation == "missing-cell":
+                    records.pop()
+                elif mutation == "duplicate":
+                    records.append(copy.deepcopy(records[0]))
+                elif mutation in {"unknown", "excluded", "tested"}:
+                    records[0]["id"] = {"unknown": "SUP-UNKNOWN", "excluded": "SUP-PG-014", "tested": "SUP-MACOS-CURRENT-001"}[mutation]
+                elif mutation == "missing-field":
+                    records[0]["environment"].pop("os")
+                elif mutation == "unknown-field":
+                    records[0]["environment"]["unknown"] = "1"
+                elif mutation == "wrong-type":
+                    records[0]["environment"]["android_api"] = 37
+                elif mutation == "unresolved":
+                    records[0]["environment"]["android_api"] = "current"
+                elif mutation == "nonrecord":
+                    records[0] = None
+                else:
+                    next(record for record in records if record["id"] == "SUP-IOS-CURRENT-001")["environment"]["ios"] = "27.0.1"
+                packaged_smoke.write_json(output, bad)
+                with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.verify_summary(REPO_ROOT, output)
+
+    def test_failed_and_missing_cells_preserve_only_available_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells_dir = root / "cells"
+            pg_cell, ios_cell = "SUP-PG-LINUX-X64-001", "SUP-IOS-MIN-001"
+            for cell_id in (pg_cell, ios_cell):
+                packaged_smoke.begin_cell(REPO_ROOT, cell_id, cells_dir / f"{cell_id}.json")
+            measured_path = cells_dir / f"{pg_cell}.json"
+            failed = packaged_smoke.load_json(measured_path, "failed cell")
+            failed["environment"] = measured_environment(pg_cell)
+            packaged_smoke.write_json(measured_path, failed)
+            output = root / "summary.json"
+            packaged_smoke.collect_summary(REPO_ROOT, cells_dir, output)
+            summary = packaged_smoke.load_json(output, "failed summary")
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["resolved_support_cells"], [{"id": pg_cell, "environment": measured_environment(pg_cell)}])
+            self.assertEqual(summary["missing_environment_cells"], sorted(set(packaged_smoke.required_cells(REPO_ROOT)) - {pg_cell}))
+            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertTrue(all(record["status"] == "failed" and record["test_count"] == 0 for record in summary["obligations"]))
+            self.assertNotIn("environment", packaged_smoke.load_json(cells_dir / f"{ios_cell}.json", "begin cell"))
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pass"):
+                packaged_smoke.verify_summary(REPO_ROOT, output)
+            failed["environment"]["unknown"] = "1"
+            packaged_smoke.write_json(measured_path, failed)
+            with self.assertRaises(packaged_smoke.EvidenceError):
+                packaged_smoke.collect_summary(REPO_ROOT, cells_dir, root / "bad-summary.json")
+            self.assertFalse((root / "bad-summary.json").exists())
+
+    def test_load_json_rejects_duplicate_measurement_cell_summary_and_manifest_members(self) -> None:
+        for text in (
+            '{"id":"SUP-IOS-MIN-001","environment":{"ios":"16.4","ios":"16.4","xcode":"16.4"}}',
+            '{"cell_id":"SUP-IOS-MIN-001","environment":{},"environment":{}}',
+            '{"resolved_support_cells":[],"resolved_support_cells":[]}',
+            '{"source":{"commit":"a","commit":"a"}}',
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "input.json"
+                path.write_text(text)
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "duplicate JSON member"):
+                    packaged_smoke.load_json(path, "fixture")
+
+    def test_direct_script_import_and_required_environment_cli_paths(self) -> None:
+        script = REPO_ROOT / "verification/packaged_smoke.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "support_environments.py").write_text("raise AssertionError('wrong validator')\n")
+            environment = {**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"}
+            result = subprocess.run([sys.executable, str(script), "--help"], cwd=root, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for command in ("complete-cell", "complete-server-cell"):
+                for missing in ("--initial-environment", "--resume-environment", "--release-manifest"):
+                    arguments = [sys.executable, str(script), command, "--cell", "SUP-IOS-MIN-001", "--killed-pid", "101"]
+                    for flag in ("--repo-root", "--output", "--initial", "--resume", "--remote", "--server-verification",
+                                 "--initial-environment", "--resume-environment", "--release-manifest"):
+                        if flag != missing:
+                            arguments.extend([flag, str(root)])
+                    result = subprocess.run(arguments, cwd=root, env=environment, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(missing, result.stderr)
+
+    def test_cell_schema_declares_closed_profiles_and_canonical_formats(self) -> None:
+        schema = packaged_smoke.load_json(REPO_ROOT / "verification/packaged-smoke-cell.schema.json", "cell schema")
+        ids = set(packaged_smoke.required_cells(REPO_ROOT))
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["properties"]["cell_id"]["enum"]), ids)
+        self.assertIn("environment", schema["allOf"][0]["then"]["required"])
+        self.assertNotIn("environment", schema["allOf"][0]["else"]["required"])
+        profiles = {branch["properties"]["cell_id"]["const"]: branch["properties"]["environment"]["$ref"].split("/")[-1]
+                    for branch in schema["oneOf"]}
+        self.assertEqual(set(profiles), ids)
+        self.assertEqual(len(schema["oneOf"]), 7)
+        for cell_id, definition in profiles.items():
+            profile = schema["$defs"][definition]
+            measured = measured_environment(cell_id)
+            self.assertEqual(profile["type"], "object")
+            self.assertFalse(profile["additionalProperties"])
+            self.assertEqual(set(profile["required"]), set(measured))
+            self.assertEqual(set(profile["properties"]), set(measured))
+            for field, value in measured.items():
+                constraint = profile["properties"][field]
+                if "$ref" in constraint:
+                    constraint = schema["$defs"][constraint["$ref"].split("/")[-1]]
+                with self.subTest(cell=cell_id, field=field):
+                    if "const" in constraint:
+                        self.assertEqual(value, constraint["const"])
+                    else:
+                        self.assertEqual(constraint["type"], "string")
+                        self.assertIsNotNone(re.search(constraint["pattern"], value))
+                        for bad in ("", "current", value + "\n", value + ";extra"):
+                            self.assertIsNone(re.search(constraint["pattern"], bad))
+        for definition, bad in (
+            ("positiveInteger", "06"), ("positiveInteger", "0"), ("appleVersion", "027.0"),
+            ("appleVersion", "27.0.0.0"), ("emulatorVersion", "37.2.12.0"),
+            ("reactNativeVersion", "0.84.0"), ("systemImage", "system-images;android-37.1;google_apis;x86_64"),
+            ("systemImage", "system-images;android-37.0;google_apis;arm64-v8a"),
+        ):
+            with self.subTest(definition=definition, bad=bad):
+                self.assertIsNone(re.search(schema["$defs"][definition]["pattern"], bad))
+
     def test_generated_credential_covers_build_and_bounded_job(self) -> None:
         issued_at = 1_800_000_000
         secret = "fixture-signing-secret"
@@ -74,6 +342,65 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             server_name, packaged_smoke.CLIENT_RESUMED_WRITE,
         ))
         return remote, server
+
+    def environment_inputs(self, directory: Path, cell_id: str) -> tuple[Path, Path, Path]:
+        initial = directory / "initial-environment.json"
+        resume = directory / "resume-environment.json"
+        manifest = directory / "release-manifest.json"
+        packaged_smoke.write_json(initial, {"id": cell_id, "environment": measured_environment(cell_id)})
+        packaged_smoke.write_json(resume, {"id": cell_id, "environment": measured_environment(cell_id)})
+        packaged_smoke.write_json(manifest, {
+            "source": {"commit": packaged_smoke.source_commit(REPO_ROOT)},
+            "resolved_support_cells": selected_environments(),
+        })
+        return initial, resume, manifest
+
+    def completion_arguments(self, directory: Path, cell_id: str) -> tuple:
+        directory.mkdir(parents=True, exist_ok=True)
+        initial, resume = directory / "initial.json", directory / "resume.json"
+        remote, server = directory / "remote.json", directory / "server.json"
+        artifact = directory / "artifact"
+        artifact.write_bytes(b"fixture packaged bytes")
+        if cell_id == "SUP-PG-LINUX-X64-001":
+            packaged_smoke.write_json(initial, {
+                "schema_version": 1, "phase": "initial", "status": "passed", "adapter_pid": 101, "push_digest": "a" * 64,
+            })
+            packaged_smoke.write_json(resume, {
+                "schema_version": 1, "phase": "resume", "status": "passed", "adapter_pid": 202,
+                "push_digest": "a" * 64, "replay_equal": True, "observed_customer_name": REMOTE_NAME,
+            })
+            resumed_write = packaged_smoke.SERVER_OFFLINE_WRITE
+        else:
+            packaged_smoke.write_json(initial, {
+                "schema_version": 1, "phase": "initial", "status": "passed", "pid": 101,
+                "pending_change_count": 2, "observed": INITIAL_OBSERVED,
+            })
+            packaged_smoke.write_json(resume, {
+                "schema_version": 1, "phase": "resume", "status": "passed", "pid": 202,
+                "pending_change_count": 0, "observed": RESUME_OBSERVED,
+            })
+            resumed_write = packaged_smoke.CLIENT_RESUMED_WRITE
+        packaged_smoke.write_json(remote, {"schema_version": 1, "remote_value": REMOTE_NAME})
+        packaged_smoke.write_json(server, packaged_smoke.server_verification(REMOTE_NAME, resumed_write))
+        return (
+            REPO_ROOT, cell_id, directory / "cell.json", initial, resume, 101,
+            [artifact], packaged_smoke.hash_files([artifact]), remote, server,
+            *self.environment_inputs(directory, cell_id),
+        )
+
+    def complete_fixture(self, arguments: tuple) -> None:
+        complete = packaged_smoke.complete_server_cell if arguments[1] == "SUP-PG-LINUX-X64-001" else packaged_smoke.complete_cell
+        complete(*arguments)
+
+    def completed_summary(self, directory: Path) -> tuple[Path, Path]:
+        cells_dir = directory / "cells"
+        for cell_id in packaged_smoke.required_cells(REPO_ROOT):
+            arguments = self.completion_arguments(directory / cell_id, cell_id)
+            self.complete_fixture(arguments)
+            packaged_smoke.write_json(cells_dir / f"{cell_id}.json", packaged_smoke.load_json(arguments[2], "cell"))
+        output = directory / "summary.json"
+        packaged_smoke.collect_summary(REPO_ROOT, cells_dir, output)
+        return cells_dir, output
 
     def start_app_result_collector(
         self,
@@ -148,6 +475,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             hashes = {role: str(index + 1) * 64 for index, role in enumerate(roles)}
             packaged_smoke.write_json(manifest_path, {
                 "source": {"commit": packaged_smoke.source_commit(REPO_ROOT)},
+                "resolved_support_cells": selected_environments(),
                 "distributions": [
                     {"role": role, "kind": "file", "sha256": digest}
                     for role, digest in hashes.items()
@@ -168,6 +496,9 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "source_commit": packaged_smoke.source_commit(REPO_ROOT),
                 "artifact_hashes": sorted({h for hs in cells.values() for h in hs}),
                 "status": "passed",
+                "resolved_support_cells": [
+                    {"id": cell_id, "environment": measured_environment(cell_id)} for cell_id in sorted(cells)
+                ],
                 "obligations": [
                     {"id": f"smoke/{cell}/{operation}", "kind": "smoke", "status": "passed",
                      "terminal": True, "test_count": 1, "artifact_hashes": hs}
@@ -177,11 +508,25 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             summary_path = root / "summary.json"
             packaged_smoke.write_json(summary_path, summary)
             packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            original_summary = copy.deepcopy(summary)
             summary["obligations"][0]["artifact_hashes"] = ["f" * 64]
             summary["artifact_hashes"].append("f" * 64)
             packaged_smoke.write_json(summary_path, summary)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "does not match sealed"):
                 packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            for cell_id, field, actual in (
+                ("SUP-PG-LINUX-X64-001", "postgresql", "18.4"),
+                ("SUP-IOS-CURRENT-001", "xcode", "27.0.1"),
+                ("SUP-ANDROID-CURRENT-001", "system_image_revision", "7"),
+                ("SUP-ANDROID-CURRENT-001", "emulator_version", "37.2.13"),
+                ("SUP-ANDROID-CURRENT-001", "emulator_build", "16428234"),
+                ("SUP-RN-IOS-CURRENT-001", "react_native", "0.83.11"),
+            ):
+                different = copy.deepcopy(original_summary)
+                next(record for record in different["resolved_support_cells"] if record["id"] == cell_id)["environment"][field] = actual
+                packaged_smoke.write_json(summary_path, different)
+                with self.subTest(cell=cell_id, field=field), self.assertRaisesRegex(packaged_smoke.EvidenceError, "environments do not match sealed"):
+                    packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
 
     def test_dry_summary_and_mutations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-structure.") as raw_directory:
@@ -207,6 +552,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             self.assertEqual(len(summary["obligations"]), expected_count)
             self.assertTrue(all(item["terminal"] is True for item in summary["obligations"]))
             self.assertTrue(all(item["status"] == "failed" for item in summary["obligations"]))
+            self.assertEqual(summary["resolved_support_cells"], [])
+            self.assertEqual(summary["missing_environment_cells"], sorted(packaged_smoke.required_cells(REPO_ROOT)))
 
     def test_smoke_config_reads_private_collector_configuration(self) -> None:
         environment = {
@@ -284,6 +631,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 [artifact],
                 [packaged_smoke.hash_files([artifact])[0]],
                 *self.convergence_records(directory),
+                *self.environment_inputs(directory, cell_id),
             )
             cell = packaged_smoke.load_json(output, "completed cell")
             self.assertEqual(cell["status"], "passed")
@@ -315,6 +663,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     [artifact],
                     [packaged_smoke.hash_files([artifact])[0]],
                     *self.convergence_records(directory),
+                    *self.environment_inputs(directory, cell_id),
                 )
 
     def test_app_result_collector_rejects_wrong_identity_and_conflicts(self) -> None:
@@ -551,6 +900,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                     [artifact],
                     ["0" * 64],
                     *self.convergence_records(directory),
+                    *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]),
                 )
 
     def test_convergence_requires_remote_value_and_exact_server_state(self) -> None:
@@ -585,6 +935,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                             REPO_ROOT, cell_id, directory / "cell.json", initial, resume, 101,
                             [artifact], packaged_smoke.hash_files([artifact]),
                             *self.convergence_records(directory, server_name),
+                            *self.environment_inputs(directory, cell_id),
                         )
                     self.assertFalse((directory / "cell.json").exists())
 
@@ -707,6 +1058,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 packaged_smoke.hash_files([artifact]),
                 remote,
                 server,
+                *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]),
             )
             cell = packaged_smoke.load_json(cell_path, "server cell")
             self.assertEqual(cell["process_lifecycle"]["kind"], "server")
@@ -715,22 +1067,22 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             resume["push_digest"] = "b" * 64
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "replay digest"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server, *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]))
             resume["push_digest"] = digest
             resume["adapter_pid"] = 101
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "process replacement"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server, *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]))
             resume["adapter_pid"] = 202
             resume["observed_customer_name"] = "Packaged server consumer"
             packaged_smoke.write_json(resume_path, resume)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pull the remote value"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server, *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]))
             resume["observed_customer_name"] = REMOTE_NAME
             packaged_smoke.write_json(resume_path, resume)
             packaged_smoke.write_json(server, packaged_smoke.server_verification(REMOTE_NAME, {"customer_id": "other", "customer_name": "Packaged server offline"}))
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "server verification does not confirm"):
-                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server)
+                packaged_smoke.complete_server_cell(REPO_ROOT, packaged_smoke.required_cells(REPO_ROOT)[0], directory / "cell.json", initial_path, resume_path, 101, [artifact], packaged_smoke.hash_files([artifact]), remote, server, *self.environment_inputs(directory, packaged_smoke.required_cells(REPO_ROOT)[0]))
 
 
 
