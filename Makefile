@@ -197,6 +197,13 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+ifneq "$(ANDROID_SERIAL)" ""
+ifneq "$(KOTLIN_ANDROID_SERIAL)" ""
+ifneq "$(ANDROID_SERIAL)" "$(KOTLIN_ANDROID_SERIAL)"
+$(error Original ANDROID_SERIAL and KOTLIN_ANDROID_SERIAL values disagree)
+endif
+endif
+endif
 # adb and Detox select the device through ANDROID_SERIAL. Export the one
 # resolved serial, so a Detox run uses only that booted device.
 ifneq ($(KOTLIN_ANDROID_SERIAL),)
@@ -1972,9 +1979,8 @@ android-emulator-prepare:
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
 	@set -eu; \
 		adb="$(ANDROID_HOME)/platform-tools/adb"; \
-		serial="$${ANDROID_SERIAL:-$(KOTLIN_ANDROID_SERIAL)}"; \
-		set -- "$$adb"; \
-		if [ -n "$$serial" ]; then set -- "$$@" -s "$$serial"; fi; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		set -- "$$adb" -L tcp:127.0.0.1:5037 -s "$$serial"; \
 		"$$@" wait-for-device; \
 		"$$@" shell 'for required_command in svc settings input wm am cmd dumpsys; do command -v "$$required_command" >/dev/null 2>&1 || { echo "Required Android command missing: $$required_command" >&2; exit 1; }; done'; \
 		"$$@" shell svc power stayon true; \
@@ -2224,9 +2230,15 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 			:app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 
-test-consumer-kotlin-device-smoke: test-consumer-kotlin
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
-		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+test-consumer-kotlin-device-smoke:
+	@set -eu; \
+		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) test-consumer-kotlin ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		ANDROID_HOME="$(ANDROID_HOME)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
 			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)" "$(CURRENT_VERSION)"
@@ -2249,8 +2261,16 @@ test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-ar
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
-test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-artifact client-consumer-rn-artifact
-	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+test-consumer-rn-android-smoke:
+	@set -eu; \
+		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) android-emulator-prepare ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) client-consumer-kotlin-artifact ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) client-consumer-rn-artifact ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
@@ -2279,12 +2299,16 @@ test-client-platforms:
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-ANDROID-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
-			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-kotlin-device-smoke ;; \
+			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
+			$(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial" ;; \
 		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
-			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke; else $(MAKE) test-consumer-rn-android-smoke; fi ;; \
+			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
+			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; else $(MAKE) test-consumer-rn-android-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; fi ;; \
 		SUP-RN-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-rn-ios-smoke ;; \
