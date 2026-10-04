@@ -525,6 +525,17 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.candidate.outputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Load immutable dispatch emulator runner
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/synchro-dispatch-emulator"
+          mkdir -p "$runtime"
+          git show "$GITHUB_SHA:scripts/ci/run_android_emulator.py" > "$runtime/run_android_emulator.py"
+          git show "$GITHUB_SHA:scripts/ci/android-emulator-package.xml" > "$runtime/android-emulator-package.xml"
+          printf 'Android emulator runner dispatch commit: %s\n' "$GITHUB_SHA"
+          shasum -a 256 "$runtime/run_android_emulator.py" "$runtime/android-emulator-package.xml"
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -654,21 +665,15 @@ jobs:
           fi
 
       - name: Run Android package cell
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
-        with:
-          api-level: ${{ matrix.api }}
-          system-image-api-level: ${{ matrix.api }}
-          emulator-build: '16428233'
-          arch: x86_64
-          target: google_apis
-          profile: pixel_2
-          avd-name: Synchro_Release_API_${{ matrix.api }}
-          force-avd-creation: true
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.support_api }}"
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          python3 "$RUNNER_TEMP/synchro-dispatch-emulator/run_android_emulator.py" \
+            --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
+            --api "${{ matrix.support_api }}" --image-api "${{ matrix.api }}" \
+            --avd-name "Synchro_Release_API_${{ matrix.api }}" --profile pixel_2 \
+            --log-dir "$RUNNER_TEMP/synchro-release-emulator-${{ matrix.cell }}" -- \
+            make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.support_api }}"
 
       - name: Stop local fixture
         if: always()
