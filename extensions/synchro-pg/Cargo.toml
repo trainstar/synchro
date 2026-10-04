@@ -30,10 +30,10 @@ serde_json_canonicalizer = "0.3.2"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 pgrx-tests = "0.17"
