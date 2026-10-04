@@ -1,4 +1,4 @@
-"""Measure a retained Apple simulator; this does not establish release acceptance."""
+"""Measure retained package environments; this does not establish release acceptance."""
 
 from __future__ import annotations
 
@@ -6,11 +6,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import subprocess
 import sys
 import tempfile
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import UUID
 
 
@@ -23,6 +25,11 @@ IOS_CELLS = frozenset({"SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-RN-IOS-CUR
 RN_IOS_CELL = "SUP-RN-IOS-CURRENT-001"
 UDID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 COMMAND_TIMEOUT_SECONDS = 30
+PG_CELL = "SUP-PG-LINUX-X64-001"
+PG_VERSION_QUERY = """SELECT pg_catalog.json_build_object(
+    'version', pg_catalog.current_setting('server_version'),
+    'version_num', pg_catalog.current_setting('server_version_num')
+)::text"""
 
 
 class ProbeError(ValueError):
@@ -35,9 +42,10 @@ def device_identity(value: object) -> UUID:
     return UUID(value)
 
 
-def run_command(command: list[str], label: str) -> str:
+def run_command(command: list[str], label: str, *, env: dict[str, str] | None = None) -> str:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=COMMAND_TIMEOUT_SECONDS)
+        options = {} if env is None else {"env": env}
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=COMMAND_TIMEOUT_SECONDS, **options)
     except subprocess.TimeoutExpired:
         raise ProbeError(f"{label} timed out after 30 seconds") from None
     except (subprocess.CalledProcessError, OSError, UnicodeError):
@@ -146,6 +154,96 @@ def probe_ios(cell_id: str, simulator_udid: str, output: Path, react_native_app:
     return record
 
 
+def postgresql_connection_environment() -> tuple[dict[str, str], dict[str, str]]:
+    credentials = {name: os.environ.get(name) for name in ("PGDATABASE", "PGUSER", "PGPASSWORD")}
+    if any(not isinstance(value, str) or not value or "\x00" in value for value in credentials.values()):
+        raise ProbeError("PostgreSQL query requires nonempty libpq credentials")
+    uri = credentials["PGDATABASE"]
+    try:
+        parsed = urlsplit(uri)
+        valid = (
+            not any(character.isspace() or ord(character) < 32 for character in uri)
+            and not re.search(r"%(?![0-9a-fA-F]{2})", uri)
+            and parsed.scheme in {"postgres", "postgresql"}
+            and parsed.username is None and parsed.password is None
+            and re.fullmatch(r"127\.0\.0\.1:[0-9]+", parsed.netloc) is not None
+            and parsed.hostname == "127.0.0.1" and parsed.port is not None and 1 <= parsed.port <= 65535
+            and parsed.path.startswith("/") and bool(unquote(parsed.path[1:]))
+            and "\x00" not in unquote(parsed.path)
+            and "#" not in uri
+            and parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True) == [("sslmode", "disable")]
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ProbeError("PostgreSQL attach URI must use the credential-free local provisioner interface")
+    clean = {name: value for name, value in os.environ.items() if not name.startswith("PG")}
+    query = {**clean, "PGHOST": parsed.hostname, "PGPORT": str(parsed.port),
+             "PGDATABASE": unquote(parsed.path[1:]), "PGSSLMODE": "disable",
+             "PGUSER": credentials["PGUSER"], "PGPASSWORD": credentials["PGPASSWORD"],
+             "PGCONNECT_TIMEOUT": "10",
+             "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000"}
+    return clean, query
+
+
+def postgresql_version(text: str, *, binary: bool = False) -> str:
+    if binary:
+        prefix = "postgres (PostgreSQL) "
+        if not text.startswith(prefix):
+            raise ProbeError("PostgreSQL binary version metadata is malformed")
+        text = text[len(prefix):].removesuffix("\n")
+    match = re.fullmatch(r"(18\.(?:0|[1-9][0-9]*))(?: \(([^()\r\n]{1,200})\))?", text)
+    if match is None or len(text.splitlines()) != 1 or (match[2] is not None and (not match[2].strip() or any(ord(character) < 32 or ord(character) == 127 for character in match[2]))):
+        raise ProbeError("PostgreSQL version must be canonical 18.patch with an optional distribution suffix")
+    return match[1]
+
+
+def probe_postgresql(cell_id: str, pg18_bindir: Path, output: Path) -> dict[str, object]:
+    if cell_id != PG_CELL:
+        raise ProbeError("unsupported PostgreSQL support cell")
+    binary_environment, query_environment = postgresql_connection_environment()
+    try:
+        system, architecture = platform.system(), platform.machine()
+        release = platform.freedesktop_os_release()
+    except (OSError, ValueError, UnicodeError):
+        raise ProbeError("Linux OS-release metadata is unreadable") from None
+    if system != "Linux" or architecture != "x86_64" or not isinstance(release, dict) or release.get("ID") != "ubuntu" or release.get("VERSION_ID") != "24.04":
+        raise ProbeError("PostgreSQL support cell requires Linux x86_64 Ubuntu 24.04")
+    postgres, psql = pg18_bindir / "postgres", pg18_bindir / "psql"
+    try:
+        executable = all(path.is_file() and os.access(path, os.X_OK) for path in (postgres, psql))
+    except OSError:
+        executable = False
+    if not executable:
+        raise ProbeError("retained PostgreSQL directory must contain executable postgres and psql files")
+    installed = postgresql_version(run_command([str(postgres), "--version"], "PostgreSQL binary version", env=binary_environment), binary=True)
+    server = parse_metadata(run_command(
+        [str(psql), "-X", "-A", "-t", "--no-password", "-v", "ON_ERROR_STOP=1", "-c", PG_VERSION_QUERY],
+        "PostgreSQL server version", env=query_environment,
+    ), "PostgreSQL server version")
+    if not isinstance(server, dict) or set(server) != {"version", "version_num"} or any(not isinstance(value, str) or not value for value in server.values()):
+        raise ProbeError("PostgreSQL server version metadata must contain exactly two nonempty string fields")
+    actual = postgresql_version(server["version"])
+    if installed != actual:
+        raise ProbeError("retained PostgreSQL binary and running server versions differ")
+    try:
+        number = str(180000 + int(actual.split(".")[1]))
+    except ValueError:
+        raise ProbeError("PostgreSQL version metadata is malformed") from None
+    if server["version_num"] != number:
+        raise ProbeError("PostgreSQL server version number does not match its canonical version")
+    try:
+        measured = support_environments.validate_environment(cell_id, {
+            "architecture": architecture, "os": f"{release['ID']}-{release['VERSION_ID']}", "postgresql": actual,
+        })
+    except support_environments.EnvironmentError:
+        raise ProbeError("measured PostgreSQL environment violates the supported profile") from None
+    record = {"id": cell_id, "environment": measured}
+    write_record(output, record)
+    print(f"PostgreSQL {actual}; Linux {architecture}; {measured['os']}", file=sys.stderr)
+    return record
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -154,13 +252,20 @@ def parse_args() -> argparse.Namespace:
     ios.add_argument("--simulator-udid", required=True)
     ios.add_argument("--output", required=True, type=Path)
     ios.add_argument("--react-native-app", type=Path)
+    postgresql = commands.add_parser("postgresql")
+    postgresql.add_argument("--cell", required=True, choices=[PG_CELL])
+    postgresql.add_argument("--pg18-bindir", required=True, type=Path)
+    postgresql.add_argument("--output", required=True, type=Path)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        probe_ios(args.cell, args.simulator_udid, args.output, args.react_native_app)
+        if args.command == "ios":
+            probe_ios(args.cell, args.simulator_udid, args.output, args.react_native_app)
+        else:
+            probe_postgresql(args.cell, args.pg18_bindir, args.output)
     except ProbeError as error:
         print(f"environment probe failed: {error}", file=sys.stderr)
         return 1
