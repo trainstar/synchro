@@ -1,13 +1,13 @@
 module github.com/trainstar/synchro/conformance
 
-go 1.25.0
+go 1.26.0
 
 require (
-	github.com/dlclark/regexp2/v2 v2.6.0
-	github.com/gowebpki/jcs v1.0.1
-	github.com/jackc/pgx/v5 v5.9.2
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	golang.org/x/sys v0.44.0
+	github.com/dlclark/regexp2/v2 v2.8.1
+	github.com/gowebpki/jcs v1.0.2
+	github.com/jackc/pgx/v5 v5.11.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	golang.org/x/sys v0.48.0
 )
 
 require (
