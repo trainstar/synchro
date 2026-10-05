@@ -9,6 +9,11 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+## [0.4.0-rc.2] - 2026-10-05
+
+This release candidate is for consumer validation of `0.4.0`.
+Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
+
 ### Added
 
 - Operators can register an assignment function with a SQL NULL bound to return all distinct assigned scopes. ([#300](https://github.com/trainstar/synchro/issues/300))
@@ -88,5 +93,6 @@ Clients:
 - Parser and rebuild diagnostics do not include submitted or record-owned values. ([#210](https://github.com/trainstar/synchro/issues/210))
 - The React Native lock file does not contain vulnerable `brace-expansion` versions. ([#279](https://github.com/trainstar/synchro/issues/279))
 
-[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...HEAD
+[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.2...HEAD
+[0.4.0-rc.2]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/trainstar/synchro/compare/v0.3.2...v0.4.0-rc.1
