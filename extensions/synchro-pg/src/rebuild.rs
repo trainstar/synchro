@@ -14,7 +14,10 @@ use crate::client::{
     validate_schema_ref,
 };
 use crate::cursor_token::{issue_scope_cursor, ScopeCursorContext};
-use crate::pull::{canonical_table, contract_pk_value, row_primary_key_json, synced_row_digest};
+use crate::pull::{
+    canonical_table, contract_pk_value, row_primary_key_json, schema_hash_for_generation,
+    synced_row_digest_with_schema_hash,
+};
 use crate::rebuild_token::{
     issue_rebuild_continuation, parse_rebuild_continuation, RebuildContinuation,
     RebuildContinuationInput,
@@ -578,6 +581,7 @@ fn stage_records(
         .map_err(|error| format!("loading rebuild source projections: {error}"))?;
 
     let mut staged = Vec::with_capacity(rows.len());
+    let mut schema_hashes_by_generation = std::collections::HashMap::<i64, SchemaHash>::new();
     for row in rows {
         let relation_id = required_text(&row, "relation_id", "rebuild ")?;
         let table_name = required_text(&row, "table_name", "rebuild ")?;
@@ -670,7 +674,21 @@ fn stage_records(
             .map(|value| value.0)
             .filter(serde_json::Value::is_object)
             .ok_or_else(|| "rebuild captured row is missing".to_string())?;
-        let computed = synced_row_digest(client, table, &row, &record_id, &server_version)?;
+        let source_schema_hash = match schema_hashes_by_generation.get(&table.registry_generation) {
+            Some(schema_hash) => *schema_hash,
+            None => {
+                let schema_hash = schema_hash_for_generation(client, table.registry_generation)?;
+                schema_hashes_by_generation.insert(table.registry_generation, schema_hash);
+                schema_hash
+            }
+        };
+        let computed = synced_row_digest_with_schema_hash(
+            table,
+            &row,
+            &record_id,
+            &server_version,
+            source_schema_hash,
+        )?;
         if computed != row_checksum {
             return Err("rebuild captured row checksum does not match".to_string());
         }

@@ -2356,7 +2356,7 @@ AS 'MODULE_PATHNAME', 'synchro_readiness_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/rebuild.rs:96
+-- synchro-pg/src/rebuild.rs:99
 -- synchro_pg::rebuild::synchro_rebuild
 CREATE  FUNCTION "synchro_rebuild"(
 	"p_user_id" TEXT, /* &str */
