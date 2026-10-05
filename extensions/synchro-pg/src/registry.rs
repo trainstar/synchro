@@ -126,6 +126,11 @@ pub(crate) struct MembershipDependency {
     pub dependency_columns: Vec<String>,
 }
 
+pub(crate) struct LoadedRegistryGeneration {
+    pub registrations: Vec<TableRegistration>,
+    pub membership_dependencies: Vec<MembershipDependency>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldRegistration {
     pub field_id: String,
@@ -1100,7 +1105,8 @@ fn synchro_register_membership_dependency(
         acquire_registry_write_lock(client)?;
         acquire_source_write_gate(client)?;
         let base = latest_complete_generation(client)?;
-        let registrations = load_registry_generation_entries(client, base.generation, true, false)?;
+        let registrations =
+            load_registry_generation_entries(client, base.generation, true, false)?.registrations;
         let dependency = registered_relation_for_dependency_reference(
             client,
             &registrations,
@@ -5139,7 +5145,7 @@ pub(crate) fn load_registry_generation_from_client(
     client: &SpiClient<'_>,
     generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
-    load_registry_generation_entries(client, generation, true, true)
+    Ok(load_registry_generation_entries(client, generation, true, true)?.registrations)
 }
 
 /// Load prior metadata for the transaction that activates a validated generation.
@@ -5150,7 +5156,7 @@ pub(crate) fn load_registry_generation_for_activation(
     final_generation: i64,
 ) -> Result<Vec<TableRegistration>, spi::Error> {
     load_registry_generation_entries(client, final_generation, true, true)?;
-    load_registry_generation_entries(client, active_generation, true, false)
+    Ok(load_registry_generation_entries(client, active_generation, true, false)?.registrations)
 }
 
 /// Load the active decoder registry after a committed registration transaction.
@@ -5196,7 +5202,7 @@ pub(crate) fn load_registry_generation_entries(
     generation: i64,
     require_validated: bool,
     validate_capture_controls: bool,
-) -> Result<Vec<TableRegistration>, spi::Error> {
+) -> Result<LoadedRegistryGeneration, spi::Error> {
     validate_generation_identity(client, generation, require_validated)?;
     let rows = client.select(
         "SELECT registry_generation,
@@ -5251,7 +5257,10 @@ pub(crate) fn load_registry_generation_entries(
         for registration in &registrations {
             validate_persisted_registration_metadata_from_catalog(registration, &logical_id_kinds)?;
         }
-        return Ok(registrations);
+        return Ok(LoadedRegistryGeneration {
+            registrations,
+            membership_dependencies: Vec::new(),
+        });
     }
     let catalog = load_catalog_for_registrations(client, generation, &registrations)?;
     for registration in &registrations {
@@ -5260,7 +5269,10 @@ pub(crate) fn load_registry_generation_entries(
     let dependencies =
         load_membership_dependencies_from_catalog(client, generation, &registrations, &catalog)?;
     validate_generation_function_projections(client, &registrations, &dependencies)?;
-    Ok(registrations)
+    Ok(LoadedRegistryGeneration {
+        registrations,
+        membership_dependencies: dependencies,
+    })
 }
 
 fn validate_persisted_registration_metadata(
@@ -6436,6 +6448,7 @@ fn validate_loaded_registration_from_catalog(
         // activation. The staged registration must still match every live
         // identity, privilege, key, trigger, and publication control. Issue #43.
         let staged = load_registry_generation_entries(client, staged_generation, true, false)?
+            .registrations
             .into_iter()
             .find(|staged| staged.relation_id == registration.relation_id)
             .unwrap_or_else(|| pgrx::error!("staged registration is missing"));
