@@ -2216,7 +2216,7 @@ AS 'MODULE_PATHNAME', 'synchro_prepare_projection_bootstrap_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:279
+-- synchro-pg/src/registry.rs:284
 -- synchro_pg::registry::synchro_prepare_projection_view
 CREATE  FUNCTION "synchro_prepare_projection_view"(
 	"p_relation_name" TEXT, /* &str */
@@ -2356,7 +2356,7 @@ AS 'MODULE_PATHNAME', 'synchro_readiness_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/rebuild.rs:96
+-- synchro-pg/src/rebuild.rs:99
 -- synchro_pg::rebuild::synchro_rebuild
 CREATE  FUNCTION "synchro_rebuild"(
 	"p_user_id" TEXT, /* &str */
@@ -2379,7 +2379,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_assignment_function_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:799
+-- synchro-pg/src/registry.rs:804
 -- synchro_pg::registry::synchro_register_capture_dependency
 CREATE  FUNCTION "synchro_register_capture_dependency"(
 	"p_relation_name" TEXT, /* &str */
@@ -2392,7 +2392,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_capture_dependency_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1080
+-- synchro-pg/src/registry.rs:1085
 -- synchro_pg::registry::synchro_register_membership_dependency
 CREATE  FUNCTION "synchro_register_membership_dependency"(
 	"p_dependency_table_name" TEXT, /* &str */
@@ -2419,7 +2419,7 @@ AS 'MODULE_PATHNAME', 'synchro_register_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:476
+-- synchro-pg/src/registry.rs:481
 -- synchro_pg::registry::synchro_register_table
 CREATE  FUNCTION "synchro_register_table"(
 	"p_table_name" TEXT, /* &str */
@@ -2451,7 +2451,7 @@ AS 'MODULE_PATHNAME', 'synchro_request_projection_bootstrap_barrier_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/bgworker.rs:858
+-- synchro-pg/src/bgworker.rs:859
 -- synchro_pg::bgworker::synchro_retry_wal_poison
 CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
 STRICT
@@ -2546,7 +2546,7 @@ AS 'MODULE_PATHNAME', 'synchro_unregister_shared_scope_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
--- synchro-pg/src/registry.rs:1034
+-- synchro-pg/src/registry.rs:1039
 -- synchro_pg::registry::synchro_unregister_table
 CREATE  FUNCTION "synchro_unregister_table"(
 	"p_table_name" TEXT /* &str */
