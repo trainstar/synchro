@@ -292,7 +292,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-34;google_apis;x86_64"
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Start local PostgreSQL
@@ -307,19 +307,13 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run full Kotlin semantics and consumers
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
-        with:
-          api-level: 34
-          arch: x86_64
-          avd-name: Synchro_Kotlin_API_34
-          profile: pixel_2
-          target: google_apis
-          force-avd-creation: true
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make ci-candidate-kotlin
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          python3 scripts/ci/run_android_emulator.py \
+            --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
+            --api 34 --image-api 34 --avd-name Synchro_Kotlin_API_34 --profile pixel_2 \
+            --log-dir "$RUNNER_TEMP/synchro-kotlin-emulator" -- make ci-candidate-kotlin
 
   candidate-rn-ios:
     name: candidate React Native iOS
@@ -442,7 +436,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-34;google_apis;x86_64"
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Install React Native dependencies
@@ -466,19 +460,13 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run full React Native Android semantics and consumers
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
-        with:
-          api-level: 34
-          arch: x86_64
-          avd-name: Pixel_7_API_34
-          profile: pixel_7
-          target: google_apis
-          force-avd-creation: true
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-snapshot-save -no-window -memory 6144 -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make ci-candidate-rn-android
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          python3 scripts/ci/run_android_emulator.py \
+            --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
+            --api 34 --image-api 34 --avd-name Pixel_7_API_34 --profile pixel_7 --memory 6144 \
+            --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make ci-candidate-rn-android
 
   pull-request:
     name: pull-request
