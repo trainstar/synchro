@@ -242,11 +242,13 @@ class EmulatorRunnerTests(unittest.TestCase):
                 selected = runner.arguments(argv)
                 self.assertEqual((selected.api, selected.image_api), (api, image))
                 self.calls.clear()
-                with self.boundaries():
+                with self.boundaries(), mock.patch.object(runner.Runner, "command", autospec=True, side_effect=runner.Runner.command) as command_boundary:
                     self.assertEqual(runner.Runner(selected).run(), 0)
                 self.assertEqual([command for command, _ in self.commands("sdkmanager")], [[
                     str(self.manager), f"--sdk_root={self.sdk}", platform_package, image_package,
                 ]])
+                self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])
+                self.assertTrue(all(call.kwargs.get("timeout", 180) <= 180 for call in command_boundary.call_args_list if Path(call.args[1][0]).name != "sdkmanager"))
 
     def test_malformed_selections_are_rejected(self):
         cases = [("--api", "36"), ("--image-api", "37"), ("--avd-name", "../escape"), ("--profile", "unknown")]
@@ -468,34 +470,244 @@ class EmulatorRunnerTests(unittest.TestCase):
                 self.assertEqual(execution.run(), 19)
 
     def test_bounded_command_timeout_stops_owned_command(self):
-        with self.boundaries():
+        with self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
             execution = runner.Runner(self.selected())
             process = Process(100)
-            process.communicate = mock.Mock(side_effect=subprocess.TimeoutExpired("fixture", 1))
-            execution.log = io.StringIO()
-            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 180]), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+            output = "stdout marker\nstderr marker\n"
+            def communicate(input=None, timeout=None):
+                if timeout == 5:
+                    self.assertIn(100, self.stopped)
+                    return output, None
+                raise subprocess.TimeoutExpired("fixture", 1, output=b"stdout marker\n")
+            process.communicate = mock.Mock(side_effect=communicate)
+            execution.log = mock.Mock(wraps=io.StringIO())
+            def prepare():
+                try:
+                    execution.command(["fixture"])
+                finally:
+                    self.assertIsNone(execution.command_process)
+                    self.assertFalse(execution.cleaning)
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 180]), mock.patch.object(execution, "prepare", side_effect=prepare):
                 self.assertEqual(execution.run(), 1)
             self.assertIn(100, self.stopped)
-            self.assertEqual(process.communicate.call_args, mock.call(input=None, timeout=1))
+            self.assertEqual(process.communicate.call_args_list, [mock.call(input=None, timeout=1), mock.call(timeout=5)])
+            self.assertEqual(execution.log.write.call_args_list.count(mock.call(output)), 1)
+            self.assertIn("timed out after 180 seconds", errors.getvalue())
+            self.assertIsNone(execution.command_process)
+            self.assertFalse(execution.cleanup_failed)
 
     def test_emulator_exit_during_bounded_command_is_detected(self):
-        with self.boundaries():
+        with self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
             execution = runner.Runner(self.selected())
             execution.emulator = Process(101, polls=[7])
-            execution.log = io.StringIO()
+            execution.log = mock.Mock(wraps=io.StringIO())
             process = Process(100)
-            process.communicate = mock.Mock(side_effect=subprocess.TimeoutExpired("fixture", 1))
-            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+            output = "stdout marker\nstderr marker\n"
+            def communicate(input=None, timeout=None):
+                if timeout == 5:
+                    self.assertIn(100, self.stopped)
+                    return output, None
+                raise subprocess.TimeoutExpired("fixture", 1, output=b"stdout marker\n")
+            process.communicate = mock.Mock(side_effect=communicate)
+            def prepare():
+                try:
+                    execution.command(["fixture"])
+                finally:
+                    self.assertIsNone(execution.command_process)
+                    self.assertFalse(execution.cleaning)
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=prepare):
                 self.assertEqual(execution.run(), 1)
             self.assertEqual(self.stopped[-2:], [100, 101])
+            self.assertEqual(process.communicate.call_args_list, [mock.call(input=None, timeout=1), mock.call(timeout=5)])
+            self.assertEqual(execution.log.write.call_args_list.count(mock.call(output)), 1)
+            self.assertIn("The emulator exited during an Android command", errors.getvalue())
+            self.assertIsNone(execution.command_process)
+            self.assertFalse(execution.cleanup_failed)
+
+    def test_command_cancellation_drains_output_and_retains_signal(self):
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(number=number), self.boundaries():
+                execution = runner.Runner(self.selected())
+                execution.log = mock.Mock(wraps=io.StringIO())
+                process = Process(100)
+                output = "stdout marker\nstderr marker\n"
+                def communicate(input=None, timeout=None):
+                    if timeout == 5:
+                        self.assertIn(100, self.stopped)
+                        return output, None
+                    execution.cancel(number, None)
+                process.communicate = mock.Mock(side_effect=communicate)
+                def prepare():
+                    try:
+                        execution.command(["fixture"])
+                    finally:
+                        self.assertIsNone(execution.command_process)
+                        self.assertFalse(execution.cleaning)
+                with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=prepare):
+                    self.assertEqual(execution.run(), 128 + number)
+                self.assertEqual(process.communicate.call_args_list, [mock.call(input=None, timeout=1), mock.call(timeout=5)])
+                self.assertEqual(execution.log.write.call_args_list, [mock.call(output)])
+                self.assertIsNone(execution.command_process)
+                self.assertFalse(execution.cleanup_failed)
+
+    def test_output_drain_failure_keeps_original_timeout_visible(self):
+        for drain_error in (OSError("pipe failed"), subprocess.TimeoutExpired("fixture", 5)):
+            with self.subTest(error=drain_error), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                execution = runner.Runner(self.selected())
+                execution.log = mock.Mock(wraps=io.StringIO())
+                process = Process(100)
+                process.communicate = mock.Mock(side_effect=[subprocess.TimeoutExpired("fixture", 1, output=b"partial\n"), drain_error])
+                def prepare():
+                    try:
+                        execution.command(["fixture"])
+                    finally:
+                        self.assertIsNone(execution.command_process)
+                        self.assertFalse(execution.cleaning)
+                with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 180]), mock.patch.object(execution, "prepare", side_effect=prepare):
+                    self.assertEqual(execution.run(), 1)
+                self.assertIn(100, self.stopped)
+                self.assertEqual(process.communicate.call_args_list, [mock.call(input=None, timeout=1), mock.call(timeout=5)])
+                self.assertIn("timed out after 180 seconds", errors.getvalue())
+                self.assertIn("Android command output drain failed", errors.getvalue())
+                self.assertTrue(execution.cleanup_failed)
+                self.assertIsNone(execution.command_process)
+
+    def test_output_drain_logging_failure_preserves_primary_exception(self):
+        for primary_type in (subprocess.TimeoutExpired, runner.Cancelled):
+            for method in ("write", "flush"):
+                for error_type in (OSError, ValueError):
+                    with self.subTest(primary=primary_type, method=method, error=error_type), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                        primary = subprocess.TimeoutExpired("fixture", 180) if primary_type is subprocess.TimeoutExpired else runner.Cancelled()
+                        execution = runner.Runner(self.selected())
+                        if isinstance(primary, runner.Cancelled):
+                            execution.cancel_signal = signal.SIGTERM
+                        execution.log = mock.Mock()
+                        log_error = error_type("log failed")
+                        if method == "write":
+                            execution.log.write.side_effect = log_error
+                        else:
+                            execution.log.flush.side_effect = log_error
+                            execution.log.write.side_effect = [None, log_error]
+                        process = Process(100, "stdout marker\nstderr marker\n")
+                        process.communicate = mock.Mock(wraps=process.communicate)
+                        with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", side_effect=[0, primary]), self.assertRaises(primary_type) as raised:
+                            execution.command(["fixture"])
+                        self.assertIs(raised.exception, primary)
+                        self.assertEqual(self.stopped[-1], 100)
+                        process.communicate.assert_called_once_with(timeout=5)
+                        self.assertEqual(execution.log.write.call_count, 2)
+                        self.assertIn("Android command output drain failed", errors.getvalue())
+                        self.assertTrue(execution.cleanup_failed)
+                        self.assertIsNone(execution.command_process)
+                        self.assertFalse(execution.cleaning)
+                        if isinstance(primary, runner.Cancelled):
+                            self.assertEqual(execution.cancel_signal, signal.SIGTERM)
+
+    def test_cleanup_diagnostic_logging_failure_preserves_primary_exception(self):
+        for primary_type in (subprocess.TimeoutExpired, runner.Cancelled):
+            for error_type in (OSError, ValueError):
+                with self.subTest(primary=primary_type, error=error_type), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    primary = subprocess.TimeoutExpired("fixture", 180) if primary_type is subprocess.TimeoutExpired else runner.Cancelled()
+                    execution = runner.Runner(self.selected())
+                    if isinstance(primary, runner.Cancelled):
+                        execution.cancel_signal = signal.SIGTERM
+                    execution.log = mock.Mock()
+                    execution.log.write.side_effect = [error_type("diagnostic log failed"), None]
+                    process = Process(100, "stdout marker\nstderr marker\n")
+                    process.communicate = mock.Mock(wraps=process.communicate)
+                    with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", side_effect=[0, primary]), mock.patch.object(runner, "stop_group", side_effect=runner.RunnerError("cleanup failed")) as cleanup, self.assertRaises(primary_type) as raised:
+                        execution.command(["fixture"])
+                    self.assertIs(raised.exception, primary)
+                    cleanup.assert_called_once_with(process)
+                    process.communicate.assert_called_once_with(timeout=5)
+                    self.assertEqual(execution.log.write.call_count, 2)
+                    self.assertIn("Android command cleanup failed", errors.getvalue())
+                    self.assertTrue(execution.cleanup_failed)
+                    self.assertIsNone(execution.command_process)
+                    self.assertFalse(execution.cleaning)
+                    if isinstance(primary, runner.Cancelled):
+                        self.assertEqual(execution.cancel_signal, signal.SIGTERM)
+
+    def test_run_persistent_log_write_failure_preserves_status_and_cleanup(self):
+        for phase, recorded_status, expected in (("timeout", None, 1), ("cancellation", None, 143), ("success", 0, 1), ("nonzero", 19, 19)):
+            for error_type in (OSError, ValueError):
+                with self.subTest(phase=phase, error=error_type), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+                    execution = runner.Runner(self.selected())
+                    execution.log = mock.Mock()
+                    execution.log.write.side_effect = error_type("persistent log failure")
+                    execution.test = Process(101)
+                    execution.emulator = Process(102, polls=[None])
+                    execution.test_status = recorded_status
+                    process = Process(100)
+                    output = "stdout marker\nstderr marker\n"
+                    def communicate(input=None, timeout=None):
+                        if timeout == 5:
+                            return output, None
+                        if phase == "timeout":
+                            raise subprocess.TimeoutExpired("fixture", 1, output=b"stdout marker\n")
+                        if phase == "cancellation":
+                            execution.cancel(signal.SIGTERM, None)
+                        return output, None
+                    process.communicate = mock.Mock(side_effect=communicate)
+                    stopped = []
+                    def cleanup(owned):
+                        stopped.append(owned.pid)
+                        if owned.pid == 101:
+                            raise runner.RunnerError("test cleanup failed")
+                    clock = [0, 0, 180] if phase == "timeout" else None
+                    with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(runner.time, "monotonic", return_value=0, side_effect=clock), mock.patch.object(runner, "stop_group", side_effect=cleanup), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+                        self.assertEqual(execution.run(), expected)
+                    self.assertEqual(stopped, [100, 101, 102])
+                    execution.log.close.assert_called_once_with()
+                    self.assertIn("Android emulator cleanup failed", errors.getvalue())
+                    if phase == "timeout":
+                        self.assertIn("timed out after 180 seconds", errors.getvalue())
+                    elif phase != "cancellation":
+                        self.assertIn("persistent log failure", errors.getvalue())
+                    self.assertIsNone(execution.command_process)
+                    self.assertFalse(execution.cleaning)
+                    self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
+
+    def test_run_log_close_failure_preserves_status_and_signal_handlers(self):
+        for phase, recorded_status, expected in (("timeout", None, 1), ("cancellation", None, 143), ("success", 0, 1), ("nonzero", 19, 19), ("nonzero-cancellation", 19, 19)):
+            for error_type in (OSError, ValueError):
+                with self.subTest(phase=phase, error=error_type), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+                    execution = runner.Runner(self.selected())
+                    execution.log = mock.Mock()
+                    execution.log.close.side_effect = error_type("log close failed")
+                    owned = [Process(101), Process(102), Process(103)]
+                    execution.test, execution.emulator, execution.command_process = owned
+                    execution.test_status = recorded_status
+                    if phase == "timeout":
+                        preparation = subprocess.TimeoutExpired("fixture", 180)
+                    elif "cancellation" in phase:
+                        preparation = lambda: execution.cancel(signal.SIGTERM, None)
+                    else:
+                        preparation = None
+                    with mock.patch.object(execution, "prepare", side_effect=preparation), mock.patch.object(execution, "execute", return_value=recorded_status), mock.patch.object(runner, "stop_group") as cleanup:
+                        self.assertEqual(execution.run(), expected)
+                    self.assertEqual(cleanup.call_args_list, [mock.call(process) for process in owned])
+                    execution.log.close.assert_called_once_with()
+                    self.assertIn("Android emulator log cleanup failed", errors.getvalue())
+                    if phase == "timeout":
+                        self.assertIn("timed out after 180 seconds", errors.getvalue())
+                    self.assertTrue(execution.cleanup_failed)
+                    self.assertFalse(execution.cleaning)
+                    self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
 
     def test_command_failure_is_not_ignored(self):
         with self.boundaries():
             execution = runner.Runner(self.selected())
-            execution.log = io.StringIO()
-            with mock.patch.object(runner.subprocess, "Popen", return_value=Process(100, "failure\n", status=9)), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+            execution.log = mock.Mock(wraps=io.StringIO())
+            process = Process(100, "failure\n", status=9)
+            process.communicate = mock.Mock(wraps=process.communicate)
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
                 self.assertEqual(execution.run(), 1)
             self.assertEqual(self.stopped[-1], 100)
+            process.communicate.assert_called_once_with(input=None, timeout=1)
+            self.assertEqual(execution.log.write.call_args_list.count(mock.call("failure\n")), 1)
 
     def test_port_checks_cover_both_emulator_ports(self):
         connection = mock.MagicMock()

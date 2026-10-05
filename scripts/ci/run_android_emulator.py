@@ -241,6 +241,7 @@ class Runner:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         failure = None
+        output = None
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -265,13 +266,33 @@ class Runner:
         finally:
             self.cleaning = True
             try:
-                stop_group(self.command_process)
-            except (RunnerError, OSError, ValueError) as error:
-                self.cleanup_failed = True
-                print(f"Android command cleanup failed: {error}", file=sys.stderr)
-                self.log.write(f"Android command cleanup failed: {error}\n")
-                if failure is None:
-                    raise
+                try:
+                    stop_group(self.command_process)
+                except (RunnerError, OSError, ValueError) as error:
+                    self.cleanup_failed = True
+                    print(f"Android command cleanup failed: {error}", file=sys.stderr)
+                    try:
+                        self.log.write(f"Android command cleanup failed: {error}\n")
+                    except (OSError, ValueError):
+                        pass
+                    if failure is None:
+                        failure = error
+                        raise
+                finally:
+                    if output is None:
+                        try:
+                            output, _ = self.command_process.communicate(timeout=5)
+                            self.log.write(output)
+                            self.log.flush()
+                        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                            self.cleanup_failed = True
+                            print(f"Android command output drain failed: {error}", file=sys.stderr)
+                            try:
+                                self.log.write(f"Android command output drain failed: {error}\n")
+                            except (OSError, ValueError):
+                                pass
+                            if failure is None:
+                                raise
             finally:
                 self.command_process = None
                 self.cleaning = False
@@ -336,7 +357,7 @@ class Runner:
                 shutil.rmtree(directory)
             (work / "emulator").rename(directory)
             image = f"system-images;android-{selected.image_api};google_apis;x86_64"
-            self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image])
+            self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image], timeout=900)
             verify_installation(sdk, members, metadata)
         version = self.command([str(directory / "emulator"), "-version"])
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
@@ -415,26 +436,43 @@ class Runner:
         except (RunnerError, OSError, ValueError, ET.ParseError, zipfile.BadZipFile, subprocess.TimeoutExpired) as error:
             print(f"Android emulator runner failed: {error}", file=sys.stderr)
             if self.log:
-                self.log.write(f"Android emulator runner failed: {error}\n")
+                try:
+                    self.log.write(f"Android emulator runner failed: {error}\n")
+                except (OSError, ValueError):
+                    pass
         finally:
             self.cleaning = True
-            for process in (self.test, self.emulator, self.command_process):
-                if process is None:
-                    continue
+            try:
+                for process in (self.test, self.emulator, self.command_process):
+                    if process is None:
+                        continue
+                    try:
+                        stop_group(process)
+                    except (RunnerError, OSError, ValueError) as error:
+                        print(f"Android emulator cleanup failed: {error}", file=sys.stderr)
+                        if self.log:
+                            try:
+                                self.log.write(f"Android emulator cleanup failed: {error}\n")
+                            except (OSError, ValueError):
+                                pass
+                        if status == 0:
+                            status = 1
+                if self.cleanup_failed and status == 0:
+                    status = 1
+                if self.log:
+                    try:
+                        self.log.close()
+                    except (OSError, ValueError) as error:
+                        self.cleanup_failed = True
+                        print(f"Android emulator log cleanup failed: {error}", file=sys.stderr)
+                        if status == 0:
+                            status = 1
+            finally:
                 try:
-                    stop_group(process)
-                except (RunnerError, OSError, ValueError) as error:
-                    print(f"Android emulator cleanup failed: {error}", file=sys.stderr)
-                    if self.log:
-                        self.log.write(f"Android emulator cleanup failed: {error}\n")
-                    if status == 0:
-                        status = 1
-            if self.cleanup_failed and status == 0:
-                status = 1
-            if self.log:
-                self.log.close()
-            for number, handler in previous.items():
-                signal.signal(number, handler)
+                    for number, handler in previous.items():
+                        signal.signal(number, handler)
+                finally:
+                    self.cleaning = False
         if self.test_status:
             return self.test_status
         if self.cancel_signal:
