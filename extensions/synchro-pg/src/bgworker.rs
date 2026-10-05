@@ -14,9 +14,10 @@ use synchro_core::edge_diff::{build_edge_diff_entries, diff_bucket_sets};
 use crate::bucketing::resolve_dependency_impacts;
 use crate::pull::{schema_hash_for_generation, synced_row_digest_with_schema_hash};
 use crate::registry::{
-    load_membership_dependencies_from_client, load_registry_generation_for_activation,
-    load_registry_generation_for_worker, load_registry_generation_from_client,
-    MembershipDependency, RegistrationKind, TableRegistration,
+    load_membership_dependencies_from_client, load_registry_generation_entries,
+    load_registry_generation_for_activation, load_registry_generation_for_worker,
+    load_registry_generation_from_client, MembershipDependency, RegistrationKind,
+    TableRegistration,
 };
 use crate::spi_helpers::{jsonb_batches, jsonb_payload_parameters, required_record_id};
 use crate::wal_decoder::{
@@ -2145,17 +2146,15 @@ fn materialize_candidate(
         Spi::connect_mut(|client| {
             validate_candidate_binding(client, bootstrap, true)?;
             select_candidate_projection(client, bootstrap)?;
-            let registry = load_registry_generation_from_client(
+            let loaded = load_registry_generation_entries(
                 client,
                 bootstrap.identity.registry_generation,
+                true,
+                true,
             )
             .map_err(|_| "loading candidate registry failed".to_string())?;
-            let dependencies = load_membership_dependencies_from_client(
-                client,
-                bootstrap.identity.registry_generation,
-                &registry,
-            )
-            .map_err(|_| "loading candidate membership dependencies failed".to_string())?;
+            let registry = loaded.registrations;
+            let dependencies = loaded.membership_dependencies;
             if !parse_registry_activations(transaction)
                 .map_err(candidate_failure)?
                 .is_empty()
@@ -3587,26 +3586,41 @@ fn materialize_transaction(
                 .filter_map(|group| group.generations.last().copied()),
         )
         .collect();
-    let registries = segment_generations
-        .iter()
-        .map(|segment_generation| match final_generation {
-            Some(final_generation) => load_registry_generation_for_activation(
-                client,
-                *segment_generation,
-                final_generation,
-            ),
-            None => load_registry_generation_from_client(client, *segment_generation),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
-    let membership_dependencies = segment_generations
-        .iter()
-        .zip(&registries)
-        .map(|(segment_generation, registry)| {
-            load_membership_dependencies_from_client(client, *segment_generation, registry)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+    let (registries, membership_dependencies) = if activations.is_empty() {
+        let loaded_generations = segment_generations
+            .iter()
+            .map(|segment_generation| {
+                load_registry_generation_entries(client, *segment_generation, true, true)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+        loaded_generations
+            .into_iter()
+            .map(|loaded| (loaded.registrations, loaded.membership_dependencies))
+            .unzip()
+    } else {
+        let registries = segment_generations
+            .iter()
+            .map(|segment_generation| match final_generation {
+                Some(final_generation) => load_registry_generation_for_activation(
+                    client,
+                    *segment_generation,
+                    final_generation,
+                ),
+                None => load_registry_generation_from_client(client, *segment_generation),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+        let membership_dependencies = segment_generations
+            .iter()
+            .zip(&registries)
+            .map(|(segment_generation, registry)| {
+                load_membership_dependencies_from_client(client, *segment_generation, registry)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| failure("registered_relation_drift", transaction.commit_lsn))?;
+        (registries, membership_dependencies)
+    };
     let projection_target = ProjectionTarget::Active {
         stream_generation: &stream_generation,
     };
