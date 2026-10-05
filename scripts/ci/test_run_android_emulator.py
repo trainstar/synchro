@@ -229,7 +229,11 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "swiftshader_indirect"])
 
     def test_all_selected_platform_and_image_pairs(self):
-        for api, image in (("24", "24"), ("34", "34"), ("37", "37.0")):
+        for api, image, platform_package, image_package in (
+            ("24", "24", "platforms;android-24", "system-images;android-24;google_apis;x86_64"),
+            ("34", "34", "platforms;android-34", "system-images;android-34;google_apis;x86_64"),
+            ("37", "37.0", "platforms;android-37.0", "system-images;android-37.0;google_apis;x86_64"),
+        ):
             with self.subTest(api=api):
                 argv = list(self.argv)
                 argv[5] = api
@@ -237,6 +241,12 @@ class EmulatorRunnerTests(unittest.TestCase):
                 argv[9] = f"Synchro_Release_API_{image}"
                 selected = runner.arguments(argv)
                 self.assertEqual((selected.api, selected.image_api), (api, image))
+                self.calls.clear()
+                with self.boundaries():
+                    self.assertEqual(runner.Runner(selected).run(), 0)
+                self.assertEqual([command for command, _ in self.commands("sdkmanager")], [[
+                    str(self.manager), f"--sdk_root={self.sdk}", platform_package, image_package,
+                ]])
 
     def test_malformed_selections_are_rejected(self):
         cases = [("--api", "36"), ("--image-api", "37"), ("--avd-name", "../escape"), ("--profile", "unknown")]

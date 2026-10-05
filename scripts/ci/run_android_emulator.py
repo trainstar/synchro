@@ -336,7 +336,7 @@ class Runner:
                 shutil.rmtree(directory)
             (work / "emulator").rename(directory)
             image = f"system-images;android-{selected.image_api};google_apis;x86_64"
-            self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.api}", image])
+            self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image])
             verify_installation(sdk, members, metadata)
         version = self.command([str(directory / "emulator"), "-version"])
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
