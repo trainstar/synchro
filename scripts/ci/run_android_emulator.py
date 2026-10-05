@@ -65,8 +65,9 @@ def digest(path: Path) -> str:
 
 
 def check_ports() -> None:
-    for port in (5554, 5555):
+    for port in (5037, 5554, 5555):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 connection.bind(("127.0.0.1", port))
             except OSError as error:
@@ -224,10 +225,12 @@ class Runner:
         self.cleaning = False
         self.cleanup_failed = False
         self.emulator = None
+        self.adb_server = None
         self.test = None
         self.command_process = None
         self.test_status = None
         self.log = None
+        self.adb_server_log = None
 
     def cancel(self, number: int, _frame) -> None:
         self.cancel_signal = number
@@ -245,6 +248,7 @@ class Runner:
         try:
             deadline = time.monotonic() + timeout
             while True:
+                self.check_adb_server()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
@@ -257,6 +261,7 @@ class Runner:
                         raise RunnerError("The emulator exited during an Android command")
             self.log.write(output)
             self.log.flush()
+            self.check_adb_server()
             status = self.command_process.returncode
             if status:
                 raise RunnerError(f"Command failed with status {status}: {command[0]}")
@@ -378,8 +383,31 @@ class Runner:
             str(self.selected.sdk_root / "platform-tools/adb"), "-L", ADB_ENDPOINT, "-s", SERIAL, *command,
         ], timeout=timeout)
 
+    def check_adb_server(self) -> None:
+        if self.adb_server is not None and self.adb_server.poll() is not None:
+            raise RunnerError("The owned ADB server exited")
+
+    def start_adb_server(self) -> None:
+        self.adb_server_log = (self.selected.log_dir / "adb-server.log").open("ab")
+        self.adb_server = subprocess.Popen([
+            str(self.selected.sdk_root / "platform-tools/adb"), "-L", "tcp:5037", "server", "nodaemon",
+        ], env=self.environment, stdout=self.adb_server_log, stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + 15
+        while True:
+            self.check_adb_server()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerError("The owned ADB server startup deadline expired")
+            try:
+                with socket.create_connection(("127.0.0.1", 5037), timeout=min(0.1, remaining)):
+                    self.check_adb_server()
+                    return
+            except OSError:
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
     def execute(self) -> int:
         check_ports()
+        self.start_adb_server()
         options = ["-no-snapshot-save", "-no-window"]
         if self.selected.memory:
             options.extend(("-memory", self.selected.memory))
@@ -410,6 +438,7 @@ class Runner:
                 self.adb(["shell", "settings", "put", "global", setting, "0.0"])
             if self.emulator.poll() is not None:
                 raise RunnerError("The emulator exited before the test command")
+            self.check_adb_server()
             self.test = subprocess.Popen(self.selected.command, env=self.environment, start_new_session=True)
             while True:
                 result = self.test.poll()
@@ -417,6 +446,7 @@ class Runner:
                     self.test_status = result if result >= 0 else 128 - result
                 if self.emulator.poll() is not None:
                     raise RunnerError("The emulator exited while the test command ran")
+                self.check_adb_server()
                 if self.test_status is not None:
                     return self.test_status
                 time.sleep(0.1)
@@ -443,7 +473,7 @@ class Runner:
         finally:
             self.cleaning = True
             try:
-                for process in (self.test, self.emulator, self.command_process):
+                for process in (self.test, self.emulator, self.adb_server, self.command_process):
                     if process is None:
                         continue
                     try:
@@ -459,12 +489,14 @@ class Runner:
                             status = 1
                 if self.cleanup_failed and status == 0:
                     status = 1
-                if self.log:
+                for name, log in (("Android emulator", self.log), ("ADB server", self.adb_server_log)):
+                    if log is None:
+                        continue
                     try:
-                        self.log.close()
+                        log.close()
                     except (OSError, ValueError) as error:
                         self.cleanup_failed = True
-                        print(f"Android emulator log cleanup failed: {error}", file=sys.stderr)
+                        print(f"{name} log cleanup failed: {error}", file=sys.stderr)
                         if status == 0:
                             status = 1
             finally:
