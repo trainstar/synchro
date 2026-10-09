@@ -164,11 +164,6 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install --locked --force cargo-mutants --version 27.1.0
 
-      - name: Start local PostgreSQL
-        run: |
-          make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
-
       - name: Run candidate-server tests
         run: make ci-candidate-server SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
 
@@ -180,10 +175,6 @@ jobs:
           path: ${{ runner.temp }}/soak-evidence
           # A failure before the stress test leaves no journal. The test step keeps that failure.
           if-no-files-found: ignore
-
-      - name: Stop local PostgreSQL
-        if: always()
-        run: make local-postgres-stop
 
   candidate-swift:
     name: candidate Swift

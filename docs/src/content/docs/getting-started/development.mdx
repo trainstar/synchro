@@ -147,10 +147,15 @@ make ci-candidate-rn-android
 
 The workflow file keeps only tool setup, device setup, database start and stop, and artifact upload.
 Install the tools and boot the device that the job sets up before you run its target.
-The candidate targets need a disposable database.
+The server candidate target creates its API-test fixture after the Rust targets.
+It stops that fixture before the independent black-box and integration mutation targets.
+Do not start a separate fixture for the server candidate target.
+Failed API fixture logs remain under `.ignore/r2/tmp/candidate-server-adapter.*`.
+
+The native candidate targets need a disposable database.
 They read its URL from `ADAPTER_TEST_URL` and its `attach.env` file from `WARM_CONNECT_ENV_FILE`.
 
-For a database on this machine, start it as CI does:
+For a native candidate database on this machine, start it as CI does:
 
 ```sh
 make local-postgres-start

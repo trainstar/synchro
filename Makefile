@@ -411,7 +411,7 @@ help:
 	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
 	@echo "  ci-source-quality     - Run the tests of the CI source-quality job"
-	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (ADAPTER_TEST_URL, SOAK_ARTIFACT_DIR)"
+	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (SOAK_ARTIFACT_DIR)"
 	@echo "  ci-candidate-swift    - Run the tests of the CI candidate-swift job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
 	@echo "  ci-candidate-kotlin   - Run the tests of the CI candidate-kotlin job on KOTLIN_ANDROID_SERIAL (ADAPTER_TEST_URL)"
 	@echo "  ci-candidate-rn-ios   - Run the tests of the CI candidate-rn-ios job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
@@ -1153,7 +1153,28 @@ ci-candidate-server: export SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACT
 ci-candidate-server:
 	$(MAKE) test-rust-pg
 	$(MAKE) test-rust-mutants
-	$(MAKE) test-adapter
+	@set -eu; \
+		mkdir -p "$(CURDIR)/.ignore/r2/tmp"; \
+		state="$$(mktemp -d "$(CURDIR)/.ignore/r2/tmp/candidate-server-adapter.XXXXXX")"; \
+		set -- LOCAL_POSTGRES_STATE_DIR="$$state" \
+			LOCAL_POSTGRES_PID_FILE="$$state/postgres.pid" \
+			LOCAL_POSTGRES_LOG_FILE="$$state/postgres.log" \
+			LOCAL_POSTGRES_URL_FILE="$$state/postgres.url" \
+			LOCAL_POSTGRES_ATTACH_ENV_FILE="$$state/attach.env"; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT HUP INT TERM; \
+			$(MAKE) --no-print-directory local-postgres-stop "$$@" || { stop_status=$$?; test "$$status" -ne 0 || status=$$stop_status; }; \
+			if [ "$$status" -eq 0 ]; then rm -rf "$$state"; \
+			else echo "API fixture logs retained at $$state" >&2; fi; \
+			exit "$$status"; \
+		}; \
+		trap 'cleanup "$$@"' EXIT; \
+		trap 'exit 129' HUP; \
+		trap 'exit 130' INT; \
+		trap 'exit 143' TERM; \
+		$(MAKE) --no-print-directory local-postgres-start "$$@"; \
+		ADAPTER_TEST_URL="$$(cat "$$state/postgres.url")" $(MAKE) --no-print-directory test-adapter
 	rm -rf "$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)" "$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"
 	$(MAKE) conformance-update-baseline-extension-artifact
 	$(MAKE) test-blackbox
