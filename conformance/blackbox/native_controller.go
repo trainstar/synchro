@@ -1346,6 +1346,7 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 			}
 			c.mu.Lock()
 			if c.installation != nil {
+				c.installation.runtimeRegistryGeneration = membershipChange.runtimeRegistryGeneration
 				c.installation.pendingMembershipChange = nil
 			}
 			c.mu.Unlock()
