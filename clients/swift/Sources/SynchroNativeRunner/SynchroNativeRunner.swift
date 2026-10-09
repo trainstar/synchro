@@ -450,6 +450,7 @@ private struct RunnerTransportObservation: Encodable {
     let requestFacts: TransportRequestFacts?
     let rebuildResponseFacts: TransportRebuildResponseFacts?
     let pullResponseFacts: TransportPullResponseFacts?
+    let connectResponseFacts: TransportConnectResponseFacts?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -463,6 +464,7 @@ private struct RunnerTransportObservation: Encodable {
         case requestFacts = "request_facts"
         case rebuildResponseFacts = "rebuild_response_facts"
         case pullResponseFacts = "pull_response_facts"
+        case connectResponseFacts = "connect_response_facts"
     }
 
     init(_ observation: TransportObservation) {
@@ -477,6 +479,7 @@ private struct RunnerTransportObservation: Encodable {
         requestFacts = observation.requestFacts
         rebuildResponseFacts = observation.rebuildResponseFacts
         pullResponseFacts = observation.pullResponseFacts
+        connectResponseFacts = observation.connectResponseFacts
     }
 
     func encode(to encoder: Encoder) throws {
@@ -492,6 +495,7 @@ private struct RunnerTransportObservation: Encodable {
         try container.encodeIfPresent(requestFacts, forKey: .requestFacts)
         try container.encodeIfPresent(rebuildResponseFacts, forKey: .rebuildResponseFacts)
         try container.encodeIfPresent(pullResponseFacts, forKey: .pullResponseFacts)
+        try container.encodeIfPresent(connectResponseFacts, forKey: .connectResponseFacts)
     }
 }
 

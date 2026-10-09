@@ -1088,6 +1088,44 @@ describe('SynchroClient', () => {
       await client.close();
     });
 
+    it('preserves explicit null connect cursor updates and rejects malformed facts', async () => {
+      const scope = 'a'.repeat(64);
+      const facts = {
+        action: 'replace', schema_version: 2, schema_hash: 'b'.repeat(64),
+        affected_scope_fingerprints: [scope], affected_scopes_complete: true,
+        scope_cursor_updates: { [scope]: null }, scope_cursor_updates_complete: true,
+      };
+      const observation = {
+        sequence: 1, operation_class: 'connect', status_code: 200, duration_nanoseconds: 1,
+        connect_response_facts: facts,
+      };
+      const { client, inspection } = await makeInspection();
+      mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+        observations: [observation], overflowed: false, sequence_checkpoint: 1,
+      }));
+      const snapshot = await inspection.transportObservations();
+      const updates = snapshot.observations[0].connectResponseFacts!.scope_cursor_updates as Record<string, unknown>;
+      expect(updates[scope]).toBeNull();
+      expect(Object.prototype.hasOwnProperty.call(updates, 'c'.repeat(64))).toBe(false);
+      for (const invalid of [
+        { ...facts, action: 'unknown' },
+        { ...facts, schema_version: null },
+        { ...facts, schema_hash: 'raw-schema' },
+        { ...facts, affected_scope_fingerprints: Array(17).fill(scope) },
+        { ...facts, affected_scopes_complete: 'true' },
+        { ...facts, scope_cursor_updates: { [scope]: 'raw-token' } },
+        { ...facts, scope_cursor_updates: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [index.toString(16).padStart(64, '0'), null])) },
+        { ...facts, scope_cursor_updates_complete: null },
+        { ...facts, response_body: 'not allowed' },
+      ]) {
+        mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+          observations: [{ ...observation, connect_response_facts: invalid }], overflowed: false, sequence_checkpoint: 1,
+        }));
+        await expect(inspection.transportObservations()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+      }
+      await client.close();
+    });
+
     it('returns the native process identity', async () => {
       const { client, inspection } = await makeInspection();
 

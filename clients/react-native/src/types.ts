@@ -348,6 +348,7 @@ export interface TransportObservation {
   requestFacts?: Record<string, JSONValue>;
   rebuildResponseFacts?: Record<string, JSONValue>;
   pullResponseFacts?: Record<string, JSONValue>;
+  connectResponseFacts?: Record<string, JSONValue>;
 }
 
 export interface TransportObservationSnapshot {

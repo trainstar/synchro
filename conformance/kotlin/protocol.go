@@ -220,6 +220,57 @@ type TransportObservation struct {
 	RequestFacts               *TransportRequestFacts         `json:"request_facts"`
 	RebuildResponseFacts       *TransportRebuildResponseFacts `json:"rebuild_response_facts"`
 	PullResponseFacts          *TransportPullResponseFacts    `json:"pull_response_facts"`
+	ConnectResponseFacts       *TransportConnectResponseFacts `json:"connect_response_facts"`
+}
+
+type TransportConnectResponseFacts struct {
+	Action                     string             `json:"action"`
+	SchemaVersion              int64              `json:"schema_version"`
+	SchemaHash                 string             `json:"schema_hash"`
+	AffectedScopeFingerprints  []string           `json:"affected_scope_fingerprints"`
+	AffectedScopesComplete     bool               `json:"affected_scopes_complete"`
+	ScopeCursorUpdates         map[string]*string `json:"scope_cursor_updates"`
+	ScopeCursorUpdatesComplete bool               `json:"scope_cursor_updates_complete"`
+}
+
+func (f *TransportConnectResponseFacts) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *int64              `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	if decodeStrict(data, &raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return errors.New("decode Kotlin connect response facts failed")
+	}
+	f.Action = *raw.Action
+	f.SchemaVersion = *raw.SchemaVersion
+	f.SchemaHash = *raw.SchemaHash
+	f.AffectedScopeFingerprints = *raw.AffectedScopeFingerprints
+	f.AffectedScopesComplete = *raw.AffectedScopesComplete
+	f.ScopeCursorUpdates = *raw.ScopeCursorUpdates
+	f.ScopeCursorUpdatesComplete = *raw.ScopeCursorUpdatesComplete
+	return f.validate()
+}
+
+func (f *TransportConnectResponseFacts) validate() error {
+	switch f.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return errors.New("Kotlin connect response action is invalid")
+	}
+	if f.SchemaVersion <= 0 || !validLowerHexDigest(f.SchemaHash) || f.AffectedScopeFingerprints == nil || !validCursorFingerprintSet(f.AffectedScopeFingerprints) || f.ScopeCursorUpdates == nil || len(f.ScopeCursorUpdates) > 16 {
+		return errors.New("Kotlin connect response facts are invalid")
+	}
+	for scope, cursor := range f.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return errors.New("Kotlin connect cursor updates are invalid")
+		}
+	}
+	return nil
 }
 
 type TransportRequestFacts struct {
@@ -809,6 +860,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 		RequestFacts               *TransportRequestFacts         `json:"request_facts"`
 		RebuildResponseFacts       *TransportRebuildResponseFacts `json:"rebuild_response_facts"`
 		PullResponseFacts          *TransportPullResponseFacts    `json:"pull_response_facts"`
+		ConnectResponseFacts       *TransportConnectResponseFacts `json:"connect_response_facts"`
 	}
 	if err := decodeStrict(data, &raw); err != nil || raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || len(raw.ErrorCode) == 0 || len(raw.Retryable) == 0 || raw.DurationNanoseconds == nil {
 		return errors.New("decode Kotlin transport observation failed")
@@ -838,6 +890,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 	o.RequestFacts = raw.RequestFacts
 	o.RebuildResponseFacts = raw.RebuildResponseFacts
 	o.PullResponseFacts = raw.PullResponseFacts
+	o.ConnectResponseFacts = raw.ConnectResponseFacts
 	return nil
 }
 
@@ -952,6 +1005,15 @@ func validateTransportObservation(observation TransportObservation) error {
 	if err := validateTransportRequestAndResponseFacts(observation); err != nil {
 		return err
 	}
+	if observation.OperationClass == "connect" {
+		if observation.CursorFingerprints == nil && observation.CursorFingerprintsComplete == nil {
+			return nil
+		}
+		if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+			return errors.New("Kotlin connect cursor fingerprints are invalid")
+		}
+		return nil
+	}
 	if observation.OperationClass != "pull" {
 		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 			return errors.New("Kotlin transport cursor fingerprints are not pull evidence")
@@ -990,6 +1052,11 @@ func transportErrorRetryable(code string) bool {
 }
 
 func validateTransportRequestAndResponseFacts(observation TransportObservation) error {
+	if response := observation.ConnectResponseFacts; response != nil {
+		if observation.OperationClass != "connect" || observation.StatusCode != 200 || response.validate() != nil {
+			return errors.New("Kotlin connect response facts are invalid")
+		}
+	}
 	facts := observation.RequestFacts
 	switch observation.OperationClass {
 	case "connect":
@@ -1145,6 +1212,15 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		response := *value.PullResponseFacts
 		response.ScopeCursorFingerprints = append([]string(nil), value.PullResponseFacts.ScopeCursorFingerprints...)
 		copy.PullResponseFacts = &response
+	}
+	if value.ConnectResponseFacts != nil {
+		response := *value.ConnectResponseFacts
+		response.AffectedScopeFingerprints = cloneFingerprintSet(response.AffectedScopeFingerprints)
+		response.ScopeCursorUpdates = make(map[string]*string, len(value.ConnectResponseFacts.ScopeCursorUpdates))
+		for scope, cursor := range value.ConnectResponseFacts.ScopeCursorUpdates {
+			response.ScopeCursorUpdates[scope] = clonePointer(cursor)
+		}
+		copy.ConnectResponseFacts = &response
 	}
 	if value.RequestFacts != nil {
 		facts := *value.RequestFacts

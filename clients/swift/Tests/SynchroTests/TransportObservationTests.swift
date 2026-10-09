@@ -216,6 +216,77 @@ final class TransportObservationTests: XCTestCase {
         )
     }
 
+    func testConnectInspectionBoundsParsedCollectionsAndPreservesNullUpdates() async throws {
+        let collector = TransportObservationCollector()
+        let client = makeClient(collector: collector)
+        let scopes = (0..<17).map { String(format: "scope-%02d", $0) }
+        let updates: [String: Any] = Dictionary(uniqueKeysWithValues: scopes.map {
+            ($0, $0 == scopes[0] ? NSNull() : "token-\($0)" as Any)
+        })
+        let body = try JSONSerialization.data(withJSONObject: [
+            "server_time": "2026-10-09T00:00:00Z", "protocol_version": 3,
+            "client_generation": 1, "scope_set_version": 1,
+            "schema": ["version": 2, "hash": String(repeating: "a", count: 64), "action": "replace"],
+            "scopes": ["add": [], "remove": []],
+            "affected_scopes": Array(scopes.reversed()), "scope_cursor_updates": updates,
+        ])
+        MockURLProtocol.requestHandler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+        }
+        var knownScopes = Dictionary(uniqueKeysWithValues: scopes.map { ($0, ScopeCursorRef(cursor: "token-\($0)")) })
+        knownScopes["without-cursor"] = ScopeCursorRef(cursor: nil)
+        let request = ConnectRequest(
+            clientID: "client", clientGeneration: 1, platform: "ios", appVersion: "1.0.0",
+            protocolVersion: 3, schema: SchemaRef(version: 1, hash: String(repeating: "b", count: 64)),
+            scopeSetVersion: 1, knownScopes: knownScopes
+        )
+        // The missing schema definition prevents this inspection test from proving a sync flow.
+        do {
+            _ = try await client.connect(request: request)
+            XCTFail("Expected an invalid connect response")
+        } catch {}
+
+        let observation = try XCTUnwrap(collector.snapshot().observations.first)
+        let facts = try XCTUnwrap(observation.connectResponseFacts)
+        XCTAssertEqual(facts.action, "replace")
+        XCTAssertEqual(facts.schemaVersion, 2)
+        XCTAssertEqual(facts.schemaHash, String(repeating: "a", count: 64))
+        XCTAssertEqual(facts.affectedScopeFingerprints, scopes.prefix(16).map(TransportObservationCollector.cursorFingerprint).sorted())
+        XCTAssertFalse(facts.affectedScopesComplete)
+        XCTAssertFalse(facts.scopeCursorUpdatesComplete)
+        XCTAssertEqual(facts.scopeCursorUpdates.count, 16)
+        let nullScope = TransportObservationCollector.cursorFingerprint(scopes[0])
+        XCTAssertTrue(facts.scopeCursorUpdates[nullScope] == .some(nil))
+        XCTAssertNil(facts.scopeCursorUpdates[TransportObservationCollector.cursorFingerprint(scopes[16])])
+        XCTAssertEqual(observation.cursorFingerprints, Array(scopes.map { TransportObservationCollector.cursorFingerprint("token-\($0)") }.sorted().prefix(16)))
+        XCTAssertEqual(observation.cursorFingerprintsComplete, false)
+        let encoded = try JSONEncoder().encode(observation)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let encodedFacts = try XCTUnwrap(object["connect_response_facts"] as? [String: Any])
+        let encodedUpdates = try XCTUnwrap(encodedFacts["scope_cursor_updates"] as? [String: Any])
+        XCTAssertTrue(encodedUpdates[nullScope] is NSNull)
+        XCTAssertEqual(encodedUpdates[TransportObservationCollector.cursorFingerprint(scopes[1])] as? String,
+                       TransportObservationCollector.cursorFingerprint("token-\(scopes[1])"))
+        XCTAssertEqual(try JSONDecoder().decode(TransportObservation.self, from: encoded), observation)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("scope-"))
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("token-"))
+
+        var omittedResponse = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        omittedResponse.removeValue(forKey: "affected_scopes")
+        let omittedBody = try JSONSerialization.data(withJSONObject: omittedResponse)
+        MockURLProtocol.requestHandler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, omittedBody)
+        }
+        let omittedResult = try? await client.connect(request: request)
+        XCTAssertNil(omittedResult)
+        let omittedObservation = try XCTUnwrap(collector.snapshot().observations.last)
+        let omittedEncoded = try JSONEncoder().encode(omittedObservation)
+        let omittedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: omittedEncoded) as? [String: Any])
+        let omittedFacts = try XCTUnwrap(omittedObject["connect_response_facts"] as? [String: Any])
+        XCTAssertEqual(omittedFacts["affected_scope_fingerprints"] as? [String], [])
+        XCTAssertEqual(omittedFacts["affected_scopes_complete"] as? Bool, true)
+    }
+
     func testNetworkFailureUsesStatusZero() async throws {
         let collector = TransportObservationCollector(capacity: 4)
         let client = makeClient(collector: collector)

@@ -648,6 +648,7 @@ private class ClientSession(private val context: Context) : Closeable {
                             put("rebuild_response_facts", json.encodeToJsonElement(it))
                         }
                         value.pullResponseFacts?.let { put("pull_response_facts", json.encodeToJsonElement(it)) }
+                        value.connectResponseFacts?.let { put("connect_response_facts", json.encodeToJsonElement(it)) }
                     })
                 }
             })

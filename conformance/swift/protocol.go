@@ -225,6 +225,57 @@ type transportObservation struct {
 	RequestFacts               *transportRequestFacts
 	RebuildResponseFacts       *transportRebuildResponseFacts
 	PullResponseFacts          *transportPullResponseFacts
+	ConnectResponseFacts       *transportConnectResponseFacts
+}
+
+type transportConnectResponseFacts struct {
+	Action                     string
+	SchemaVersion              int64
+	SchemaHash                 string
+	AffectedScopeFingerprints  []string
+	AffectedScopesComplete     bool
+	ScopeCursorUpdates         map[string]*string
+	ScopeCursorUpdatesComplete bool
+}
+
+func (f *transportConnectResponseFacts) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *int64              `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	if jsonstrict.Decode(data, &raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return errors.New("decode transport connect response facts failed")
+	}
+	f.Action = *raw.Action
+	f.SchemaVersion = *raw.SchemaVersion
+	f.SchemaHash = *raw.SchemaHash
+	f.AffectedScopeFingerprints = *raw.AffectedScopeFingerprints
+	f.AffectedScopesComplete = *raw.AffectedScopesComplete
+	f.ScopeCursorUpdates = *raw.ScopeCursorUpdates
+	f.ScopeCursorUpdatesComplete = *raw.ScopeCursorUpdatesComplete
+	return f.validate()
+}
+
+func (f *transportConnectResponseFacts) validate() error {
+	switch f.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return errors.New("transport connect response action is invalid")
+	}
+	if f.SchemaVersion <= 0 || !validLowerHexDigest(f.SchemaHash) || f.AffectedScopeFingerprints == nil || !validCursorFingerprintSet(f.AffectedScopeFingerprints) || f.ScopeCursorUpdates == nil || len(f.ScopeCursorUpdates) > 16 {
+		return errors.New("transport connect response facts are invalid")
+	}
+	for scope, cursor := range f.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return errors.New("transport connect cursor updates are invalid")
+		}
+	}
+	return nil
 }
 
 type transportRequestFacts struct {
@@ -369,6 +420,7 @@ func (o *transportObservation) UnmarshalJSON(data []byte) error {
 		RequestFacts               *transportRequestFacts         `json:"request_facts"`
 		RebuildResponseFacts       *transportRebuildResponseFacts `json:"rebuild_response_facts"`
 		PullResponseFacts          *transportPullResponseFacts    `json:"pull_response_facts"`
+		ConnectResponseFacts       *transportConnectResponseFacts `json:"connect_response_facts"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -393,6 +445,7 @@ func (o *transportObservation) UnmarshalJSON(data []byte) error {
 	o.RequestFacts = raw.RequestFacts
 	o.RebuildResponseFacts = raw.RebuildResponseFacts
 	o.PullResponseFacts = raw.PullResponseFacts
+	o.ConnectResponseFacts = raw.ConnectResponseFacts
 	return nil
 }
 
@@ -1196,6 +1249,15 @@ func validateTransportObservation(observation transportObservation) error {
 	if err := validateTransportRequestAndResponseFacts(observation); err != nil {
 		return err
 	}
+	if observation.OperationClass == "connect" {
+		if observation.CursorFingerprints == nil && observation.CursorFingerprintsComplete == nil {
+			return nil
+		}
+		if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+			return errors.New("runner connect cursor fingerprints are invalid")
+		}
+		return nil
+	}
 	if observation.OperationClass != "pull" {
 		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 			return errors.New("runner transport cursor fingerprints are not pull evidence")
@@ -1251,6 +1313,11 @@ func transportErrorRetryable(code string) bool {
 }
 
 func validateTransportRequestAndResponseFacts(observation transportObservation) error {
+	if response := observation.ConnectResponseFacts; response != nil {
+		if observation.OperationClass != "connect" || observation.StatusCode != 200 || response.validate() != nil {
+			return errors.New("runner connect response facts are invalid")
+		}
+	}
 	facts := observation.RequestFacts
 	switch observation.OperationClass {
 	case "connect":
@@ -1396,6 +1463,15 @@ func cloneTransportObservation(value transportObservation) transportObservation 
 		facts := *value.PullResponseFacts
 		facts.ScopeCursorFingerprints = append([]string(nil), value.PullResponseFacts.ScopeCursorFingerprints...)
 		copy.PullResponseFacts = &facts
+	}
+	if value.ConnectResponseFacts != nil {
+		facts := *value.ConnectResponseFacts
+		facts.AffectedScopeFingerprints = cloneFingerprintSet(facts.AffectedScopeFingerprints)
+		facts.ScopeCursorUpdates = make(map[string]*string, len(value.ConnectResponseFacts.ScopeCursorUpdates))
+		for scope, cursor := range value.ConnectResponseFacts.ScopeCursorUpdates {
+			facts.ScopeCursorUpdates[scope] = cloneOptionalString(cursor)
+		}
+		copy.ConnectResponseFacts = &facts
 	}
 	return copy
 }

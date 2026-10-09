@@ -254,6 +254,13 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 	if _, err := validateRunnerResponse(runnerResponseWith(t, asConnect)); err != nil {
 		t.Fatalf("valid connect transport observation rejected: %v", err)
 	}
+	if _, err := validateRunnerResponse(runnerResponseWith(t, func(parts runnerResponseParts) {
+		asConnect(parts)
+		parts.observation["cursor_fingerprints"] = []any{}
+		parts.observation["cursor_fingerprints_complete"] = true
+	})); err != nil {
+		t.Fatalf("valid connect cursor observation rejected: %v", err)
+	}
 	if _, err := validateRunnerResponse(runnerResponseWith(t, func(parts runnerResponseParts) { asConnectFailure(parts, 503) })); err != nil {
 		t.Fatalf("valid connect transport failure rejected: %v", err)
 	}
@@ -278,8 +285,10 @@ func TestValidateRunnerResponseValidatesRawTransportObservations(t *testing.T) {
 		}},
 		{name: "status below bounds", change: func(parts runnerResponseParts) { asConnectFailure(parts, 99) }},
 		{name: "status above bounds", change: func(parts runnerResponseParts) { asConnectFailure(parts, 600) }},
-		{name: "cursor on connect", change: func(parts runnerResponseParts) {
+		{name: "cursor on schemas", change: func(parts runnerResponseParts) {
 			asConnect(parts)
+			parts.observation["operation_class"] = "schemas"
+			delete(parts.observation, "request_facts")
 			parts.observation["cursor_fingerprints"] = []any{strings.Repeat("a", 64)}
 			parts.observation["cursor_fingerprints_complete"] = true
 		}},

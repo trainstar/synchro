@@ -167,6 +167,45 @@ public struct TransportPullResponseFacts: Codable, Sendable, Equatable {
 }
 
 @_spi(Inspection)
+public struct TransportConnectResponseFacts: Codable, Sendable, Equatable {
+    public let action: String
+    public let schemaVersion: Int64
+    public let schemaHash: String
+    public let affectedScopeFingerprints: [String]
+    public let affectedScopesComplete: Bool
+    public let scopeCursorUpdates: [String: String?]
+    public let scopeCursorUpdatesComplete: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case schemaVersion = "schema_version"
+        case schemaHash = "schema_hash"
+        case affectedScopeFingerprints = "affected_scope_fingerprints"
+        case affectedScopesComplete = "affected_scopes_complete"
+        case scopeCursorUpdates = "scope_cursor_updates"
+        case scopeCursorUpdatesComplete = "scope_cursor_updates_complete"
+    }
+
+    public init(
+        action: String,
+        schemaVersion: Int64,
+        schemaHash: String,
+        affectedScopeFingerprints: [String],
+        affectedScopesComplete: Bool,
+        scopeCursorUpdates: [String: String?],
+        scopeCursorUpdatesComplete: Bool
+    ) {
+        self.action = action
+        self.schemaVersion = schemaVersion
+        self.schemaHash = schemaHash
+        self.affectedScopeFingerprints = affectedScopeFingerprints
+        self.affectedScopesComplete = affectedScopesComplete
+        self.scopeCursorUpdates = scopeCursorUpdates
+        self.scopeCursorUpdatesComplete = scopeCursorUpdatesComplete
+    }
+}
+
+@_spi(Inspection)
 public struct TransportObservation: Codable, Sendable, Equatable {
     public let sequence: UInt64
     public let operationClass: TransportOperationClass
@@ -177,6 +216,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
     public let requestFacts: TransportRequestFacts?
     public let rebuildResponseFacts: TransportRebuildResponseFacts?
     public let pullResponseFacts: TransportPullResponseFacts?
+    public let connectResponseFacts: TransportConnectResponseFacts?
     /// The error code the server reported. A status code alone cannot name it,
     /// because one status carries more than one code.
     public let errorCode: String?
@@ -193,6 +233,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         case requestFacts = "request_facts"
         case rebuildResponseFacts = "rebuild_response_facts"
         case pullResponseFacts = "pull_response_facts"
+        case connectResponseFacts = "connect_response_facts"
         case errorCode = "error_code"
         case retryable
     }
@@ -207,6 +248,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
         pullResponseFacts: TransportPullResponseFacts? = nil,
+        connectResponseFacts: TransportConnectResponseFacts? = nil,
         errorCode: String? = nil,
         retryable: Bool? = nil
     ) {
@@ -219,6 +261,7 @@ public struct TransportObservation: Codable, Sendable, Equatable {
         self.requestFacts = requestFacts
         self.rebuildResponseFacts = rebuildResponseFacts
         self.pullResponseFacts = pullResponseFacts
+        self.connectResponseFacts = connectResponseFacts
         self.errorCode = errorCode
         self.retryable = retryable
     }
@@ -442,6 +485,7 @@ public final class TransportObservationCollector: @unchecked Sendable {
         requestFacts: TransportRequestFacts? = nil,
         rebuildResponseFacts: TransportRebuildResponseFacts? = nil,
         pullResponseFacts: TransportPullResponseFacts? = nil,
+        connectResponseFacts: TransportConnectResponseFacts? = nil,
         errorCode: String? = nil,
         retryable: Bool? = nil
     ) {
@@ -463,6 +507,7 @@ public final class TransportObservationCollector: @unchecked Sendable {
             requestFacts: requestFacts,
             rebuildResponseFacts: rebuildResponseFacts,
             pullResponseFacts: pullResponseFacts,
+            connectResponseFacts: connectResponseFacts,
             errorCode: errorCode,
             retryable: retryable
         ))

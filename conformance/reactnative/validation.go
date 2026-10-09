@@ -65,6 +65,35 @@ type transportObservation struct {
 	RequestFacts               json.RawMessage `json:"requestFacts"`
 	RebuildResponseFacts       json.RawMessage `json:"rebuildResponseFacts"`
 	PullResponseFacts          json.RawMessage `json:"pullResponseFacts"`
+	ConnectResponseFacts       json.RawMessage `json:"connectResponseFacts"`
+}
+
+func (o *transportObservation) UnmarshalJSON(data []byte) error {
+	type observation transportObservation
+	var decoded observation
+	if jsonstrict.Decode(data, &decoded) != nil {
+		return errors.New("React Native transport observation is invalid")
+	}
+	if hasJSONValue(decoded.ConnectResponseFacts) {
+		if decoded.OperationClass != "connect" || decoded.StatusCode != 200 {
+			return errors.New("React Native connect facts are attached to an unsupported response")
+		}
+		if _, err := decodeConnectResponseFacts(decoded.ConnectResponseFacts); err != nil {
+			return err
+		}
+	}
+	*o = transportObservation(decoded)
+	return nil
+}
+
+type connectResponseFacts struct {
+	Action                     string
+	SchemaVersion              uint64
+	SchemaHash                 string
+	AffectedScopeFingerprints  []string
+	AffectedScopesComplete     bool
+	ScopeCursorUpdates         map[string]*string
+	ScopeCursorUpdatesComplete bool
 }
 
 type rebuildResponseFacts struct {
@@ -587,7 +616,8 @@ func transportObservationsEqual(left, right transportObservation) bool {
 	}
 	return semanticRawJSONEqual(left.RequestFacts, right.RequestFacts) &&
 		semanticRawJSONEqual(left.RebuildResponseFacts, right.RebuildResponseFacts) &&
-		semanticRawJSONEqual(left.PullResponseFacts, right.PullResponseFacts)
+		semanticRawJSONEqual(left.PullResponseFacts, right.PullResponseFacts) &&
+		semanticRawJSONEqual(left.ConnectResponseFacts, right.ConnectResponseFacts)
 }
 
 func semanticRawJSONEqual(left, right json.RawMessage) bool {
@@ -631,8 +661,22 @@ func validateTraceOperation(observation transportObservation, operation string) 
 			!*observation.CursorFingerprintsComplete || !validCursorFingerprintSet(observation.CursorFingerprints) {
 			return errors.New("pull cursor fingerprints are incomplete")
 		}
+	} else if operation == "connect" {
+		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
+			if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+				return errors.New("connect cursor fingerprints are invalid")
+			}
+		}
 	} else if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 		return errors.New("cursor fingerprints are not pull evidence")
+	}
+	if hasJSONValue(observation.ConnectResponseFacts) {
+		if operation != "connect" {
+			return errors.New("connect response facts are attached to an unsupported response")
+		}
+		if _, err := decodeConnectResponseFacts(observation.ConnectResponseFacts); err != nil {
+			return err
+		}
 	}
 	switch operation {
 	case "connect":
@@ -673,6 +717,39 @@ func validatePortableRequestIntegers(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+func decodeConnectResponseFacts(data json.RawMessage) (connectResponseFacts, error) {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *uint64             `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	if validateBoundedJSON(data, maximumExchangeBytes) != nil || jsonstrict.Decode(data, &raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return connectResponseFacts{}, errors.New("React Native connect response facts are incomplete or invalid")
+	}
+	switch *raw.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return connectResponseFacts{}, errors.New("React Native connect action is invalid")
+	}
+	if *raw.SchemaVersion == 0 || *raw.SchemaVersion > warmConnectMaximumSafeInteger || !validLowerHexDigest(*raw.SchemaHash) || !validCursorFingerprintSet(*raw.AffectedScopeFingerprints) || len(*raw.ScopeCursorUpdates) > 16 {
+		return connectResponseFacts{}, errors.New("React Native connect response facts are invalid")
+	}
+	for scope, cursor := range *raw.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return connectResponseFacts{}, errors.New("React Native connect cursor updates are invalid")
+		}
+	}
+	return connectResponseFacts{
+		Action: *raw.Action, SchemaVersion: *raw.SchemaVersion, SchemaHash: *raw.SchemaHash,
+		AffectedScopeFingerprints: *raw.AffectedScopeFingerprints, AffectedScopesComplete: *raw.AffectedScopesComplete,
+		ScopeCursorUpdates: *raw.ScopeCursorUpdates, ScopeCursorUpdatesComplete: *raw.ScopeCursorUpdatesComplete,
+	}, nil
 }
 
 func decodeRebuildResponseFacts(raw json.RawMessage) (rebuildResponseFacts, error) {

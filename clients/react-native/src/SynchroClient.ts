@@ -699,6 +699,27 @@ function parseTransportObservation(value: unknown, index: number): TransportObse
   if (cursorFingerprintsComplete !== undefined && typeof cursorFingerprintsComplete !== 'boolean') {
     throw new InvalidResponseError(`Native bridge returned invalid ${name} cursor completeness`);
   }
+  const connectFacts = optionalTransportFacts(value.connect_response_facts, `${name} connect response facts`);
+  if (connectFacts !== undefined) {
+    const affected = connectFacts.affected_scope_fingerprints;
+    const updates = connectFacts.scope_cursor_updates;
+    const hashPattern = /^[0-9a-f]{64}$/;
+    if (
+      value.operation_class !== 'connect' || value.status_code !== 200 ||
+      Object.keys(connectFacts).length !== 7 ||
+      !['none', 'replace', 'rebuild_local', 'unsupported'].includes(connectFacts.action as string) ||
+      typeof connectFacts.schema_version !== 'number' || !Number.isSafeInteger(connectFacts.schema_version) || connectFacts.schema_version <= 0 ||
+      typeof connectFacts.schema_hash !== 'string' || !hashPattern.test(connectFacts.schema_hash) ||
+      !Array.isArray(affected) || affected.length > 16 ||
+      !affected.every((item, position) => typeof item === 'string' && hashPattern.test(item) && (position === 0 || (affected[position - 1] as string) < item)) ||
+      typeof connectFacts.affected_scopes_complete !== 'boolean' ||
+      !isRecord(updates) || Object.keys(updates).length > 16 ||
+      !Object.entries(updates).every(([scope, cursor]) => hashPattern.test(scope) && (cursor === null || typeof cursor === 'string' && hashPattern.test(cursor))) ||
+      typeof connectFacts.scope_cursor_updates_complete !== 'boolean'
+    ) {
+      throw new InvalidResponseError(`Native bridge returned invalid ${name} connect response facts`);
+    }
+  }
   return {
     sequence: requiredSafeInteger(value.sequence, `${name} sequence`),
     operationClass: value.operation_class as TransportOperationClass,
@@ -709,6 +730,7 @@ function parseTransportObservation(value: unknown, index: number): TransportObse
     ...(value.request_facts == null ? {} : { requestFacts: optionalTransportRequestFacts(value.request_facts, `${name} request facts`)! }),
     ...(value.rebuild_response_facts == null ? {} : { rebuildResponseFacts: optionalTransportFacts(value.rebuild_response_facts, `${name} rebuild response facts`)! }),
     ...(value.pull_response_facts == null ? {} : { pullResponseFacts: optionalTransportFacts(value.pull_response_facts, `${name} pull response facts`)! }),
+    ...(connectFacts === undefined ? {} : { connectResponseFacts: connectFacts }),
   };
 }
 

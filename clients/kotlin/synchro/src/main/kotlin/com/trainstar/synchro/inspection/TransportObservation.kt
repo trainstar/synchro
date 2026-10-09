@@ -105,6 +105,18 @@ data class TransportPullResponseFacts(
 
 @Serializable
 @SynchroProofApi
+data class TransportConnectResponseFacts(
+    val action: String,
+    @SerialName("schema_version") val schemaVersion: Long,
+    @SerialName("schema_hash") val schemaHash: String,
+    @SerialName("affected_scope_fingerprints") val affectedScopeFingerprints: List<String>,
+    @SerialName("affected_scopes_complete") val affectedScopesComplete: Boolean,
+    @SerialName("scope_cursor_updates") val scopeCursorUpdates: Map<String, String?>,
+    @SerialName("scope_cursor_updates_complete") val scopeCursorUpdatesComplete: Boolean,
+)
+
+@Serializable
+@SynchroProofApi
 data class TransportObservation(
     val sequence: Long,
     @SerialName("operation_class") val operationClass: TransportOperationClass,
@@ -116,6 +128,7 @@ data class TransportObservation(
     @SerialName("request_facts") val requestFacts: TransportRequestFacts? = null,
     @SerialName("rebuild_response_facts") val rebuildResponseFacts: TransportRebuildResponseFacts? = null,
     @SerialName("pull_response_facts") val pullResponseFacts: TransportPullResponseFacts? = null,
+    @SerialName("connect_response_facts") val connectResponseFacts: TransportConnectResponseFacts? = null,
     val retryable: Boolean? = null,
 )
 
@@ -302,6 +315,7 @@ class TransportObservationCollector(capacity: Int = 256) {
         requestFacts: TransportRequestFacts? = null,
         rebuildResponseFacts: TransportRebuildResponseFacts? = null,
         pullResponseFacts: TransportPullResponseFacts? = null,
+        connectResponseFacts: TransportConnectResponseFacts? = null,
     ) {
         synchronized(lock) {
             check(sequence < Long.MAX_VALUE) { "transport observation sequence exhausted" }
@@ -320,6 +334,7 @@ class TransportObservationCollector(capacity: Int = 256) {
                     requestFacts = requestFacts,
                     rebuildResponseFacts = rebuildResponseFacts,
                     pullResponseFacts = pullResponseFacts,
+                    connectResponseFacts = connectResponseFacts,
                 ),
             )
         }
