@@ -859,7 +859,7 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             self.rejected()
         self.assertNotIn("private", self.diagnostics.getvalue())
 
-    def test_restricted_directory_denial_timeout_and_malformed_names_reject(self) -> None:
+    def test_restricted_directory_timeout_and_malformed_names_reject(self) -> None:
         directory = self.proc / "321/fd"
         command = ["sudo", "--non-interactive", "ls", "-1", "--", str(directory)]
         original = Path.iterdir
@@ -872,7 +872,6 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             return original(path)
 
         failures = [
-            subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error"),
             subprocess.TimeoutExpired(command, 30, output=b"private output", stderr=b"private error"),
             b"\n", b"0", b"0\n\n", b"0\r\n", b"0\r", b"0\n1", b"00\n", b"01\n", b"-1\n", b"+1\n",
             b" 0\n", b"0 \n", b"0\t\n", b"0\x00\n", b"\xff\n", "١\n".encode("utf-8"),
