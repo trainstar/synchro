@@ -841,9 +841,13 @@ local_order
 ```
 
 The queue retains presence and absence distinctions, every authored field ID and
-value, the original base version, and the original local order. The request-level
-`schema` is the exact current reference; `authored_schema` identifies the
-immutable manifest under which the local intent was captured.
+value, and the original local order.
+Before sealing, reconciliation of an accepted predecessor for the same row may refresh only the unsealed successor's server-owned `base_version`.
+The mutation keeps its ID and authored intent.
+After sealing, the base version and all request content remain immutable.
+The client contract defines this reconciliation rule.
+The request-level `schema` is the exact current reference.
+`authored_schema` identifies the immutable manifest under which the client captured the local intent.
 
 The client does not rename a queued field, drop an unknown field, overwrite
 `authored_schema`, or alter a sealed mutation to fit a newer manifest. The
