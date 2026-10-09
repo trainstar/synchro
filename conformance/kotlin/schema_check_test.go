@@ -437,7 +437,7 @@ func TestSchemaProofStoredOutcomeRequiresActualOriginalIdentity(t *testing.T) {
 		t.Fatal("extra accepted record passed exact ledger closure")
 	}
 	changed = capture
-	changed.RetainedMutations = []byte(`[{"mutation_id":"original-m1"}]`)
+	changed.Result.RetainedMutations = []byte(`[{"mutation_id":"original-m1"}]`)
 	if requireSchemaProofStoredOutcome(changed, push) == nil {
 		t.Fatal("accepted original also appeared in retained records")
 	}
