@@ -81,6 +81,53 @@ def measured_environment(cell_id: str) -> dict[str, str]:
 
 
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def test_kotlin_initial_readiness_retains_failed_commands_without_payloads(self) -> None:
+        script = (REPO_ROOT / "verification/consumers/kotlin/test-consumer-device.sh").read_text()
+        readiness = script.split("ready=0\n", 1)[1].split("\nset +e\n", 1)[0]
+        for read_status, pid_status, output, current_pid in (
+            (255, 255, "cat: files/initial-result.json: No such file or directory", "private-token"),
+            (0, 0, '{"status":"failed","error":"private-token","observed":{"row":"private-row"}}', "202"),
+        ):
+            with self.subTest(read_status=read_status, pid_status=pid_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "work").mkdir()
+                shell = """set -eu
+work_dir="$1/work"
+environment_dir="$1/evidence"
+package=com.trainstar.synchro.consumer
+initial_pid=101
+ready=0
+adb_command() {
+  case "$1" in
+    exec-out) printf '%s' "$RESULT_OUTPUT"; printf '%s' 'private-token' >&2; return "$READ_STATUS" ;;
+    shell) printf '%s\\r\\n' "$CURRENT_PID"; printf '%s' 'error: closed private-token' >&2; return "$PID_STATUS" ;;
+    logcat) printf '%s\\n' 'FATAL EXCEPTION: private-token private-row' 'java.lang.IllegalStateException: private-token'; return 0 ;;
+    *) exit 99 ;;
+  esac
+}
+""" + readiness
+                run = subprocess.run(
+                    ["sh", "-s", "--", str(root)], input=shell, text=True, capture_output=True,
+                    env={**os.environ, "READ_STATUS": str(read_status), "PID_STATUS": str(pid_status),
+                         "RESULT_OUTPUT": output, "CURRENT_PID": current_pid}, timeout=10,
+                )
+                self.assertEqual(run.returncode, 1, run.stderr)
+                evidence = root / "evidence/initial-readiness-failure.json"
+                report = json.loads(evidence.read_text())
+                self.assertEqual(report["initial_result_returncode"], read_status)
+                self.assertEqual(report["liveness_returncode"], pid_status)
+                self.assertEqual(report["expected_pid"], 101)
+                self.assertEqual(report["observed_pid"], 202 if pid_status == 0 else None)
+                self.assertEqual(report["initial_result_bytes"], len(output.encode()))
+                self.assertTrue(report["android_runtime_fatal_exception"])
+                self.assertEqual(report["exception_classes"], ["java.lang.IllegalStateException"])
+                if read_status == 0:
+                    self.assertEqual(report["initial_result_status"], "failed")
+                for secret in ("private-token", "private-row"):
+                    self.assertNotIn(secret, evidence.read_text())
+                    self.assertNotIn(secret, run.stdout + run.stderr)
+                self.assertLess(evidence.stat().st_size, 2048)
+
     def test_all_completed_profiles_retain_independent_measurements(self) -> None:
         for cell_id in packaged_smoke.required_cells(REPO_ROOT):
             with self.subTest(cell=cell_id), tempfile.TemporaryDirectory() as directory:
