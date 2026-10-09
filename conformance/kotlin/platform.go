@@ -792,10 +792,6 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 		session:   &clientSession{host: session, platform: p, sessionID: androidSessionID(client), tracker: &Session{}},
 		selectors: make(map[string]RowSelector),
 	}
-	if fixture := request.LocalFixture; fixture != nil {
-		selector := RowSelector{TableName: fixture.TableName, PrimaryKeyField: "id", PrimaryKey: TypedValue{Type: "string", Value: fixture.ID}}
-		state.selectors[selectorKey(selector)] = selector
-	}
 	databaseMode, err := databaseModeForInitialization(request.Initialization)
 	if err != nil {
 		closeStartedSession()
