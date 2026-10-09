@@ -175,10 +175,8 @@ class EmulatorRunnerTests(unittest.TestCase):
             "KOTLIN_ANDROID_SERIAL": runner.SERIAL, "ADB_SERVER_SOCKET": "tcp:hostile:7000",
             "ANDROID_ADB_SERVER_ADDRESS": "hostile", "ANDROID_ADB_SERVER_PORT": "7000",
         }
-        with mock.patch.object(runner.Runner, "command", autospec=True, side_effect=runner.Runner.command) as command:
-            self.assertEqual(self.run_fixture(environment=environment), 0)
+        self.assertEqual(self.run_fixture(environment=environment), 0)
         curl = self.commands("curl")[0][0]
-        command.assert_any_call(mock.ANY, curl, timeout=750)
         self.assertEqual(curl[:15], [
             "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
             "--retry", "3", "--retry-all-errors",
@@ -391,6 +389,7 @@ class EmulatorRunnerTests(unittest.TestCase):
                     str(self.manager), f"--sdk_root={self.sdk}", platform_package, image_package,
                 ]])
                 self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])
+                command_boundary.assert_any_call(mock.ANY, self.commands("curl")[0][0], timeout=750)
                 self.assertTrue(all(call.kwargs.get("timeout", 180) <= 180 for call in command_boundary.call_args_list if Path(call.args[1][0]).name not in {"sdkmanager", "curl"}))
 
     def test_malformed_selections_are_rejected(self):
