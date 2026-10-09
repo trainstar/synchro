@@ -1330,7 +1330,7 @@ func validateSchemaProofActivation(before, cut runnerResult, journal migrationJo
 }
 
 func compareSchemaProofServer(before, after blackbox.NativeCaptureFacts) error {
-	if len(before.StateFacts.Rows) == 0 || len(before.StateFacts.MutationOutcomes) == 0 || !reflect.DeepEqual(before.StateFacts.Rows, after.StateFacts.Rows) || !reflect.DeepEqual(before.StateFacts.MutationOutcomes, after.StateFacts.MutationOutcomes) {
+	if len(before.RuntimeRows) == 0 || len(before.StateFacts.MutationOutcomes) == 0 || !reflect.DeepEqual(before.RuntimeRows, after.RuntimeRows) || !reflect.DeepEqual(before.StateFacts.MutationOutcomes, after.StateFacts.MutationOutcomes) {
 		return errors.New("M1 replay changed authoritative row/version/checksum or outcomes")
 	}
 	return nil

@@ -276,21 +276,40 @@ func TestSchemaProofComparisonsRejectCorruption(t *testing.T) {
 	if requireSchemaProofSentinel(fixture, capture) == nil {
 		t.Fatal("changed sentinel passed")
 	}
-	server := blackbox.NativeCaptureFacts{StateFacts: scenarios.StateFacts{Rows: []scenarios.RowFact{{TableID: "items", CanonicalWireJSON: `"row"`, Version: "v1", Checksum: strings.Repeat("c", 64)}}, MutationOutcomes: []scenarios.MutationOutcomeIdentityFact{{UserID: "user-a", ClientID: "client-a", MutationID: "actual-m1"}}}}
+	server := blackbox.NativeCaptureFacts{StateFacts: scenarios.StateFacts{Rows: []scenarios.RowFact{{TableID: "items", CanonicalWireJSON: `"row"`, Version: "v1", Checksum: strings.Repeat("c", 64)}}, MutationOutcomes: []scenarios.MutationOutcomeIdentityFact{{UserID: "user-a", ClientID: "client-a", MutationID: "actual-m1"}}}, RuntimeRows: []scenarios.RowFact{{TableID: "11111111-1111-4111-8111-111111111111", CanonicalWireJSON: `{"id":"row","value":"41"}`, Version: "22222222-2222-4222-8222-222222222222", Checksum: strings.Repeat("d", 64)}}}
 	if err := compareSchemaProofServer(server, server); err != nil {
 		t.Fatal(err)
+	}
+	changedAliases := server
+	changedAliases.StateFacts.Rows = []scenarios.RowFact{{TableID: "items", CanonicalWireJSON: `"row"`, Version: "another-authored-alias"}}
+	if err := compareSchemaProofServer(server, changedAliases); err != nil {
+		t.Fatal("authored row aliases changed the runtime replay comparison")
 	}
 	for _, test := range []struct {
 		name   string
 		mutate func(*blackbox.NativeCaptureFacts)
 	}{
 		{"row version", func(v *blackbox.NativeCaptureFacts) {
-			v.StateFacts.Rows = append([]scenarios.RowFact(nil), v.StateFacts.Rows...)
-			v.StateFacts.Rows[0].Version = "v2"
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].Version = "33333333-3333-4333-8333-333333333333"
 		}},
 		{"row checksum", func(v *blackbox.NativeCaptureFacts) {
-			v.StateFacts.Rows = append([]scenarios.RowFact(nil), v.StateFacts.Rows...)
-			v.StateFacts.Rows[0].Checksum = strings.Repeat("d", 64)
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].Checksum = strings.Repeat("e", 64)
+		}},
+		{"row content", func(v *blackbox.NativeCaptureFacts) {
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].CanonicalWireJSON = `{"id":"row","value":"42"}`
+		}},
+		{"runtime table identity", func(v *blackbox.NativeCaptureFacts) {
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].TableID = "44444444-4444-4444-8444-444444444444"
+		}},
+		{"missing runtime capture", func(v *blackbox.NativeCaptureFacts) {
+			v.RuntimeRows = nil
+		}},
+		{"missing outcomes", func(v *blackbox.NativeCaptureFacts) {
+			v.StateFacts.MutationOutcomes = nil
 		}},
 		{"history identity", func(v *blackbox.NativeCaptureFacts) {
 			v.StateFacts.MutationOutcomes = append([]scenarios.MutationOutcomeIdentityFact(nil), v.StateFacts.MutationOutcomes...)
@@ -302,6 +321,9 @@ func TestSchemaProofComparisonsRejectCorruption(t *testing.T) {
 			test.mutate(&changed)
 			if compareSchemaProofServer(server, changed) == nil {
 				t.Fatal("changed historical server state passed")
+			}
+			if (test.name == "missing runtime capture" || test.name == "missing outcomes") && compareSchemaProofServer(changed, changed) == nil {
+				t.Fatal("absent historical server evidence passed")
 			}
 		})
 	}

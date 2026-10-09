@@ -86,9 +86,11 @@ type NativeStepObservation struct {
 }
 
 // NativeCaptureFacts binds one requested source to its durable state facts.
+// RuntimeRows uses full stored row JSON, not authored primary-key JSON.
 type NativeCaptureFacts struct {
-	Source     string               `json:"source"`
-	StateFacts scenarios.StateFacts `json:"state_facts"`
+	Source      string               `json:"source"`
+	StateFacts  scenarios.StateFacts `json:"state_facts"`
+	RuntimeRows []scenarios.RowFact  `json:"runtime_rows"`
 }
 
 type nativeInstallationBinding struct {
@@ -3770,7 +3772,7 @@ func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []st
 	if err != nil {
 		return nil, err
 	}
-	return []NativeCaptureFacts{{Source: "server-state", StateFacts: facts}}, nil
+	return []NativeCaptureFacts{facts}, nil
 }
 
 // resolvePendingApplicationPushRecords binds the runtime identities of each
@@ -3793,7 +3795,7 @@ func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Cont
 	return nil
 }
 
-func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {
+func (c *NativeController) captureServerState(ctx context.Context) (NativeCaptureFacts, error) {
 	c.mu.Lock()
 	installation := c.installation
 	transactions := make([]*nativeTransactionBinding, 0, len(c.transactions))
@@ -3813,39 +3815,45 @@ func (c *NativeController) captureServerState(ctx context.Context) (scenarios.St
 	}
 	c.mu.Unlock()
 	if installation == nil {
-		return scenarios.StateFacts{}, errors.New("native controller contract is not installed")
+		return NativeCaptureFacts{}, errors.New("native controller contract is not installed")
 	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Table.RuntimeID == records[j].Table.RuntimeID {
+			return records[i].RuntimeRecordID < records[j].RuntimeRecordID
+		}
+		return records[i].Table.RuntimeID < records[j].Table.RuntimeID
+	})
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
-		return scenarios.StateFacts{}, errors.New("open native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("open native server-state capture failed")
 	}
 	defer database.Close()
 	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
-		return scenarios.StateFacts{}, errors.New("begin native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("begin native server-state capture failed")
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-		return scenarios.StateFacts{}, errors.New("set native server-state capture read-only failed")
+		return NativeCaptureFacts{}, errors.New("set native server-state capture read-only failed")
 	}
 
-	var facts scenarios.StateFacts
-	if err := captureNativeRegistryAndStream(ctx, tx, installation, transactions, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	capture := NativeCaptureFacts{Source: "server-state", RuntimeRows: make([]scenarios.RowFact, 0, len(records))}
+	if err := captureNativeRegistryAndStream(ctx, tx, installation, transactions, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeTransactions(ctx, tx, installation, transactions, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeTransactions(ctx, tx, installation, transactions, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, transactions, records, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeRowsAndScopes(ctx, tx, installation, transactions, records, &capture.StateFacts, &capture.RuntimeRows); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return scenarios.StateFacts{}, errors.New("commit native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("commit native server-state capture failed")
 	}
-	return facts, nil
+	return capture, nil
 }
 
 func captureNativeRegistryAndStream(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, facts *scenarios.StateFacts) error {
@@ -3924,7 +3932,7 @@ func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *na
 	return nil
 }
 
-func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts) error {
+func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts, runtimeRows *[]scenarios.RowFact) error {
 	scopeRows := make(map[string]uint64)
 	scopeVersions := make(map[string][]string)
 	facts.RowScopeEdges = make([]scenarios.RowScopeEdgeFact, 0)
@@ -3974,6 +3982,12 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 		if err != nil || hex.EncodeToString(digest[:]) != runtimeChecksum {
 			return errors.New("native runtime captured row checksum is invalid")
 		}
+		*runtimeRows = append(*runtimeRows, scenarios.RowFact{
+			TableID:           record.Table.RuntimeID,
+			CanonicalWireJSON: string(rowData),
+			Version:           runtimeVersion,
+			Checksum:          runtimeChecksum,
+		})
 		facts.Rows = append(facts.Rows, scenarios.RowFact{
 			TableID:           record.Table.AuthoredID,
 			CanonicalWireJSON: record.Image.CanonicalWireJSON,

@@ -336,7 +336,7 @@ func TestSchemaProofComparisonsRejectCorruption(t *testing.T) {
 	if requireSchemaProofSentinel(fixture, capture) == nil {
 		t.Fatal("changed sentinel passed")
 	}
-	server := blackbox.NativeCaptureFacts{StateFacts: scenarios.StateFacts{Rows: []scenarios.RowFact{{TableID: "items", CanonicalWireJSON: `"row"`, Version: "v1", Checksum: strings.Repeat("c", 64)}}, MutationOutcomes: []scenarios.MutationOutcomeIdentityFact{{UserID: "user-a", ClientID: "client-a", MutationID: "actual-m1"}}}}
+	server := blackbox.NativeCaptureFacts{StateFacts: scenarios.StateFacts{MutationOutcomes: []scenarios.MutationOutcomeIdentityFact{{UserID: "user-a", ClientID: "client-a", MutationID: "actual-m1"}}}, RuntimeRows: []scenarios.RowFact{{TableID: "items", CanonicalWireJSON: `{"id":"row","value":"41"}`, Version: "v1", Checksum: strings.Repeat("c", 64)}}}
 	if err := compareSchemaProofServer(server, server); err != nil {
 		t.Fatal(err)
 	}
@@ -345,12 +345,12 @@ func TestSchemaProofComparisonsRejectCorruption(t *testing.T) {
 		mutate func(*blackbox.NativeCaptureFacts)
 	}{
 		{"row version", func(v *blackbox.NativeCaptureFacts) {
-			v.StateFacts.Rows = append([]scenarios.RowFact(nil), v.StateFacts.Rows...)
-			v.StateFacts.Rows[0].Version = "v2"
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].Version = "v2"
 		}},
 		{"row checksum", func(v *blackbox.NativeCaptureFacts) {
-			v.StateFacts.Rows = append([]scenarios.RowFact(nil), v.StateFacts.Rows...)
-			v.StateFacts.Rows[0].Checksum = strings.Repeat("d", 64)
+			v.RuntimeRows = append([]scenarios.RowFact(nil), v.RuntimeRows...)
+			v.RuntimeRows[0].Checksum = strings.Repeat("d", 64)
 		}},
 		{"history identity", func(v *blackbox.NativeCaptureFacts) {
 			v.StateFacts.MutationOutcomes = append([]scenarios.MutationOutcomeIdentityFact(nil), v.StateFacts.MutationOutcomes...)
