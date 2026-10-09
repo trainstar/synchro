@@ -412,7 +412,7 @@ class Runner:
         options = ["-no-snapshot-save", "-no-window"]
         if self.selected.memory:
             options.extend(("-memory", self.selected.memory))
-        options.extend(("-gpu", "swiftshader_indirect", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
         with (self.selected.log_dir / "emulator.log").open("ab") as emulator_log:
             self.emulator = subprocess.Popen([
                 str(self.selected.sdk_root / "emulator/emulator"), "-port", "5554",

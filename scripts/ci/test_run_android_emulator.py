@@ -196,7 +196,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         launch = self.commands("emulator")[1][0]
         self.assertEqual(launch, [
             str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", "Synchro_Kotlin_API_34",
-            "-no-snapshot-save", "-no-window", "-gpu", "swiftshader_indirect", "-noaudio",
+            "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
             "-no-boot-anim", "-camera-back", "none",
         ])
         test, options = self.commands("make")[0]
@@ -237,7 +237,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.argv[-3:-3] = ["--memory", "6144"]
         self.assertEqual(self.run_fixture(), 0)
         command = self.commands("emulator")[1][0]
-        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "swiftshader_indirect"])
+        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
 
     def test_server_is_ready_before_emulator_starts(self):
         with self.boundaries(), mock.patch.object(runner.socket, "create_connection") as connect:
