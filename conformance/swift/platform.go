@@ -1965,7 +1965,8 @@ func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platf
 	}
 	state.restarted = true
 	state.pendingLoss = nil
-	window, err := windowFromResults(loss.started, loss.before, after, loss.observations)
+	// The maintenance cursor resets at relaunch. Measure the interrupted process through its last capture.
+	window, err := windowFromResults(loss.started, loss.before, loss.restartCapture, loss.observations)
 	if err != nil {
 		return StepObservation{}, err
 	}
