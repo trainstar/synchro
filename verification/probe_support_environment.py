@@ -56,8 +56,12 @@ def run_command(command: list[str], label: str, *, env: dict[str, str] | None = 
         stdout = result.stdout.decode("utf-8") if raw_output else result.stdout
     except subprocess.TimeoutExpired:
         raise ProbeError(f"{label} timed out after 30 seconds") from None
-    except (subprocess.CalledProcessError, OSError, UnicodeError):
-        raise ProbeError(f"{label} command failed") from None
+    except subprocess.CalledProcessError as error:
+        raise ProbeError(f"{label} command failed with exit status {error.returncode}") from None
+    except OSError as error:
+        raise ProbeError(f"{label} command failed ({type(error).__name__}, errno {error.errno})") from None
+    except UnicodeError:
+        raise ProbeError(f"{label} returned invalid UTF-8 text") from None
     if not isinstance(stdout, str):
         raise ProbeError(f"{label} returned invalid text")
     return stdout

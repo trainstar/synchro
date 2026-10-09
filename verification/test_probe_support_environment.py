@@ -244,6 +244,12 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
                         probe.probe_ios("SUP-IOS-CURRENT-001", UDID, output)
                     self.assertEqual(command.call_count, index + 1)
                     self.assertNotIn(secret, str(raised.exception))
+                    if isinstance(error, subprocess.CalledProcessError):
+                        self.assertIn("exit status 7", str(raised.exception))
+                    elif isinstance(error, OSError):
+                        self.assertIn("OSError", str(raised.exception))
+                    elif isinstance(error, UnicodeError):
+                        self.assertIn("invalid UTF-8", str(raised.exception))
                     self.assertLess(len(str(raised.exception)), 100)
                     self.assertFalse(output.exists())
 
