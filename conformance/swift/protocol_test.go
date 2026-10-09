@@ -9,6 +9,46 @@ import (
 	"time"
 )
 
+func TestAcceptedMutationOutcomesRejectInvalidAndUnboundedMaps(t *testing.T) {
+	outcome := `{"mutation_id":"m1","status":"applied","outcome_schema":{"version":1,"hash":"` + strings.Repeat("a", 64) + `"},"server_version":"v1"}`
+	encoded, _ := json.Marshal(map[string]string{"m1": outcome})
+	var valid acceptedMutationOutcomes
+	if err := json.Unmarshal(encoded, &valid); err != nil || valid["m1"] != outcome {
+		t.Fatalf("stored bytes changed: %v", err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(outcome, `"applied"`, `"merged"`, 1),
+		strings.Replace(outcome, `"applied"`, `"rejected"`, 1),
+		strings.Replace(outcome, `,"server_version":"v1"`, ``, 1),
+		strings.Replace(outcome, `"server_version":"v1"`, `"server_version":""`, 1),
+		strings.Replace(outcome, `"server_version":"v1"`, `"server_version":null`, 1),
+		strings.Replace(outcome, `"server_version":"v1"`, `"server_version":42`, 1),
+	} {
+		raw, _ := json.Marshal(map[string]string{"m1": invalid})
+		var values acceptedMutationOutcomes
+		if json.Unmarshal(raw, &values) == nil {
+			t.Fatal("invalid accepted status or server version passed")
+		}
+	}
+	large, _ := json.Marshal(map[string]string{"m1": outcome + strings.Repeat(" ", 65_536)})
+	wrong, _ := json.Marshal(map[string]string{"m1": strings.Replace(outcome, `"m1"`, `"m2"`, 1)})
+	for _, raw := range [][]byte{[]byte(`null`), []byte(`[]`), []byte(`{"m1":null}`), []byte(`{"m1":42}`), []byte(`{"m1":"{}","m1":"{}"}`), []byte(`{"m1":"not-json"}`), wrong, large} {
+		var values acceptedMutationOutcomes
+		if json.Unmarshal(raw, &values) == nil {
+			t.Fatalf("invalid accepted outcome map passed: %.80s", raw)
+		}
+	}
+	tooMany := make(map[string]string, maximumRunnerRecords+1)
+	for index := 0; index <= maximumRunnerRecords; index++ {
+		tooMany[strings.Repeat("x", index+1)] = outcome
+	}
+	raw, _ := json.Marshal(tooMany)
+	var values acceptedMutationOutcomes
+	if json.Unmarshal(raw, &values) == nil {
+		t.Fatal("over-bound map passed")
+	}
+}
+
 func TestValidateRunnerResponseAcceptsClientCallResult(t *testing.T) {
 	result, err := validateRunnerResponse([]byte(`{"schema_version":1,"outcome":"passed","result":{"call_id":"sync_cycle","state":"completed","completion":"error","call_error_category":"blocking_failure","process_id":"1234","database_identity_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transport_observations":{"observations":[],"overflowed":false,"sequence_checkpoint":0}},"error_code":null}`))
 	if err != nil {
@@ -126,6 +166,116 @@ func TestValidateRunnerResponseDecodesAtomicCaptureFacts(t *testing.T) {
 	}
 	if result.ScopeStatesTruncated == nil || *result.ScopeStatesTruncated || result.CaptureOverflowed == nil || *result.CaptureOverflowed || len(result.RowMetadataRecords) != 1 || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor != 0 {
 		t.Fatalf("atomic capture facts were not retained: %+v", result)
+	}
+}
+
+func TestMigrationCaptureCodecPreservesStoredBytesAndRequiresCompleteProof(t *testing.T) {
+	if _, err := decodePhysicalSchema([]byte(`[],"extra":true`)); err == nil {
+		t.Fatal("physical schema accepted trailing JSON")
+	}
+	stored := map[string]any{"journal_version": "2", "migration_plan_version": "2", "is_schema_reset": "0", "target_manifest_json": "{}", "affected_scopes_json": "[]", "scope_cursor_updates_json": "{}", "migration_plan_json": " {\"swift_operations\":[]} ", "migration_plan_hash": strings.Repeat("a", 64)}
+	journal := map[string]any{"source": map[string]any{"version": 0, "hash": ""}, "target": map[string]any{"version": 1, "hash": strings.Repeat("b", 64)}, "action": "replace", "phase": "prepared", "stored": stored}
+	column := map[string]any{"table_name": "items", "name": "id", "type": "TEXT", "not_null": false, "primary_key_position": 1}
+	response := func(mutate func(map[string]any)) []byte {
+		return runnerResponseWith(t, func(parts runnerResponseParts) {
+			parts.result["migration_journal"] = journal
+			parts.result["migration_journal_truncated"] = false
+			parts.result["physical_schema"] = []any{column}
+			parts.result["physical_schema_truncated"] = false
+			parts.result["capture_overflowed"] = false
+			mutate(parts.result)
+		})
+	}
+	result, err := validateRunnerResponse(response(func(map[string]any) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeMigrationJournal(result.MigrationJournal)
+	if err != nil || decoded == nil || decoded.Stored["migration_plan_json"] != stored["migration_plan_json"] {
+		t.Fatalf("stored plan changed: %v", err)
+	}
+	columns, err := decodePhysicalSchema(result.PhysicalSchema)
+	if err != nil || len(columns) != 1 || columns[0].NotNull || columns[0].PrimaryKeyPosition != 1 {
+		t.Fatalf("physical schema changed: %v", err)
+	}
+	if err := result.requireCompleteMigrationCapture(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := validateRunnerResponse([]byte(validPullRunnerResponse))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.requireCompleteMigrationCapture(); err == nil {
+		t.Fatal("missing migration capture proved complete")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"explicit null journal", func(value map[string]any) { value["migration_journal"] = nil }},
+		{"truncated journal", func(value map[string]any) {
+			value["migration_journal"] = nil
+			value["migration_journal_truncated"] = true
+		}},
+		{"truncated physical schema", func(value map[string]any) { value["physical_schema_truncated"] = true }},
+		{"missing aggregate overflow", func(value map[string]any) { delete(value, "capture_overflowed") }},
+		{"aggregate overflow", func(value map[string]any) { value["capture_overflowed"] = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := validateRunnerResponse(response(test.mutate))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = result.requireCompleteMigrationCapture()
+			if (test.name == "explicit null journal") != (err == nil) {
+				t.Fatalf("capture completeness: %v", err)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing truncation flag", func(value map[string]any) { delete(value, "migration_journal_truncated") }},
+		{"null physical schema", func(value map[string]any) { value["physical_schema"] = nil }},
+		{"wrong column type", func(value map[string]any) {
+			value["physical_schema"] = []any{map[string]any{"table_name": "items", "name": "id", "type": "TEXT", "not_null": "false", "primary_key_position": 1}}
+		}},
+		{"unknown journal field", func(value map[string]any) {
+			value["migration_journal"] = map[string]any{"source": journal["source"], "target": journal["target"], "action": "replace", "phase": "prepared", "stored": stored, "extra": true}
+		}},
+		{"oversized stored values", func(value map[string]any) {
+			oversized := map[string]any{}
+			for key, text := range stored {
+				oversized[key] = text
+			}
+			oversized["migration_plan_json"] = strings.Repeat("x", 65_536)
+			value["migration_journal"] = map[string]any{"source": journal["source"], "target": journal["target"], "action": "replace", "phase": "prepared", "stored": oversized}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := validateRunnerResponse(response(test.mutate)); err == nil {
+				t.Fatal("invalid migration capture decoded")
+			}
+		})
+	}
+}
+
+func TestMigrationPauseTargetsDoNotExtendHTTPOperations(t *testing.T) {
+	for _, target := range []string{"migration_prepared", "migration_committed"} {
+		if validRunnerTransportOperation(target) {
+			t.Fatal("migration checkpoint became an HTTP operation")
+		}
+		for _, operation := range []string{"arm-transport-pause", "await-transport-pause"} {
+			command := runnerCommand{SchemaVersion: 1, Operation: operation, TransportOperation: target}
+			if err := validateRunnerCommand(command); err != nil {
+				t.Fatal(err)
+			}
+			command.TransportOperation = "migration_unknown"
+			if err := validateRunnerCommand(command); err == nil {
+				t.Fatal("unknown migration checkpoint accepted")
+			}
+		}
 	}
 }
 

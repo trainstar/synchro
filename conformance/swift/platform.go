@@ -73,6 +73,8 @@ type SynchronizationResult struct {
 	ProvenanceMaintenanceWork uint64            `json:"provenance_maintenance_work,omitempty"`
 	ReplayedMutationCount     uint64            `json:"replayed_mutation_count,omitempty"`
 	transportObservations     []transportObservation
+	before                    *runnerResult
+	after                     *runnerResult
 }
 
 // CallResult records one paused or completed public call.
@@ -117,6 +119,15 @@ type Platform struct {
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
 	rebuildResponseCursors        map[string]string
+	schemaProofRequests           uint64
+	schemaProofPushes             []schemaProofPush
+}
+
+type schemaProofRequestKey struct{}
+type schemaProofPush struct {
+	ClientID          string
+	Request, Response []byte
+	Status            int
 }
 
 type sealedRetryPushFault struct {
@@ -164,6 +175,8 @@ type pendingResponseLoss struct {
 
 type operationWindow struct {
 	observations              []transportObservation
+	before                    *runnerResult
+	after                     *runnerResult
 	duration                  time.Duration
 	provenanceMaintenanceWork uint64
 	replayedMutationCount     uint64
@@ -190,6 +203,19 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.modifyProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		p.mu.Lock()
+		p.schemaProofRequests++
+		p.mu.Unlock()
+		if strings.HasSuffix(request.URL.Path, "/sync/push") && request.Body != nil {
+			body, err := io.ReadAll(io.LimitReader(request.Body, maximumMutatedResponseBytes+1))
+			request.Body.Close()
+			if err != nil || len(body) > maximumMutatedResponseBytes {
+				http.Error(response, "bounded push required", http.StatusBadRequest)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request = request.WithContext(context.WithValue(request.Context(), schemaProofRequestKey{}, body))
+		}
 		if strings.HasSuffix(request.URL.Path, "/sync/push") {
 			p.countProxiedPush()
 		}
@@ -480,6 +506,27 @@ func temporaryUnavailablePushTargetForOperations(operations RequestOperations) (
 }
 
 func (p *Platform) modifyProxiedResponse(response *http.Response) error {
+	if strings.HasSuffix(response.Request.URL.Path, "/sync/push") {
+		request, _ := response.Request.Context().Value(schemaProofRequestKey{}).([]byte)
+		var identity struct {
+			ClientID string `json:"client_id"`
+		}
+		if json.Unmarshal(request, &identity) == nil && (identity.ClientID == "client-schema-proof-prepared" || identity.ClientID == "client-schema-proof-committed") {
+			body, err := io.ReadAll(io.LimitReader(response.Body, maximumMutatedResponseBytes+1))
+			response.Body.Close()
+			if err != nil || len(body) > maximumMutatedResponseBytes {
+				return errors.New("bounded proof push response required")
+			}
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if len(p.schemaProofPushes) >= 8 {
+				return errors.New("proof push observation overflow")
+			}
+			p.schemaProofPushes = append(p.schemaProofPushes, schemaProofPush{ClientID: identity.ClientID, Request: append([]byte(nil), request...), Response: body, Status: response.StatusCode})
+		}
+		return nil
+	}
 	if response.StatusCode != http.StatusOK || !strings.HasSuffix(response.Request.URL.Path, "/sync/rebuild") {
 		return nil
 	}
@@ -606,7 +653,10 @@ func prepareApplicationDatabaseDirectory(path string) (string, error) {
 }
 
 // Install starts one empty, current, or seeded durable client database.
-func (p *Platform) Install(ctx context.Context, client Client, initialization, seedPath string) error {
+func (p *Platform) Install(ctx context.Context, client Client, initialization, seedPath string, fixtures ...*scenarios.NativeLocalFixture) error {
+	if len(fixtures) > 1 || len(fixtures) != 0 && initialization != "empty" {
+		return errors.New("local fixture requires one empty installation")
+	}
 	if err := p.context(ctx); err != nil {
 		return err
 	}
@@ -634,7 +684,7 @@ func (p *Platform) Install(ctx context.Context, client Client, initialization, s
 		databasePath: databasePath,
 		selectors:    make(map[string]runnerRowSelector),
 	}
-	if err := p.startClient(ctx, state, seedPath); err != nil {
+	if err := p.startClient(ctx, state, seedPath, fixtures...); err != nil {
 		return err
 	}
 	if initialization == "current" {
@@ -733,7 +783,11 @@ func verifyRestartIdentity(priorProcessID, priorFingerprint, processID, fingerpr
 	return nil
 }
 
-func (p *Platform) startClient(ctx context.Context, state *platformClient, seedPath string) error {
+func (p *Platform) startClient(ctx context.Context, state *platformClient, seedPath string, fixtures ...*scenarios.NativeLocalFixture) error {
+	var fixture *scenarios.NativeLocalFixture
+	if len(fixtures) == 1 {
+		fixture = fixtures[0]
+	}
 	session, err := StartSession(ctx, Config{RunnerPath: p.config.RunnerPath})
 	if err != nil {
 		return err
@@ -750,6 +804,7 @@ func (p *Platform) startClient(ctx context.Context, state *platformClient, seedP
 		AuthToken:        token,
 		ClientID:         state.client.ClientID,
 		SeedDatabasePath: seedPath,
+		LocalFixture:     fixture,
 		Platform:         p.config.Platform,
 		AppVersion:       p.config.AppVersion,
 		PullPageSize:     p.config.PullPageSize,
@@ -1025,7 +1080,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil || inFlight.CallID != callID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return SynchronizationResult{}, errors.New("Swift public call did not enter flight")
 	}
-	if !state.started {
+	if !state.started && operationClass != "connect" {
 		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "connect"}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("await Swift response-loss connect: %w", err)
 		}
@@ -1226,6 +1281,8 @@ func synchronizationResult(completion string, callErrorCategory string, steps []
 		ProvenanceMaintenanceWork: window.provenanceMaintenanceWork,
 		ReplayedMutationCount:     window.replayedMutationCount,
 		transportObservations:     cloneTransportObservations(window.observations),
+		before:                    window.before,
+		after:                     window.after,
 	}
 	if window.duration > 0 {
 		result.DurationNanoseconds = uint64(window.duration)
@@ -2619,6 +2676,8 @@ func windowFromResults(started time.Time, before, after runnerResult, observatio
 	}
 	return operationWindow{
 		observations:              cloneTransportObservations(observations),
+		before:                    &before,
+		after:                     &after,
 		duration:                  time.Since(started),
 		provenanceMaintenanceWork: work,
 	}, nil

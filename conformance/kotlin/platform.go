@@ -80,6 +80,7 @@ type InstallRequest struct {
 	Client         Client
 	Initialization string
 	SeedPath       string
+	LocalFixture   *scenarios.NativeLocalFixture
 }
 
 // SynchronizeRequest groups authored request operations in one client call.
@@ -129,6 +130,8 @@ type SynchronizationResult struct {
 	ProvenanceMaintenanceWork uint64            `json:"provenance_maintenance_work,omitempty"`
 	ReplayedMutationCount     int               `json:"replayed_mutation_count,omitempty"`
 	transportObservations     []TransportObservation
+	before                    *Result
+	after                     *Result
 }
 
 // Platform drives one or more real Android clients through Kotlin instrumentation.
@@ -146,6 +149,8 @@ type Platform struct {
 	pendingHostReplacement *platformClient
 
 	responseProxy            *httptest.Server
+	schemaProofRequests      uint64
+	schemaProofPushes        []schemaProofPush
 	sealedRetryPush          *sealedRetryPushFault
 	temporaryUnavailablePush *scenarios.PushWireFaultTarget
 	rebuildResponseCursors   map[string]string
@@ -262,9 +267,18 @@ func (s *clientSession) Close(ctx context.Context) error {
 
 type operationWindow struct {
 	observations              []TransportObservation
+	before                    *Result
+	after                     *Result
 	duration                  time.Duration
 	provenanceMaintenanceWork uint64
 	replayedMutations         int
+}
+
+type schemaProofRequestKey struct{}
+type schemaProofPush struct {
+	ClientID          string
+	Request, Response []byte
+	Status            int
 }
 
 type pausedCall struct {
@@ -315,6 +329,19 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.observeProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		p.mu.Lock()
+		p.schemaProofRequests++
+		p.mu.Unlock()
+		if strings.HasSuffix(request.URL.Path, "/sync/push") && request.Body != nil {
+			body, err := io.ReadAll(io.LimitReader(request.Body, maximumProxiedRebuildBytes+1))
+			request.Body.Close()
+			if err != nil || len(body) > maximumProxiedRebuildBytes {
+				http.Error(response, "bounded push required", http.StatusBadRequest)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request = request.WithContext(context.WithValue(request.Context(), schemaProofRequestKey{}, body))
+		}
 		if p.serveSealedRetryPush(response, request) {
 			return
 		}
@@ -359,6 +386,27 @@ func proxiedRebuildClientID(request *http.Request) (string, error) {
 }
 
 func (p *Platform) observeProxiedResponse(response *http.Response) error {
+	if strings.HasSuffix(response.Request.URL.Path, "/sync/push") {
+		request, _ := response.Request.Context().Value(schemaProofRequestKey{}).([]byte)
+		var identity struct {
+			ClientID string `json:"client_id"`
+		}
+		if json.Unmarshal(request, &identity) == nil && (identity.ClientID == "client-schema-proof-prepared" || identity.ClientID == "client-schema-proof-committed") {
+			body, err := io.ReadAll(io.LimitReader(response.Body, maximumProxiedRebuildBytes+1))
+			response.Body.Close()
+			if err != nil || len(body) > maximumProxiedRebuildBytes {
+				return errors.New("bounded proof push response required")
+			}
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if len(p.schemaProofPushes) >= 8 {
+				return errors.New("proof push observation overflow")
+			}
+			p.schemaProofPushes = append(p.schemaProofPushes, schemaProofPush{ClientID: identity.ClientID, Request: append([]byte(nil), request...), Response: body, Status: response.StatusCode})
+		}
+		return nil
+	}
 	if response.StatusCode != http.StatusOK || !strings.HasSuffix(response.Request.URL.Path, "/sync/rebuild") {
 		return nil
 	}
@@ -749,7 +797,7 @@ func (p *Platform) Install(ctx context.Context, request InstallRequest) error {
 		closeStartedSession()
 		return err
 	}
-	if _, err := p.openClient(ctx, state, seedName, databaseMode); err != nil {
+	if _, err := p.openClient(ctx, state, seedName, databaseMode, request.LocalFixture); err != nil {
 		closeStartedSession()
 		return err
 	}
@@ -816,6 +864,12 @@ func (p *Platform) isInstalled() bool {
 }
 
 func validateInstallRequest(request InstallRequest) error {
+	if err := scenarios.ValidateNativeLocalFixture(request.LocalFixture); err != nil {
+		return err
+	}
+	if request.LocalFixture != nil && request.Initialization != "empty" {
+		return errors.New("local fixture requires an empty installation")
+	}
 	if err := validateClient(request.Client); err != nil {
 		return err
 	}
@@ -845,7 +899,11 @@ func databaseModeForInitialization(initialization string) (string, error) {
 	}
 }
 
-func (p *Platform) openClient(ctx context.Context, client *platformClient, seedName, databaseMode string) (Result, error) {
+func (p *Platform) openClient(ctx context.Context, client *platformClient, seedName, databaseMode string, fixtures ...*scenarios.NativeLocalFixture) (Result, error) {
+	var fixture *scenarios.NativeLocalFixture
+	if len(fixtures) == 1 {
+		fixture = fixtures[0]
+	}
 	token, err := p.config.AuthToken(ctx, client.client)
 	if err != nil || token == "" || len(token) > 16384 {
 		return Result{}, errors.New("resolve Kotlin Android client authentication failed")
@@ -859,6 +917,7 @@ func (p *Platform) openClient(ctx context.Context, client *platformClient, seedN
 		AuthToken:         token,
 		ClientID:          client.client.ClientID,
 		SeedDatabaseName:  seedName,
+		LocalFixture:      fixture,
 		Platform:          p.config.Platform,
 		AppVersion:        p.config.AppVersion,
 		PullPageSize:      p.config.PullPageSize,
@@ -2634,6 +2693,8 @@ func synchronizationResult(completion string, steps []StepObservation, window op
 		ProvenanceMaintenanceWork: window.provenanceMaintenanceWork,
 		ReplayedMutationCount:     window.replayedMutations,
 		transportObservations:     cloneObservations(window.observations),
+		before:                    window.before,
+		after:                     window.after,
 	}
 	if window.duration > 0 {
 		result.DurationNanoseconds = uint64(window.duration)
@@ -2678,6 +2739,8 @@ func (c *platformClient) windowFromResults(started time.Time, before, after Resu
 	}
 	return operationWindow{
 		observations:              cloneObservations(observations),
+		before:                    &before,
+		after:                     &after,
 		duration:                  time.Since(started),
 		provenanceMaintenanceWork: work,
 	}, nil
