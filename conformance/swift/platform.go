@@ -2172,10 +2172,10 @@ func selectorKey(selector runnerRowSelector) string {
 }
 
 func validateCaptureResult(result runnerResult) error {
-	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil || result.ScopeStatesTruncated == nil || result.ScopeRowsTruncated == nil || result.RebuildAttemptsTruncated == nil || result.RebuildReceiptsTruncated == nil || result.RowMetadataTruncated == nil || result.CaptureOverflowed == nil {
+	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil || result.ScopeStatesTruncated == nil || result.ScopeRowsTruncated == nil || result.RebuildAttemptsTruncated == nil || result.RebuildReceiptsTruncated == nil || result.RowMetadataTruncated == nil || result.MigrationJournalTruncated == nil || result.PhysicalSchemaTruncated == nil || result.AcceptedMutationOutcomesTruncated == nil || result.CaptureOverflowed == nil {
 		return errors.New("Swift runner capture facts are incomplete")
 	}
-	truncated := *result.ScopeStatesTruncated || *result.ScopeRowsTruncated || *result.RebuildAttemptsTruncated || *result.RebuildReceiptsTruncated || *result.RowMetadataTruncated
+	truncated := *result.ScopeStatesTruncated || *result.ScopeRowsTruncated || *result.RebuildAttemptsTruncated || *result.RebuildReceiptsTruncated || *result.RowMetadataTruncated || *result.MigrationJournalTruncated || *result.PhysicalSchemaTruncated || *result.AcceptedMutationOutcomesTruncated
 	if (*result.ApplicationRowCount <= maximumRunnerRows) != (result.ApplicationRows != nil) ||
 		(*result.MutationLedgerCount <= maximumRunnerRecords) != (result.RetainedMutations != nil) ||
 		(*result.RejectedMutationCount <= maximumRunnerRecords) != (result.RejectedMutations != nil) ||
@@ -2191,7 +2191,25 @@ func validateCaptureResult(result runnerResult) error {
 		*result.RebuildReceiptsTruncated != (result.RebuildReceipts == nil) ||
 		(*result.RebuildReceiptsTruncated && *result.RebuildReceiptCount <= maximumRunnerRecords) ||
 		*result.CaptureOverflowed != truncated {
-		return errors.New("Swift runner capture detail bounds are inconsistent")
+		return fmt.Errorf("Swift runner capture detail bounds are inconsistent: "+
+			"application_rows(count=%d,present=%t) retained_mutations(ledger_count=%d,present=%t) rejected_mutations(count=%d,present=%t) "+
+			"scope_states(count=%d,present=%t,truncated=%t) scope_rows(count=%d,present=%t,truncated=%t) "+
+			"row_metadata(count=%d,present=%t,truncated=%t) rebuild_attempts(count=%d,present=%t,truncated=%t) "+
+			"rebuild_receipts(page_count=%d,present=%t,truncated=%t) migration_journal(present=%t,truncated=%t) "+
+			"physical_schema(present=%t,truncated=%t) accepted_mutation_outcomes(detail_count=%d,present=%t,truncated=%t) "+
+			"capture_overflowed=%t expected_overflowed=%t",
+			*result.ApplicationRowCount, result.ApplicationRows != nil,
+			*result.MutationLedgerCount, result.RetainedMutations != nil,
+			*result.RejectedMutationCount, result.RejectedMutations != nil,
+			*result.ScopeStateCount, result.ScopeStates != nil, *result.ScopeStatesTruncated,
+			*result.ScopeRowCount, result.ScopeRows != nil, *result.ScopeRowsTruncated,
+			*result.RowMetadataCount, result.RowMetadataRecords != nil, *result.RowMetadataTruncated,
+			*result.RebuildAttemptCount, result.RebuildAttempts != nil, *result.RebuildAttemptsTruncated,
+			*result.RebuildReceiptCount, result.RebuildReceipts != nil, *result.RebuildReceiptsTruncated,
+			len(result.MigrationJournal) != 0, *result.MigrationJournalTruncated,
+			len(result.PhysicalSchema) != 0, *result.PhysicalSchemaTruncated,
+			len(result.AcceptedMutationOutcomes), result.AcceptedMutationOutcomes != nil, *result.AcceptedMutationOutcomesTruncated,
+			*result.CaptureOverflowed, truncated)
 	}
 	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) || len(result.RowMetadataRecords) != boundedDetailCount(*result.RowMetadataCount, maximumRunnerRecords) {
 		return errors.New("Swift runner capture counts do not match detail")
