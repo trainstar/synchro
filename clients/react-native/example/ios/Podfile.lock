@@ -2908,8 +2908,8 @@ SPEC CHECKSUMS:
   ReactCodegen: d90f4973af8a40c3bd7c17a5f1ba9267ef27d744
   ReactCommon: ddccb5fdac38485ab6cf9e2a5099b31d96a42328
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: 5894511a599dfeba10d7c0b4091e747f9ea53e68
-  SynchroReactNative: d1eac80517f7413fa23edb4268bcc1a5e1cac1dc
+  Synchro: a5aaf49b068ab3b2e8ce89a092338677c36d4cf5
+  SynchroReactNative: c180d282aa36fc2bc231f9da4163315ead6ff0c6
   Yoga: d2ed98551adb569fc38be0148666854e1ff60692
 
 PODFILE CHECKSUM: 9d6f3b55725e3006e911cd5b820c5c819b6b1076
