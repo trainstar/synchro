@@ -573,13 +573,19 @@ func schemaCheckStrata(plan scenarios.SchemaDispatchMeasurementPlan) (map[string
 func schemaCheckWireExpectation(scenario scenarios.Scenario, id scenarios.StepID) (scenarios.WireExpectation, error) {
 	var result scenarios.WireExpectation
 	count := 0
+	contractCase := "connect_success"
+	for _, step := range scenario.Steps {
+		if step.ID == id && scenarios.OperationKey(step.Operation) == "pull/request-page" {
+			contractCase = "pull_success"
+		}
+	}
 	for _, wire := range scenario.WireExpectations {
 		if wire.StepID == id {
 			result = wire
 			count++
 		}
 	}
-	if count != 1 || result.ContractCase != "connect_success" || result.HTTPStatus != http.StatusOK || result.Retryable || result.ErrorCode != nil {
+	if count != 1 || result.ContractCase != contractCase || result.HTTPStatus != http.StatusOK || result.Retryable || result.ErrorCode != nil {
 		return scenarios.WireExpectation{}, fmt.Errorf("React Native schema-check wire expectation %s count=%d", id, count)
 	}
 	return result, nil
@@ -2541,7 +2547,11 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			}
 			acceptedIDs[sealed[0].MutationID] = true
 		}
-		if err := c.validateProofFinalTraffic(trace, s2, lane); err != nil {
+		wire, err := schemaCheckWireExpectation(c.config.Scenario, call.step.ID)
+		if err != nil {
+			return err
+		}
+		if err := c.validateProofFinalTraffic(trace, s2, lane, wire); err != nil {
 			return err
 		}
 	}
@@ -2989,9 +2999,15 @@ func (c *SchemaCheckCoordinator) validateProofLaterIntent(before, after finalCap
 	return nil
 }
 
-func (c *SchemaCheckCoordinator) validateProofFinalTraffic(trace traceSnapshot, target clientSchema, lane string) error {
+func (c *SchemaCheckCoordinator) validateProofFinalTraffic(trace traceSnapshot, target clientSchema, lane string, wire scenarios.WireExpectation) error {
 	if len(trace.Observations) < 2 {
 		return errors.New("recovery connect expectations have no real later traffic")
+	}
+	terminal := trace.Observations[len(trace.Observations)-1]
+	version, versionErr := requestInteger(terminal, "schema_version")
+	hash, hashErr := requestString(terminal, "schema_hash")
+	if wire.ContractCase != "pull_success" || terminal.StatusCode != wire.HTTPStatus || validateTraceOperation(terminal, "pull") != nil || versionErr != nil || hashErr != nil || version != target.Version || hash != target.Hash {
+		return errors.New("schema proof terminal pull differs from its authored completion expectation or S2 binding")
 	}
 	connect := trace.Observations[0]
 	facts, err := decodeConnectResponseFacts(connect.ConnectResponseFacts)

@@ -821,6 +821,9 @@ func validateTraceOperation(observation transportObservation, operation string) 
 		return fmt.Errorf("operation facts are absent or invalid: class_matches=%t status=%d duration_valid=%t request_facts_present=%t",
 			classMatches, observation.StatusCode, durationValid, requestFactsPresent)
 	}
+	if observation.ErrorCode != nil || observation.Retryable != nil {
+		return errors.New("successful transport observation contains contradictory error facts")
+	}
 	if err := validateBoundedJSON(observation.RequestFacts, maximumExchangeBytes); err != nil {
 		return err
 	}

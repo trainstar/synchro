@@ -976,6 +976,7 @@ func TestSchemaProofAcceptedOutcomesRequireCompleteNamedStoredEvidence(t *testin
 }
 
 func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
+	scenario := loadSchemaCheckAuthoredScenario(t)
 	encode := func(value any) json.RawMessage {
 		t.Helper()
 		raw, err := json.Marshal(value)
@@ -990,6 +991,15 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 			lane, clientID = "PREPARED", "client-schema-proof-prepared"
 		}
 		t.Run(lane, func(t *testing.T) {
+			var completeStep scenarios.Step
+			for _, step := range scenario.Steps {
+				if string(step.ID) == "STEP-PERF-SCHEMA-CHECK-PROOF-"+lane+"-COMPLETE-001" {
+					completeStep = step
+				}
+			}
+			if completeStep.ID == "" {
+				t.Fatal("authored COMPLETE step is absent")
+			}
 			newEvidence := func() (*SchemaCheckCoordinator, schemaCheckCall, finalCapture) {
 				s1 := clientSchema{Version: 1, Hash: strings.Repeat("a", 64)}
 				s2 := clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}
@@ -1075,8 +1085,8 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 				if prepared {
 					capture.Rows = []byte(`[{"id":"row","value":"42","note":null},{"id":"sentinel","value":"preserve-local"}]`)
 				}
-				coordinator := &SchemaCheckCoordinator{tableName: "cf_items", primaryKey: "id", runtimeIDs: map[string]json.RawMessage{"schema-v1": encode(s1), "schema-v2": encode(s2), "proof-prepared-row": encode("row"), "proof-committed-row": encode("row")}, proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{s1: append(append([]physicalSchemaColumn(nil), columns[:2]...), columns[3:]...), s2: columns}, proofCaptures: captures, proxyPushes: map[string][]schemaCheckPush{clientID: pushes}}
-				call := schemaCheckCall{serverSchemaAlias: "schema-v2", step: scenarios.Step{NativeBinding: &scenarios.NativeStepBinding{ClientID: clientID}}}
+				coordinator := &SchemaCheckCoordinator{config: SchemaCheckCoordinatorConfig{Scenario: scenario}, tableName: "cf_items", primaryKey: "id", runtimeIDs: map[string]json.RawMessage{"schema-v1": encode(s1), "schema-v2": encode(s2), "proof-prepared-row": encode("row"), "proof-committed-row": encode("row")}, proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{s1: append(append([]physicalSchemaColumn(nil), columns[:2]...), columns[3:]...), s2: columns}, proofCaptures: captures, proxyPushes: map[string][]schemaCheckPush{clientID: pushes}}
+				call := schemaCheckCall{serverSchemaAlias: "schema-v2", step: completeStep}
 				return coordinator, call, capture
 			}
 			for _, name := range []string{"valid sealing", "original identity changed", "original base changed", "original operation changed", "original timestamp changed", "original normalized link added", "sealed payload changed", "wire operation changed", "wire identity changed", "failed actual push"} {
@@ -1152,7 +1162,7 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 			if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err != nil {
 				t.Fatalf("valid singleton final rejected: %v", err)
 			}
-			for _, name := range []string{"valid capture_pending retries", "retry cursor changed", "second retry cursor changed", "retry schema version changed", "retry schema hash changed", "retry completeness missing", "retry completeness false", "retry error code missing", "retry error code changed", "retryability missing", "nonretryable response", "unexpected retry status", "retry duration missing", "successful cursor changed", "successful schema changed", "successful completeness missing", "missing successful pull"} {
+			for _, name := range []string{"valid capture_pending retries", "valid first200 terminal200", "retry cursor changed", "second retry cursor changed", "retry schema version changed", "retry schema hash changed", "retry completeness missing", "retry completeness false", "retry error code missing", "retry error code changed", "retryability missing", "nonretryable response", "unexpected retry status", "retry duration missing", "successful cursor changed", "successful schema changed", "successful completeness missing", "successful error code", "successful retry flag true", "successful retry flag false", "missing successful pull", "terminal503 after first200", "terminal500 after first200", "terminal pull missing", "terminal schema version changed", "terminal schema hash changed", "terminal cursor completeness missing", "terminal cursor completeness false", "terminal response facts missing", "terminal error code", "terminal retry flag", "terminal expectation missing"} {
 				t.Run("recovery traffic/"+name, func(t *testing.T) {
 					coordinator, call, capture := newEvidence()
 					trace, err := captureTraceFromRaw(capture.Trace)
@@ -1166,8 +1176,14 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 					retry.StatusCode, retry.ErrorCode, retry.Retryable, retry.PullResponseFacts = http.StatusServiceUnavailable, &code, &retryable, nil
 					second := retry
 					second.Sequence = 3
-					trace.Observations = []transportObservation{trace.Observations[0], retry, second, successful}
+					terminal := successful
+					terminal.Sequence = 5
+					terminal.CursorFingerprints = []string{hashFingerprint("advanced-cursor")}
+					trace.Observations = []transportObservation{trace.Observations[0], retry, second, successful, terminal}
 					switch name {
+					case "valid first200 terminal200":
+						successful.Sequence, terminal.Sequence = 2, 3
+						trace.Observations = []transportObservation{trace.Observations[0], successful, terminal}
 					case "retry cursor changed":
 						trace.Observations[1].CursorFingerprints = []string{hashFingerprint("other-cursor")}
 					case "second retry cursor changed":
@@ -1201,13 +1217,46 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 						trace.Observations[3].RequestFacts = encode(map[string]any{"schema_version": 1, "schema_hash": strings.Repeat("a", 64)})
 					case "successful completeness missing":
 						trace.Observations[3].CursorFingerprintsComplete = nil
+					case "successful error code":
+						trace.Observations[3].ErrorCode = &code
+					case "successful retry flag true":
+						trace.Observations[3].Retryable = &retryable
+					case "successful retry flag false":
+						unexpected := false
+						trace.Observations[3].Retryable = &unexpected
 					case "missing successful pull":
 						trace.Observations = trace.Observations[:3]
+					case "terminal503 after first200":
+						trace.Observations[4].StatusCode = http.StatusServiceUnavailable
+						trace.Observations[4].ErrorCode, trace.Observations[4].Retryable, trace.Observations[4].PullResponseFacts = &code, &retryable, nil
+					case "terminal500 after first200":
+						trace.Observations[4].StatusCode = http.StatusInternalServerError
+					case "terminal pull missing":
+						trace.Observations[4].OperationClass = "checkpoint"
+						trace.Observations[4].RequestFacts = encode(map[string]any{})
+						trace.Observations[4].CursorFingerprints, trace.Observations[4].CursorFingerprintsComplete, trace.Observations[4].PullResponseFacts = nil, nil, nil
+					case "terminal schema version changed":
+						trace.Observations[4].RequestFacts = encode(map[string]any{"schema_version": 1, "schema_hash": strings.Repeat("b", 64)})
+					case "terminal schema hash changed":
+						trace.Observations[4].RequestFacts = encode(map[string]any{"schema_version": 2, "schema_hash": strings.Repeat("a", 64)})
+					case "terminal cursor completeness missing":
+						trace.Observations[4].CursorFingerprintsComplete = nil
+					case "terminal cursor completeness false":
+						incomplete := false
+						trace.Observations[4].CursorFingerprintsComplete = &incomplete
+					case "terminal response facts missing":
+						trace.Observations[4].PullResponseFacts = nil
+					case "terminal error code":
+						trace.Observations[4].ErrorCode = &code
+					case "terminal retry flag":
+						trace.Observations[4].Retryable = &retryable
+					case "terminal expectation missing":
+						coordinator.config.Scenario.WireExpectations = nil
 					}
 					trace.SequenceCheckpoint = uint64(len(trace.Observations))
 					capture.Trace = encode(trace)
 					err = coordinator.validateProofCapture(call, lane+"-FINAL-001", capture)
-					if name == "valid capture_pending retries" {
+					if name == "valid capture_pending retries" || name == "valid first200 terminal200" {
 						if err != nil {
 							t.Fatalf("bound capture_pending retries rejected: %v", err)
 						}
