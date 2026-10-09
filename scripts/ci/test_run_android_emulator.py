@@ -570,6 +570,30 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.test_polls = [23]
         self.assertEqual(self.run_fixture(), 23)
 
+    def test_final_emulator_status_rejects_abort_and_forced_kill_without_hiding_test_failure(self):
+        for test_status, emulator_status, expected in (
+            (0, 0, 0), (0, -signal.SIGTERM, 0),
+            (0, -signal.SIGABRT, 1), (0, -signal.SIGKILL, 1), (0, 7, 1),
+            (23, -signal.SIGABRT, 23), (23, -signal.SIGKILL, 23),
+        ):
+            with self.subTest(test_status=test_status, emulator_status=emulator_status), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.test_polls = [test_status]
+                execution = runner.Runner(self.selected())
+                def launch(command, **options):
+                    process = self.popen(command, **options)
+                    if Path(command[0]).name == "emulator" and "-version" not in command:
+                        process.status = emulator_status
+                    return process
+                with mock.patch.object(runner.subprocess, "Popen", side_effect=launch):
+                    self.assertEqual(execution.run(), expected)
+                self.assertEqual(execution.test_status, test_status)
+                self.assertEqual(self.stopped[-3:], [execution.test.pid, execution.emulator.pid, execution.adb_server.pid])
+                if emulator_status not in (0, -signal.SIGTERM):
+                    self.assertIn("Android emulator cleanup failed", errors.getvalue())
+                    self.assertIn(f"status {emulator_status}", errors.getvalue())
+                else:
+                    self.assertEqual(errors.getvalue(), "")
+
     def test_cleanup_failure_is_visible_without_hiding_test_failure(self):
         for test_status, expected in ((0, 1), (9, 9)):
             with self.subTest(test_status=test_status), self.boundaries():
@@ -606,7 +630,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         for number in previous:
             with self.subTest(number=number), self.boundaries():
                 execution = runner.Runner(self.selected())
-                execution.emulator = Process(102)
+                execution.emulator = Process(102, status=-signal.SIGABRT)
                 with mock.patch.object(execution, "prepare", side_effect=lambda: execution.cancel(number, None)):
                     self.assertEqual(execution.run(), 128 + number)
         self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
@@ -871,16 +895,17 @@ class EmulatorRunnerTests(unittest.TestCase):
                     self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
 
     def test_command_failure_is_not_ignored(self):
-        with self.boundaries():
+        with self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
             execution = runner.Runner(self.selected())
             execution.log = mock.Mock(wraps=io.StringIO())
             process = Process(100, "failure\n", status=9)
             process.communicate = mock.Mock(wraps=process.communicate)
-            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.adb(["shell", "settings", "put", "global", "window_animation_scale", "0.0"])):
                 self.assertEqual(execution.run(), 1)
             self.assertEqual(self.stopped[-1], 100)
             process.communicate.assert_called_once_with(input=None, timeout=1)
             self.assertEqual(execution.log.write.call_args_list.count(mock.call("failure\n")), 1)
+            self.assertIn(f"{self.sdk}/platform-tools/adb -L {runner.ADB_ENDPOINT} -s {runner.SERIAL} shell settings put global window_animation_scale 0.0", errors.getvalue())
 
     def test_port_checks_cover_server_and_both_emulator_ports(self):
         connection = mock.MagicMock()

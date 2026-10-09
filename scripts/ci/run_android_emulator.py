@@ -6,6 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -264,7 +265,7 @@ class Runner:
             self.check_adb_server()
             status = self.command_process.returncode
             if status:
-                raise RunnerError(f"Command failed with status {status}: {command[0]}")
+                raise RunnerError(f"Command failed with status {status}: {shlex.join(command)}")
         except BaseException as error:
             failure = error
             raise
@@ -482,6 +483,10 @@ class Runner:
                         continue
                     try:
                         stop_group(process)
+                        if process is self.emulator:
+                            result = process.wait(timeout=0)
+                            if result not in (0, -signal.SIGTERM):
+                                raise RunnerError(f"The emulator exited with status {result}")
                     except (RunnerError, OSError, ValueError) as error:
                         print(f"Android emulator cleanup failed: {error}", file=sys.stderr)
                         if self.log:
