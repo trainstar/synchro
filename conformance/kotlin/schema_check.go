@@ -439,6 +439,43 @@ func recoverSchemaProof(ctx context.Context, scenario scenarios.Scenario, steps 
 			if err := bindSchemaProofPush(controller, schemaProofStep(steps, "PREPARED-PUSH").Operation); err != nil {
 				return err
 			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "push"}); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "push"}); err != nil {
+				return err
+			}
+			pushes := schemaProofClientPushes(platform, lane.client.ClientID)
+			if len(pushes) != 1 {
+				return errors.New("prepared response pause did not observe exactly one actual push")
+			}
+			request, err := decodeSchemaProofPush(pushes[0])
+			if err != nil || request.Schema != target {
+				return errors.New("prepared paused push did not use S2")
+			}
+			if err := requireSchemaProofApplied(pushes[0], lane.localOriginal.MutationID, target); err != nil {
+				return err
+			}
+			sealed, err := schemaProofCapture(ctx, state)
+			if err != nil {
+				return err
+			}
+			if len(sealed.RetainedMutations) != 1 || len(sealed.AcceptedMutationOutcomes) != 0 {
+				return errors.New("prepared push reconciled before its sealing capture")
+			}
+			if err := requireSchemaProofOriginal(lane.localOriginal, sealed.RetainedMutations); err != nil {
+				return err
+			}
+			original := sealed.RetainedMutations[0]
+			if original.Status != "sealed" || original.SealedBatchID == nil || *original.SealedBatchID != request.BatchID {
+				return errors.New("prepared original does not name its actual sealed batch")
+			}
+			if err := requireSchemaProofMutation(original, request.Mutations[0]); err != nil {
+				return err
+			}
 			if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
 				return err
 			}

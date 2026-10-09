@@ -185,6 +185,24 @@ func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 	if err := requireSchemaProofOriginal(directSealed, []retainedMutation{directSealed}); err != nil {
 		t.Fatal(err)
 	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*retainedMutation)
+	}{
+		{"missing local order", func(v *retainedMutation) { v.LocalOrder = 0 }},
+		{"missing seal batch", func(v *retainedMutation) { v.SealedBatchID = nil }},
+		{"empty seal batch", func(v *retainedMutation) { empty := ""; v.SealedBatchID = &empty }},
+		{"missing seal ordinal", func(v *retainedMutation) { v.SealedOrdinal = nil }},
+		{"wrong seal ordinal", func(v *retainedMutation) { wrong := int64(1); v.SealedOrdinal = &wrong }},
+	} {
+		t.Run("prepared sealing "+test.name, func(t *testing.T) {
+			changed := directSealed
+			test.mutate(&changed)
+			if requireSchemaProofOriginal(direct, []retainedMutation{changed}) == nil {
+				t.Fatal("invalid prepared sealing evidence passed")
+			}
+		})
+	}
 	if requireSchemaProofOriginal(direct, []retainedMutation{sealed}) == nil {
 		t.Fatal("M1 base refreshed after sealing")
 	}
