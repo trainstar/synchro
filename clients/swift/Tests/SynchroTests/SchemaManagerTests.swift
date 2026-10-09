@@ -1538,6 +1538,8 @@ final class SchemaManagerTests: XCTestCase {
             XCTAssertEqual(superseding.source, SchemaRef(version: 2, hash: intermediate.schemaHash))
             XCTAssertEqual(superseding.target, SchemaRef(version: 3, hash: target.schemaHash))
             XCTAssertEqual(superseding.affectedScopes, ["orders:pending"])
+            XCTAssertEqual(superseding.action, .rebuildLocal)
+            XCTAssertEqual(superseding.scopeCursorUpdates["orders:pending"], .some(nil))
             XCTAssertEqual(superseding.schemaReset, schemaReset)
             let applied = try reopened.writeSyncLockedTransaction { connection in
                 try reopenedManager.applyPreparedMigrationInTransaction(connection)
@@ -1558,6 +1560,50 @@ final class SchemaManagerTests: XCTestCase {
             try reopenedManager.finishAppliedMigrationIfPossible()
             XCTAssertNil(try reopenedManager.activeMigration())
         }
+    }
+
+    func testAbsentAffectedAssignmentRemainsJournaledUntilAuthoritativeInstallation() throws {
+        let (source, intermediate, target) = try migrationChain()
+        let database = try makeTestDB()
+        defer { try? database.close() }
+        let manager = SchemaManager(database: database)
+        try manager.createSyncedTables(schema: SchemaResponse(
+            schemaVersion: source.schemaVersion, schemaHash: source.schemaHash,
+            serverTime: Date(), manifest: source
+        ))
+        XCTAssertThrowsError(try manager.prepareMigration(
+            targetManifest: intermediate, action: .rebuildLocal, affectedScopes: ["orders:new"],
+            scopeCursorUpdates: ["orders:new": "invalid"], schemaReset: true
+        ))
+        XCTAssertNil(try manager.activeMigration())
+        let prepared = try manager.prepareMigration(
+            targetManifest: intermediate, action: .rebuildLocal, affectedScopes: ["orders:new"],
+            scopeCursorUpdates: [:], schemaReset: true
+        )
+        XCTAssertEqual(prepared.scopeCursorUpdates["orders:new"], .some(nil))
+        _ = try manager.recoverMigrationIfNeeded()
+        let successor = try manager.prepareMigration(
+            targetManifest: target, action: .replace, affectedScopes: [],
+            scopeCursorUpdates: [:], schemaReset: false
+        )
+        XCTAssertEqual(successor.action, .rebuildLocal)
+        XCTAssertEqual(successor.affectedScopes, ["orders:new"])
+        XCTAssertEqual(successor.scopeCursorUpdates["orders:new"], .some(nil))
+        _ = try manager.recoverMigrationIfNeeded()
+        XCTAssertNil(try database.readTransaction { try SynchroMeta.getScope($0, scopeID: "orders:new") })
+        XCTAssertEqual(try manager.activeMigration()?.affectedScopes, ["orders:new"])
+        try database.writeTransaction {
+            try SynchroMeta.upsertScope($0, scopeID: "orders:new", cursor: nil, checksum: nil)
+        }
+        try manager.finishAppliedMigrationIfPossible()
+        XCTAssertNotNil(try manager.activeMigration())
+        try database.writeTransaction {
+            try SynchroMeta.upsertScope(
+                $0, scopeID: "orders:new", cursor: "final", checksum: "verified", localChecksum: "verified"
+            )
+        }
+        try manager.finishAppliedMigrationIfPossible()
+        XCTAssertNil(try manager.activeMigration())
     }
 
     func testDifferentServerMigrationStillRejectsUncommittedDetachedOrSameTargetJournal() throws {

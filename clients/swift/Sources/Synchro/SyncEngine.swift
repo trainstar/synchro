@@ -234,21 +234,34 @@ final class SyncEngine: @unchecked Sendable {
                 throw SynchroError.blocked(failure)
             }
             if let existingFailure {
-                if getSyncStatus() != .error {
-                    try transition(to: .error, lifecycleGeneration: generation)
+                guard existingFailure.operation == .schema,
+                      existingFailure.code == .unsupportedSchema,
+                      existingFailure.recoveryAction == .schemaReset else {
+                    if getSyncStatus() != .error {
+                        try transition(to: .error, lifecycleGeneration: generation)
+                    }
+                    throw SynchroError.blocked(existingFailure)
                 }
-                throw SynchroError.blocked(existingFailure)
-            }
-            guard getSyncStatus() == .localReady else {
+            } else if getSyncStatus() != .localReady {
                 throw SynchroError.notStarted
             }
 
             do {
-                _ = try schemaManager.recoverMigrationIfNeeded()
+                _ = try schemaManager.recoverMigrationIfNeeded(requiringSchemaResetFor: existingFailure)
                 try ensureLifecycleActive(generation)
+                if existingFailure != nil && getSyncStatus() != .localReady {
+                    try transition(to: .localReady, lifecycleGeneration: generation)
+                }
+            } catch let SynchroError.blocked(failure) {
+                try ensureLifecycleActive(generation)
+                if getSyncStatus() != .error {
+                    try transition(to: .error, lifecycleGeneration: generation)
+                }
+                throw SynchroError.blocked(failure)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try ensureLifecycleActive(generation)
                 let failure = blockingFailure(
                     for: error,
                     operation: .schema,

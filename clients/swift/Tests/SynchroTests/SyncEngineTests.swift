@@ -3370,6 +3370,96 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(try SchemaManager(database: recoveredDatabase).activeMigration())
     }
 
+    func testResetJournalStartupRequiresMatchingFailureAndValidatedAuthorization() async throws {
+        for mode in ["prepared", "applied", "no-journal", "ordinary-journal", "other-failure", "corrupt-journal"] {
+            let path = tempDBPath()
+            let original = try SynchroDatabase(path: path)
+            let manager = SchemaManager(database: original)
+            var source = protocolOrdersSchemaManifest(includeNotes: false)
+            source.schemaHash = try Integrity.schemaManifestHash(source)
+            var target = protocolOrdersSchemaManifest(
+                includeNotes: true, schemaVersion: 2,
+                parentSchema: SchemaRef(version: 1, hash: source.schemaHash),
+                transitionClass: "class_2", compatibilityFloor: 1
+            )
+            target.schemaHash = try Integrity.schemaManifestHash(target)
+            try manager.createSyncedTables(schema: SchemaResponse(
+                schemaVersion: source.schemaVersion, schemaHash: source.schemaHash,
+                serverTime: Date(), manifest: source
+            ))
+            _ = try original.execute(
+                "INSERT INTO orders (id, user_id, updated_at) VALUES ('queued', 'u1', '2026-01-01T00:00:00.000000Z')",
+                params: nil
+            )
+            let pending = try ChangeTracker(database: original).inspectPendingMutations()
+            let failure = SyncFailure(
+                operation: mode == "other-failure" ? .connecting : .schema,
+                code: mode == "other-failure" ? .authenticationRequired : .unsupportedSchema,
+                retryable: false, message: "Recovery is required.",
+                recoveryAction: mode == "other-failure" ? .none : .schemaReset
+            )
+            try original.writeTransaction { try SynchroMeta.setBlockingFailure($0, failure: failure) }
+            if mode != "no-journal" {
+                _ = try manager.prepareMigration(
+                    targetManifest: target, action: .replace, affectedScopes: [], scopeCursorUpdates: [:],
+                    schemaReset: mode != "ordinary-journal"
+                )
+                if mode == "applied" {
+                    _ = try original.writeSchemaMigrationTransaction { try manager.applyPreparedMigrationInTransaction($0) }
+                }
+                if mode == "corrupt-journal" {
+                    try original.writeTransaction {
+                        try $0.execute(sql: "UPDATE _synchro_schema_migration SET action = 'rebuild_local'")
+                    }
+                }
+            }
+            try original.close()
+            let reopened = try SynchroDatabase(path: path)
+            let authAttempts = OSAllocatedUnfairLock(initialState: 0)
+            let config = SynchroConfig(
+                dbPath: path, serverURL: URL(string: "http://test.invalid")!,
+                authProvider: {
+                    authAttempts.withLock { $0 += 1 }
+                    XCTAssertEqual(try reopened.readTransaction { try SynchroMeta.getInt64($0, key: .schemaVersion) }, 2)
+                    XCTAssertNil(try reopened.readTransaction { try SynchroMeta.getBlockingFailure($0) })
+                    throw CancellationError()
+                },
+                clientID: "test-device", appVersion: "1.0.0"
+            )
+            let tracker = ChangeTracker(database: reopened)
+            let engine = SyncEngine(
+                config: config, database: reopened, httpClient: HttpClient(config: config),
+                schemaManager: SchemaManager(database: reopened), changeTracker: tracker,
+                pullProcessor: PullProcessor(database: reopened),
+                pushProcessor: PushProcessor(database: reopened, changeTracker: tracker)
+            )
+            await engine.stop()
+            let authorized = mode == "prepared" || mode == "applied"
+            do {
+                try await engine.start()
+                XCTFail("Startup did not reach its control: \(mode)")
+            } catch is CancellationError {
+                XCTAssertTrue(authorized, mode)
+            } catch let SynchroError.blocked(blocked) {
+                XCTAssertFalse(authorized, mode)
+                if mode == "corrupt-journal" {
+                    XCTAssertEqual(blocked.code, .schemaApplicationFailed)
+                    XCTAssertFalse(blocked.retryable)
+                } else {
+                    XCTAssertEqual(blocked, failure)
+                }
+            }
+            XCTAssertEqual(authAttempts.withLock { $0 }, authorized ? 1 : 0, mode)
+            XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations(), pending, mode)
+            if !authorized {
+                XCTAssertEqual(engine.getSyncStatus(), .error)
+                XCTAssertEqual(try reopened.readTransaction { try SynchroMeta.getInt64($0, key: .schemaVersion) }, 1)
+            }
+            await engine.shutdown()
+            try reopened.close()
+        }
+    }
+
     func testTypedEventsFollowCommittedSchemaAndRebuildOrder() async throws {
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path

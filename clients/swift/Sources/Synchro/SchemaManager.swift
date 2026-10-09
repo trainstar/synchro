@@ -50,6 +50,13 @@ final class SchemaManager: @unchecked Sendable {
         guard affectedScopes == sortedScopes, Set(affectedScopes).count == affectedScopes.count else {
             throw SynchroError.invalidResponse(message: "schema migration scopes are not canonical")
         }
+        var cursorUpdates = scopeCursorUpdates
+        for scopeID in affectedScopes {
+            guard cursorUpdates[scopeID] == nil || cursorUpdates[scopeID] == .some(nil) else {
+                throw SynchroError.invalidResponse(message: "schema migration affected scope cursor is invalid")
+            }
+            cursorUpdates.updateValue(nil, forKey: scopeID)
+        }
 
         let prepared = try database.writeTransaction { db -> (
             journal: SchemaMigrationJournal,
@@ -75,8 +82,17 @@ final class SchemaManager: @unchecked Sendable {
                existing.phase == .applied,
                existing.target == source,
                SchemaRef(version: targetManifest.schemaVersion, hash: targetManifest.schemaHash) != source {
-                carriedScopes = try existing.affectedScopes.filter { try !scopeRebuildFinal(db, scopeID: $0) }
+                _ = try applyMigrationJournalInTransaction(db, journal: existing)
+                carriedScopes = try existing.affectedScopes.filter { scopeID in
+                    // The authoritative assignment delta has not been installed yet.
+                    guard try SynchroMeta.getScope(db, scopeID: scopeID) != nil else { return true }
+                    return try !scopeRebuildFinal(db, scopeID: scopeID)
+                }
                 try SynchroMeta.clearSchemaMigrationJournal(db)
+            }
+            let rebuildScopes = Set(affectedScopes).union(carriedScopes).sorted(by: utf8Less)
+            for scopeID in carriedScopes {
+                cursorUpdates.updateValue(nil, forKey: scopeID)
             }
             let plan = try SchemaMigrationPlan.derive(
                 source: source,
@@ -88,9 +104,9 @@ final class SchemaManager: @unchecked Sendable {
             let journal = SchemaMigrationJournal(
                 source: source,
                 targetManifest: targetManifest,
-                action: action,
-                affectedScopes: Set(affectedScopes).union(carriedScopes).sorted(by: utf8Less),
-                scopeCursorUpdates: scopeCursorUpdates,
+                action: rebuildScopes.isEmpty ? .replace : .rebuildLocal,
+                affectedScopes: rebuildScopes,
+                scopeCursorUpdates: cursorUpdates,
                 plan: plan,
                 planHash: Integrity.sha256Hex(
                     domain: "synchro:v3:client-migration-plan:v1",
@@ -111,7 +127,7 @@ final class SchemaManager: @unchecked Sendable {
 
     /// Recovers committed migration intent before any network request starts.
     @discardableResult
-    func recoverMigrationIfNeeded() throws -> SchemaMigrationJournal? {
+    func recoverMigrationIfNeeded(requiringSchemaResetFor failure: SyncFailure? = nil) throws -> SchemaMigrationJournal? {
         let pending = try database.readTransaction { db -> (
             journal: SchemaMigrationJournal,
             sourceTables: [LocalSchemaTable]
@@ -121,7 +137,16 @@ final class SchemaManager: @unchecked Sendable {
             }
             return (journal, try storedLocalSchema(in: db) ?? [])
         }
-        guard let pending else { return nil }
+        guard let pending else {
+            if let failure { throw SynchroError.blocked(failure) }
+            return nil
+        }
+        if let failure {
+            guard failure.operation == .schema, failure.code == .unsupportedSchema,
+                  failure.recoveryAction == .schemaReset, pending.journal.schemaReset else {
+                throw SynchroError.blocked(failure)
+            }
+        }
         database.updateApplicationSyncedTables(protectedTableUnion(
             source: pending.sourceTables,
             target: try pending.journal.targetManifest.localTables()
@@ -133,6 +158,12 @@ final class SchemaManager: @unchecked Sendable {
                 throw SynchroError.invalidResponse(message: "schema migration changed during recovery")
             }
             let applied = try applyMigrationJournalInTransaction(db, journal: journal)
+            if let failure {
+                guard try SynchroMeta.getBlockingFailure(db) == failure else {
+                    throw SynchroError.invalidResponse(message: "blocking failure changed during schema recovery")
+                }
+                try SynchroMeta.clearBlockingFailure(db)
+            }
             if applied.affectedScopes.isEmpty {
                 try SynchroMeta.clearSchemaMigrationJournal(db)
             }
@@ -161,6 +192,7 @@ final class SchemaManager: @unchecked Sendable {
             guard journal.phase == .applied else {
                 throw SynchroError.invalidResponse(message: "schema migration has not applied local DDL")
             }
+            _ = try applyMigrationJournalInTransaction(db, journal: journal)
             for scopeID in journal.affectedScopes {
                 guard try scopeRebuildFinal(db, scopeID: scopeID) else {
                     return
@@ -363,19 +395,27 @@ final class SchemaManager: @unchecked Sendable {
             hash: try SynchroMeta.get(db, key: .schemaHash) ?? ""
         )
         let targetTables = try journal.targetManifest.localTables()
-
+        let sourceTables: [LocalSchemaTable]
         if active == journal.target {
             guard journal.phase == .applied else {
                 throw SynchroError.invalidResponse(message: "schema migration phase does not match active schema")
             }
-            try validatePhysicalSchema(db, tables: targetTables)
-            return journal
+            if journal.source.version == 0 {
+                sourceTables = []
+            } else {
+                guard let archived = try SynchroMeta.getArchivedSchemaTables(
+                    db, version: journal.source.version, hash: journal.source.hash
+                ), !archived.isEmpty else {
+                    throw SynchroError.invalidResponse(message: "schema migration source archive is missing")
+                }
+                sourceTables = archived
+            }
+        } else {
+            guard active == journal.source, journal.phase == .prepared else {
+                throw SynchroError.invalidResponse(message: "schema migration source does not match active schema")
+            }
+            sourceTables = try storedLocalSchema(in: db) ?? []
         }
-
-        guard active == journal.source, journal.phase == .prepared else {
-            throw SynchroError.invalidResponse(message: "schema migration source does not match active schema")
-        }
-        let sourceTables = try storedLocalSchema(in: db) ?? []
         let derived = try SchemaMigrationPlan.derive(
             source: journal.source,
             sourceTables: sourceTables,
@@ -384,6 +424,10 @@ final class SchemaManager: @unchecked Sendable {
         )
         guard derived == journal.plan else {
             throw SynchroError.invalidResponse(message: "schema migration plan is not deterministic")
+        }
+        if active == journal.target {
+            try validatePhysicalSchema(db, tables: targetTables)
+            return journal
         }
         if journal.source.version > 0 {
             try validatePhysicalSchema(db, tables: sourceTables)
@@ -479,9 +523,14 @@ final class SchemaManager: @unchecked Sendable {
                 try activateManifest(db, manifest: journal.targetManifest, tables: targetTables)
 
             case .applyScopeState:
+                let existingScopeIDs = Set(try SynchroMeta.getAllScopes(db).map(\.scopeID))
+                let affectedScopeIDs = Set(journal.affectedScopes)
+                let updates = journal.scopeCursorUpdates.filter {
+                    !affectedScopeIDs.contains($0.key) || existingScopeIDs.contains($0.key)
+                }
                 try SynchroMeta.applyScopeCursorUpdates(
                     db,
-                    updates: journal.scopeCursorUpdates,
+                    updates: updates,
                     affectedScopes: journal.affectedScopes
                 )
             }
