@@ -29,6 +29,24 @@ if [ "$mode" = "smoke" ]; then
     : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
   fi
 fi
+rn_version=${SYNCHRO_RN_VERSION-0.83.10}
+if [ "$mode" = "smoke" ]; then
+  case "$platform:$cell_id" in
+    ios:SUP-RN-IOS-MIN-001|android:SUP-RN-ANDROID-MIN-001) cell_rn_version=0.82.1 ;;
+    ios:SUP-RN-IOS-CURRENT-001|android:SUP-RN-ANDROID-CURRENT-001) cell_rn_version=0.83.10 ;;
+    *) printf '%s\n' "unsupported React Native consumer cell: $cell_id for $platform" >&2; exit 1 ;;
+  esac
+  if [ "${SYNCHRO_RN_VERSION+x}" = x ] && [ "$rn_version" != "$cell_rn_version" ]; then
+    printf '%s\n' "React Native version $rn_version conflicts with cell $cell_id" >&2
+    exit 1
+  fi
+  rn_version=$cell_rn_version
+fi
+case "$rn_version" in
+  0.82.1) react_version=19.1.1 ;;
+  0.83.10) react_version=19.2.4 ;;
+  *) printf '%s\n' "unsupported React Native consumer version: $rn_version" >&2; exit 1 ;;
+esac
 
 tarball="$artifact_dir/npm/trainstar-synchro-react-native-$version.tgz"
 maven_dir="$artifact_dir/maven"
@@ -115,7 +133,7 @@ trap cleanup EXIT HUP INT TERM
 
 cli_version=20.2.0
 npx --yes "@react-native-community/cli@$cli_version" init SynchroConsumer \
-  --version 0.83.10 \
+  --version "$rn_version" \
   --directory "$work_dir/app" \
   --pm npm \
   --skip-install
@@ -158,6 +176,8 @@ fi
   cd "$work_dir/app"
   # Keep consumer tooling aligned instead of retaining the template's older CLI pins.
   npm pkg set \
+    "dependencies.react=$react_version" \
+    "devDependencies.react-test-renderer=$react_version" \
     "devDependencies.@react-native-community/cli=$cli_version" \
     "devDependencies.@react-native-community/cli-platform-android=$cli_version" \
     "devDependencies.@react-native-community/cli-platform-ios=$cli_version"
@@ -173,18 +193,24 @@ fi
     *) printf '%s\n' "React Native package resolved outside the isolated consumer: $package_root" >&2; exit 1 ;;
   esac
   test "$(node -p "require('@trainstar/synchro-react-native/package.json').version")" = "$version"
+  test "$(node -p "require('react-native/package.json').version")" = "$rn_version"
+  test "$(node -p "require('react/package.json').version")" = "$react_version"
   npx tsc --noEmit
 )
 
 case "$platform" in
   ios)
     if [ "$mode" = "smoke" ]; then simulator_udid=$IOS_SIMULATOR_UDID; fi
+    if [ "$rn_version" = "0.82.1" ]; then
+      patch --batch --forward -p1 -d "$work_dir/app/node_modules/react-native" \
+        < "$repo_root/clients/react-native/.yarn/patches/react-native-npm-0.82.1-c9dce9d96d.patch"
+    fi
     ruby - "$work_dir/app/ios/Podfile" "$version" "$synchro_git_url" <<'RUBY'
 podfile, version, synchro_git_url = ARGV
 content = File.read(podfile)
 target = "target 'SynchroConsumer' do\n"
 abort "consumer Podfile target was not found" unless content.include?(target)
-abort "consumer Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '16.0'")
+abort "consumer Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '17.0'")
 pods = <<~PODS
   target 'SynchroConsumer' do
     pod 'Synchro', :git => '#{synchro_git_url}', :tag => 'v#{version}'
@@ -208,7 +234,7 @@ RUBY
         -destination 'generic/platform=iOS' \
         -derivedDataPath "$work_dir/device-derived-data" \
         PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
-        IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+        IPHONEOS_DEPLOYMENT_TARGET=17.0 \
         CODE_SIGNING_ALLOWED=NO \
         DEBUG_INFORMATION_FORMAT=dwarf \
         build
@@ -224,7 +250,7 @@ RUBY
         "$@" \
         -derivedDataPath "$work_dir/derived-data" \
         PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.consumer \
-        IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+        IPHONEOS_DEPLOYMENT_TARGET=17.0 \
         CODE_SIGNING_ALLOWED=NO \
         DEBUG_INFORMATION_FORMAT=dwarf \
         build
