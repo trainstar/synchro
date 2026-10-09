@@ -18,6 +18,11 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 - Operators can register an assignment function with a SQL NULL bound to return all distinct assigned scopes. ([#300](https://github.com/trainstar/synchro/issues/300))
 
+### Changed
+
+- React Native applications can use RN 0.82.1 through 0.83.x. RN 0.82.1 iOS applications require the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27. ([#303](https://github.com/trainstar/synchro/issues/303))
+- Breaking: Apple clients require iOS 17 or later. Increase the application deployment target before upgrading. See [client requirements](https://trainstar.github.io/synchro/clients/consumption/). ([#303](https://github.com/trainstar/synchro/issues/303))
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.

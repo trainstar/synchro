@@ -212,6 +212,7 @@ export ANDROID_SERIAL
 endif
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
+RN_POD_UPDATE ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
 # uses every online device, so a device gate requires exactly one serial.
 REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
@@ -1040,7 +1041,7 @@ release-run-support-cell:
 					"$$release/artifacts/synchro-seed-linux-x64-$(VERSION)" \
 					"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" "$(SUPPORT_CELL_ID)" \
 					"$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json" "$$hashes" ;; \
-		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-MIN-001|SUP-RN-ANDROID-MIN-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			$(MAKE) --no-print-directory release-consumer-artifacts VERSION="$(VERSION)" RELEASE_DIR="$$release" \
 				RELEASE_CONSUMER_DIR="$(abspath $(RELEASE_CONSUMER_DIR))"; \
 			case "$(SUPPORT_CELL_ID)" in \
@@ -1176,6 +1177,7 @@ ci-candidate-rn-ios:
 	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
 	$(MAKE) test-consumer-rn-ios
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-ios
 	$(MAKE) test-rn-scenarios-ios
 
@@ -1183,6 +1185,7 @@ ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
 	$(MAKE) test-consumer-rn-android
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-android
 	$(MAKE) test-rn-scenarios-android
 
@@ -1918,7 +1921,7 @@ rn-watchman-reset:
 	fi
 
 rn-ios-pods:
-	cd clients/react-native/example/ios && pod install
+	cd clients/react-native/example/ios && pod $(if $(RN_POD_UPDATE),update $(RN_POD_UPDATE) --no-repo-update,install)
 
 .PHONY: rn-ios-build rn-ios-bundle
 # Callers such as test-rn-e2e-ios-build select the seed, so create the pinned seed only when none exists.
@@ -2292,7 +2295,7 @@ test-client-platforms:
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
 		SUP-IOS-MIN-001) \
-			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "17" || { echo "SUPPORT_PLATFORM_VERSION must be 17" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
@@ -2303,13 +2306,13 @@ test-client-platforms:
 			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial" ;; \
-		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001|SUP-RN-ANDROID-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
 			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
 			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; else $(MAKE) test-consumer-rn-android-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; fi ;; \
-		SUP-RN-IOS-CURRENT-001) \
+		SUP-RN-IOS-CURRENT-001|SUP-RN-IOS-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-rn-ios-smoke ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \

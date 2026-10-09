@@ -33,9 +33,9 @@ Do not substitute an older published package into the current tutorial.
 | Component | Supported environment |
 | --- | --- |
 | PostgreSQL extension and Go tools | PostgreSQL 18, Ubuntu 24.04, Linux x64 |
-| Swift client | iOS 16 and current stable iOS, Swift 6 toolchain |
+| Swift client | iOS 17 and current stable iOS, Swift 6 toolchain |
 | Kotlin client | Android API 24 and current stable Android |
-| React Native bridge | React Native 0.83.x, current stable iOS and Android |
+| React Native bridge | React Native 0.82.1 through 0.83.x, current stable iOS and Android |
 
 macOS hosts Apple development and validation. It is not a supported PostgreSQL deployment target.
 See the [support policy](https://trainstar.github.io/synchro/reference/support-policy/) for dependency constraints and support boundaries.

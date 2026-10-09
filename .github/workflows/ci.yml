@@ -318,7 +318,7 @@ jobs:
   candidate-rn-ios:
     name: candidate React Native iOS
     if: github.event_name == 'push'
-    runs-on: macos-15
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -352,6 +352,18 @@ jobs:
             brew install wix/brew/applesimutils
           fi
 
+      - name: Select Xcode 27 and current iOS simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_27.0.app
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = '27.0'
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == "27.0" }; abort "iOS 27.0 runtime is required" unless r; puts r.fetch("identifier")')"
+          udid="$(xcrun simctl create Synchro_RN_Current com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          echo "RN_IOS_TEST_DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
       - name: Start local PostgreSQL
         run: |
           set -euo pipefail
@@ -378,6 +390,12 @@ jobs:
         run: |
           make synchrod-pg-test-stop
           make local-postgres-stop
+
+      - name: Delete React Native simulator
+        if: always() && env.IOS_SIMULATOR_UDID != ''
+        run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+          xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
 
   candidate-rn-android:
     name: candidate React Native Android

@@ -116,7 +116,7 @@ template, output, synchro_pod = ARGV
 content = File.read(template)
 target = "target 'SynchroUpgrade' do\n"
 abort "application Podfile target was not found" unless content.include?(target)
-abort "application Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '16.0'")
+abort "application Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '17.0'")
 pods = "#{target}  #{synchro_pod}\n  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'\n"
 File.write(output, content.sub(target, pods))
 RUBY
@@ -136,7 +136,7 @@ RUBY
       -sdk iphonesimulator \
       -derivedDataPath "$work/derived-data" \
       PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.upgrade \
-      IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+      IPHONEOS_DEPLOYMENT_TARGET=17.0 \
       CURRENT_PROJECT_VERSION="$code" \
       CODE_SIGNING_ALLOWED=NO \
       DEBUG_INFORMATION_FORMAT=dwarf \

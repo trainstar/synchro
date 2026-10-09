@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
   s.license = { :type => "MIT" }
   s.author = "Trainstar"
   s.source = { :git => "https://github.com/trainstar/synchro.git", :tag => "v#{s.version}" }
-  s.ios.deployment_target = "16.0"
+  s.ios.deployment_target = "17.0"
   s.osx.deployment_target = "13.0"
   s.swift_version = "5.9"
   s.source_files = "clients/swift/Sources/Synchro/**/*.swift"

@@ -20,18 +20,45 @@ The supported matrix is deliberately narrow:
 | Surface | Required environments |
 | --- | --- |
 | Server | PostgreSQL 18 on Ubuntu 24.04 Linux x64 |
-| Apple client | iOS 16 and current stable iOS |
+| Apple client | iOS 17 and current stable iOS |
 | Android client | Android API 24 and current stable Android API |
-| React Native bridge | React Native 0.83.x on current stable iOS and current stable Android |
+| React Native bridge | React Native 0.82.1 and 0.83.x on current stable iOS and current stable Android |
 
 PostgreSQL 14, 15, 16, and 17 are excluded. Existing build features or incidental successful use do not expand this matrix.
 
-The React Native package supports `react-native >=0.83.0 <0.84.0` and the compatible React 19 line. React Native verification exercises both current bridge paths over the native SDKs. Native engine cells provide minimum operating system coverage.
+The React Native package accepts `react-native >=0.82.1 <0.84.0` and `react >=19.1.1 <20.0.0`.
+Package checks exercise both bridge paths on RN 0.82.1 and 0.83.10.
+The representative semantic corpus uses RN 0.83.10.
+Native engine cells provide minimum operating system coverage.
 
 Current package consumers pin React Native 0.83.10.
-Use React Native 0.83.5 or later in the supported line with Xcode 26.4 or later.
-Earlier patches use an incompatible fmt release.
+Use React Native 0.83.5 or later in the 0.83 line with Xcode 27.
+Earlier patches require the fmt dependency correction.
 The [upstream correction](https://github.com/react/react-native/commit/faeef2b90a56633ad44289b994d31e7ce590b145) updates fmt to 12.1.0.
+
+## React Native 0.82.1 fmt Backport
+
+RN 0.82.1 pins fmt 11.0.2, which fails with the Xcode 27 compiler.
+The backport changes the fmt pod version, its Git tag, and the RCT-Folly dependency to 12.1.0.
+It does not change C++ source.
+The application owns its React Native dependency.
+Installing Synchro does not apply this patch to the application.
+
+For Yarn 4 applications:
+
+1. Copy the [patch](https://github.com/trainstar/synchro/blob/master/clients/react-native/.yarn/patches/react-native-npm-0.82.1-c9dce9d96d.patch) into `.yarn/patches/`.
+2. Set the application dependency to this value:
+
+   ```json
+   "react-native": "patch:react-native@npm:0.82.1#./.yarn/patches/react-native-npm-0.82.1-c9dce9d96d.patch"
+   ```
+
+3. Run `yarn install` and commit the patch, manifest, and lockfile.
+4. Run `pod update fmt RCT-Folly --no-repo-update` in the application iOS directory.
+5. Confirm that `Podfile.lock` resolves fmt 12.1.0.
+
+Other package managers must preserve the same patch across dependency installations.
+RN 0.83.10 already contains the upstream correction.
 
 ## Validation Hosts
 
@@ -39,7 +66,8 @@ macOS hosts Apple toolchain and Swift scenario execution. A host role does not c
 
 ## Minimum And Current Tracks
 
-Minimum tracks protect iOS 16 and Android API 24. Current tracks protect stable Apple and Android platform releases available when a candidate starts.
+Minimum tracks protect iOS 17, Android API 24, and RN 0.82.1.
+Current tracks protect stable Apple and Android platform releases available when a candidate starts.
 
 `current-stable` is an authored policy selector, not a permanent version number. `release-manifest.json` records exact candidate versions.
 

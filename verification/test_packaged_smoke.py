@@ -490,6 +490,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "SUP-ANDROID-CURRENT-001": [hashes["kotlin-maven"]],
                 "SUP-RN-IOS-CURRENT-001": [manifest_hash, hashes["react-native-npm"]],
                 "SUP-RN-ANDROID-CURRENT-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
+                "SUP-RN-IOS-MIN-001": [manifest_hash, hashes["react-native-npm"]],
+                "SUP-RN-ANDROID-MIN-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
             }
             summary = {
                 "schema_version": 1,
@@ -872,7 +874,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def test_required_cells_exclude_tested_development_hosts(self) -> None:
         cells = packaged_smoke.required_cells(REPO_ROOT)
         self.assertNotIn("SUP-MACOS-CURRENT-001", cells)
-        self.assertEqual(len(cells), 7)
+        self.assertEqual(len(cells), 9)
 
     def test_wrong_artifact_hash_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-hash.") as raw_directory:
