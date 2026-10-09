@@ -1506,19 +1506,27 @@ func validateSchemaProofRecoveryWire(scenario scenarios.Scenario, steps map[scen
 	if connect.OperationClass != "connect" || connect.RequestFacts == nil || connect.RequestFacts.SchemaVersion != target.Version || connect.RequestFacts.SchemaHash != target.Hash || connect.CursorFingerprintsComplete == nil || !*connect.CursorFingerprintsComplete || !slices.Equal(connect.CursorFingerprints, installed) || facts == nil || facts.Action != "none" || facts.SchemaVersion != target.Version || facts.SchemaHash != target.Hash {
 		return errors.New("recovery connect did not use recovered S2")
 	}
-	foundPull := false
+	foundSuccessfulPull := false
 	for _, observation := range call.transportObservations[1:] {
 		if observation.OperationClass != "pull" {
 			continue
 		}
-		if observation.StatusCode != 200 || observation.RequestFacts == nil || observation.RequestFacts.SchemaVersion != target.Version || observation.RequestFacts.SchemaHash != target.Hash || observation.CursorFingerprintsComplete == nil || !*observation.CursorFingerprintsComplete || !slices.Equal(observation.CursorFingerprints, installed) {
-			return errors.New("first proof pull did not use the recovered S2 cursor successfully")
+		if observation.RequestFacts == nil || observation.RequestFacts.SchemaVersion != target.Version || observation.RequestFacts.SchemaHash != target.Hash || observation.CursorFingerprintsComplete == nil || !*observation.CursorFingerprintsComplete || !slices.Equal(observation.CursorFingerprints, installed) {
+			return errors.New("proof pull attempt did not use the recovered S2 cursor")
 		}
-		foundPull = true
-		break
+		if observation.StatusCode == 200 {
+			if err := validateSwiftWireObservation(scenario, string(schemaProofStep(steps, name+"-COMPLETE").ID), observation); err != nil {
+				return err
+			}
+			foundSuccessfulPull = true
+			break
+		}
+		if observation.StatusCode != 503 || observation.ErrorCode == nil || *observation.ErrorCode != "capture_pending" || observation.Retryable == nil || !*observation.Retryable {
+			return errors.New("proof pull attempt did not return retryable capture_pending")
+		}
 	}
-	if !foundPull {
-		return errors.New("proof recovery omitted its first target pull")
+	if !foundSuccessfulPull {
+		return errors.New("proof recovery omitted its first successful target pull")
 	}
 	pull := call.transportObservations[len(call.transportObservations)-1]
 	if pull.OperationClass != "pull" || pull.RequestFacts == nil || pull.RequestFacts.SchemaVersion != target.Version || pull.RequestFacts.SchemaHash != target.Hash {

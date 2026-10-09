@@ -481,6 +481,48 @@ func TestSchemaProofRecoveryWireUsesRecoveredCursorForFirstRequests(t *testing.T
 	if err := validateSchemaProofRecoveryWire(scenario, steps, "PREPARED", call, target, recovered); err != nil {
 		t.Fatal(err)
 	}
+	code, wrongCode := "capture_pending", "temporary_unavailable"
+	pending := first
+	pending.StatusCode, pending.ErrorCode, pending.Retryable = 503, &code, &complete
+	retryCall := call
+	retryCall.transportObservations = []TransportObservation{connect, {OperationClass: "push", StatusCode: 200}, pending, pending, first, terminal}
+	if err := validateSchemaProofRecoveryWire(scenario, steps, "PREPARED", retryCall, target, recovered); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*SynchronizationResult)
+	}{
+		{"capture_pending wrong cursor", func(v *SynchronizationResult) {
+			v.transportObservations[2].CursorFingerprints = []string{cursorFingerprint(oldCursor)}
+		}},
+		{"capture_pending wrong schema", func(v *SynchronizationResult) {
+			v.transportObservations[2].RequestFacts = &TransportRequestFacts{SchemaVersion: 1, SchemaHash: strings.Repeat("a", 64)}
+		}},
+		{"capture_pending incomplete fingerprints", func(v *SynchronizationResult) { v.transportObservations[2].CursorFingerprintsComplete = &incomplete }},
+		{"capture_pending missing fingerprints", func(v *SynchronizationResult) { v.transportObservations[2].CursorFingerprints = nil }},
+		{"capture_pending wrong error", func(v *SynchronizationResult) { v.transportObservations[2].ErrorCode = &wrongCode }},
+		{"capture_pending missing error", func(v *SynchronizationResult) { v.transportObservations[2].ErrorCode = nil }},
+		{"capture_pending not retryable", func(v *SynchronizationResult) { v.transportObservations[2].Retryable = &incomplete }},
+		{"capture_pending missing retry flag", func(v *SynchronizationResult) { v.transportObservations[2].Retryable = nil }},
+		{"capture_pending wrong status", func(v *SynchronizationResult) { v.transportObservations[2].StatusCode = 500 }},
+		{"later capture_pending wrong cursor", func(v *SynchronizationResult) {
+			v.transportObservations[3].CursorFingerprints = []string{cursorFingerprint(oldCursor)}
+		}},
+		{"successful retry wrong cursor", func(v *SynchronizationResult) {
+			v.transportObservations[4].CursorFingerprints = []string{cursorFingerprint(oldCursor)}
+		}},
+		{"capture_pending without success", func(v *SynchronizationResult) { v.transportObservations = v.transportObservations[:4] }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := retryCall
+			changed.transportObservations = append([]TransportObservation(nil), retryCall.transportObservations...)
+			test.mutate(&changed)
+			if validateSchemaProofRecoveryWire(scenario, steps, "PREPARED", changed, target, recovered) == nil {
+				t.Fatal("invalid recovery retry binding passed")
+			}
+		})
+	}
 	for _, test := range []struct {
 		name   string
 		mutate func(*SynchronizationResult)
