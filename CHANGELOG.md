@@ -9,7 +9,7 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
-## [0.4.0-rc.2] - 2026-10-05
+## [0.4.0-rc.2] - 2026-10-09
 
 This release candidate is for consumer validation of `0.4.0`.
 Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
