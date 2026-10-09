@@ -23,6 +23,7 @@
     "lib",
     "android",
     "ios",
+    "ios-test-host",
     "ios-tests",
     "*.podspec",
     "!ios/build",
