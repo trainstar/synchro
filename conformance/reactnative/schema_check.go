@@ -2201,7 +2201,7 @@ func schemaProofMutations(capture finalCapture) ([]schemaProofMutation, error) {
 	seen := make(map[string]bool, len(mutations))
 	previousOrder := uint64(0)
 	for _, mutation := range mutations {
-		if mutation.MutationID == "" || mutation.LocalOrder == 0 || mutation.ClientVersion == "" || mutation.TableID == "" || mutation.RecordID == "" || mutation.AuthoredSchema.Version == 0 || mutation.AuthoredFields == nil {
+		if mutation.MutationID == "" || mutation.LocalOrder == 0 || mutation.ClientVersion == "" || mutation.TableID == "" || mutation.TableName == "" || mutation.RecordID == "" || mutation.PrimaryKeyFieldID == "" || mutation.PrimaryKeyLogicalType == "" || mutation.AuthoredSchema.Version == 0 || mutation.AuthoredFields == nil {
 			return nil, errors.New("schema proof mutation identity is incomplete")
 		}
 		if seen[mutation.MutationID] || mutation.LocalOrder <= previousOrder {
@@ -2226,20 +2226,15 @@ func schemaProofSameIntent(a, b schemaProofMutation) bool {
 	a.Status, b.Status = "", ""
 	a.SealedBatchID, b.SealedBatchID = nil, nil
 	a.SealedOrdinal, b.SealedOrdinal = nil, nil
-	a.NormalizedMutationID, b.NormalizedMutationID = nil, nil
 	return reflect.DeepEqual(a, b)
 }
 
 func schemaProofSameOriginal(a, b schemaProofMutation) bool {
-	if b.Status != a.Status && (a.Status != "pending" || b.Status != "superseded_before_send") {
+	if a.SourceKind == "normalized" || a.NormalizedMutationID != nil || b.NormalizedMutationID != nil {
 		return false
 	}
-	if a.NormalizedMutationID != nil && (b.NormalizedMutationID == nil || *a.NormalizedMutationID != *b.NormalizedMutationID) {
-		return false
-	}
-	a.Status, b.Status = "", ""
-	a.NormalizedMutationID, b.NormalizedMutationID = nil, nil
-	return reflect.DeepEqual(a, b)
+	return a.Status == "pending" && a.SealedBatchID == nil && a.SealedOrdinal == nil &&
+		b.Status == "sealed" && b.SealedBatchID != nil && *b.SealedBatchID != "" && b.SealedOrdinal != nil && *b.SealedOrdinal == 0 && schemaProofSameIntent(a, b)
 }
 
 func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name string, capture finalCapture) error {
@@ -2404,17 +2399,10 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if err != nil {
 			return err
 		}
-		for _, original := range previous {
-			current, err := schemaProofFindMutation(mutations, original.MutationID)
-			if err != nil || !schemaProofSameIntent(original, current) || original.SourceKind != "normalized" && !schemaProofSameOriginal(original, current) {
-				return errors.New("M1 sealing changed its immutable S1 local intent")
-			}
+		if len(previous) != 1 || len(mutations) != 1 || !schemaProofSameOriginal(previous[0], mutations[0]) {
+			return errors.New("M1 sealing changed its immutable S1 local intent")
 		}
-		sealed := false
-		for _, mutation := range mutations {
-			sealed = sealed || mutation.Status == "sealed" && mutation.SealedBatchID != nil && mutation.SealedOrdinal != nil
-		}
-		if !sealed || state.SealedBatchCount != 1 || state.MutationOutcomeCount != 0 {
+		if state.SealedBatchCount != 1 || state.MutationOutcomeCount != 0 {
 			return errors.New("accepted M1 did not remain locally unresolved and sealed")
 		}
 	} else if name == "COMMITTED-M2-INTENT-001" {
@@ -2425,17 +2413,14 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if err != nil {
 			return err
 		}
-		for _, previous := range original {
-			current, err := schemaProofFindMutation(mutations, previous.MutationID)
-			if err != nil || !reflect.DeepEqual(current, previous) {
-				return errors.New("M2 write changed its unresolved predecessor")
-			}
-		}
-		if len(mutations) != len(original)+1 {
+		if len(original) != 1 || len(mutations) != 2 || !reflect.DeepEqual(mutations[0], original[0]) || original[0].Status != "sealed" {
 			return errors.New("M2 did not add one real local intent")
 		}
 		later := mutations[len(mutations)-1]
-		if later.AuthoredSchema != s2 || later.Status != "pending" || later.SourceKind == "normalized" || later.SealedBatchID != nil || later.LocalOrder <= original[len(original)-1].LocalOrder {
+		if later.TableID != original[0].TableID || later.PrimaryKeyFieldID != original[0].PrimaryKeyFieldID || later.PrimaryKeyLogicalType != original[0].PrimaryKeyLogicalType || later.RecordID != original[0].RecordID {
+			return errors.New("M2 does not retain its predecessor's typed row identity")
+		}
+		if later.AuthoredSchema != s2 || later.Status != "pending" || later.SourceKind == "normalized" || later.NormalizedMutationID != nil || later.SealedBatchID != nil || later.SealedOrdinal != nil || later.LocalOrder <= original[0].LocalOrder || later.DependsOnMutationID == nil || *later.DependsOnMutationID != original[0].MutationID || state.MutationOutcomeCount != 0 {
 			return errors.New("M2 original intent is not an unsealed later S2 record")
 		}
 		var proof durableProof
@@ -2468,6 +2453,9 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			return err
 		}
 		if err := c.validateProofLaterIntent(c.proofCaptures["COMMITTED-M2-INTENT-001"], capture, false, "", m1.MutationID); err != nil {
+			return err
+		}
+		if err := schemaProofWireIntent(pushes[1], capture); err != nil {
 			return err
 		}
 	} else if name == "COMMITTED-M2-PAUSED-001" {
@@ -2507,21 +2495,24 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if err := schemaProofWireIntent(pushes[0], capture); err != nil {
 			return err
 		}
+		original, err := schemaProofMutations(c.proofCaptures["PREPARED-INTENT-001"])
+		if err != nil || len(original) != 1 || len(mutations) != 1 || !schemaProofSameOriginal(original[0], mutations[0]) || state.MutationOutcomeCount != 0 || state.SealedBatchCount != 1 {
+			return errors.New("prepared sealing changed its original local intent")
+		}
 	} else if strings.Contains(name, "FINAL") {
 		wantOutcomes := uint64(2)
 		if prepared {
 			wantOutcomes = 1
 		}
-		if validateReadyStatus(capture.Status) != nil || state.SealedBatchCount != 0 || state.RejectedMutationCount != 0 || state.MutationOutcomeCount != wantOutcomes {
+		if validateReadyStatus(capture.Status) != nil || state.SealedBatchCount != 0 || state.RejectedMutationCount != 0 || state.MutationOutcomeCount != wantOutcomes || state.MutationLedgerCount != wantOutcomes || len(mutations) != 0 {
 			return errors.New("schema proof did not finish ordinary reconciliation")
 		}
-		for _, mutation := range mutations {
-			if mutation.Status == "sealed" || mutation.Status == "pending" || mutation.Status == "blocked_by_predecessor" {
-				return errors.New("schema proof final queue has unresolved mutations")
-			}
+		wantPushes := 3
+		if prepared {
+			wantPushes = 1
 		}
-		if len(pushes) == 0 {
-			return errors.New("schema proof has no successful real push")
+		if len(pushes) != wantPushes {
+			return errors.New("schema proof has an unexpected actual push count")
 		}
 		version, err := schemaProofAcceptedVersion(pushes[len(pushes)-1].Response)
 		if err != nil {
@@ -2531,78 +2522,75 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if json.Unmarshal(capture.DurableProof, &proof) != nil || proof.RowMetadata == nil || proof.RowMetadata.ServerVersion != version {
 			return errors.New("schema proof final row metadata did not install its own accepted outcome version")
 		}
-		originalCapture := c.proofCaptures["COMMITTED-M1-LOCAL-001"]
+		originalNames := []string{"COMMITTED-M1-LOCAL-001", "COMMITTED-M2-INTENT-001"}
+		sealedNames := []string{"COMMITTED-M1-SEALED-001", "COMMITTED-M2-PAUSED-001"}
+		acceptedPushes := []schemaCheckPush{pushes[0]}
 		if prepared {
-			originalCapture = c.proofCaptures["PREPARED-INTENT-001"]
-		}
-		originals, err := schemaProofMutations(originalCapture)
-		if err != nil {
-			return err
-		}
-		if !prepared {
-			later, err := schemaProofMutations(c.proofCaptures["COMMITTED-M2-INTENT-001"])
-			if err != nil {
-				return err
-			}
-			originals = append(originals, later...)
-		}
-		for _, original := range originals {
-			if original.SourceKind == "normalized" {
-				continue
-			}
-			retained, err := schemaProofFindMutation(mutations, original.MutationID)
-			if err != nil || !schemaProofSameOriginal(original, retained) {
-				return errors.New("schema proof final capture lost or changed an original local record")
-			}
-			if retained.NormalizedMutationID == nil {
-				return errors.New("schema proof final original has no accepted normalized identity")
-			}
-			expectedLink := original.NormalizedMutationID
-			if expectedLink == nil {
-				pausedName := "COMMITTED-M1-PAUSED-001"
-				if prepared {
-					pausedName = "PREPARED-PUSH-PAUSED-001"
-				}
-				paused, err := schemaProofMutations(c.proofCaptures[pausedName])
-				if err != nil {
-					return err
-				}
-				before, err := schemaProofFindMutation(paused, original.MutationID)
-				if err != nil || !schemaProofSameOriginal(original, before) {
-					return errors.New("schema proof normalized capture changed its original local record")
-				}
-				expectedLink = before.NormalizedMutationID
-			}
-			if expectedLink == nil || *expectedLink != *retained.NormalizedMutationID {
-				return errors.New("schema proof final original changed its validated normalized identity")
-			}
-			matched := false
-			for _, push := range pushes {
-				wire, err := schemaProofPushMutation(push)
-				if err != nil {
-					return err
-				}
-				if wire.MutationID == *retained.NormalizedMutationID {
-					if err := schemaProofStoredOutcome(state, wire.MutationID, push.Response); err != nil {
-						return err
-					}
-					matched = true
-				}
-			}
-			if !matched {
-				return errors.New("schema proof final accepted record is not bound to its original local record")
-			}
-		}
-		if prepared {
-			if len(pushes) != 1 || c.validateProofPush(pushes[0], s2, s1, nil) != nil {
+			originalNames = []string{"PREPARED-INTENT-001"}
+			sealedNames = []string{"PREPARED-PUSH-PAUSED-001"}
+			if c.validateProofPush(pushes[0], s2, s1, nil) != nil {
 				return errors.New("prepared recovered push did not succeed under S2")
 			}
+		} else {
+			if err := c.validateProofReplay(pushes[0], pushes[1], s1, s2); err != nil {
+				return err
+			}
+			acceptedPushes = append(acceptedPushes, pushes[2])
+		}
+		acceptedIDs := make(map[string]bool, wantOutcomes)
+		for index, push := range acceptedPushes {
+			originals, err := schemaProofMutations(c.proofCaptures[originalNames[index]])
+			if err != nil || len(originals) != index+1 {
+				return errors.New("schema proof original singleton intent capture is incomplete")
+			}
+			original := originals[len(originals)-1]
+			if index == 1 {
+				predecessor, err := schemaProofPushMutation(pushes[0])
+				if err != nil {
+					return err
+				}
+				base, err := schemaProofAcceptedVersion(pushes[0].Response)
+				if err != nil {
+					return err
+				}
+				if err := c.validateProofPush(push, s2, s2, &base); err != nil {
+					return err
+				}
+				paused := c.proofCaptures["COMMITTED-M1-PAUSED-001"]
+				if err := c.validateProofLaterIntent(c.proofCaptures[originalNames[index]], paused, false, "", predecessor.MutationID); err != nil {
+					return err
+				}
+				if err := c.validateProofLaterIntent(paused, c.proofCaptures[sealedNames[index]], true, base, predecessor.MutationID); err != nil {
+					return err
+				}
+				original.BaseVersion = &base
+				original.DependsOnMutationID = nil
+			}
+			sealedCapture := c.proofCaptures[sealedNames[index]]
+			sealed, err := schemaProofMutations(sealedCapture)
+			if err != nil || len(sealed) != 1 || !schemaProofSameOriginal(original, sealed[0]) || acceptedIDs[original.MutationID] {
+				return errors.New("schema proof final accepted identity differs from its original singleton intent")
+			}
+			if err := schemaProofWireIntent(push, sealedCapture); err != nil {
+				return err
+			}
+			if err := schemaProofStoredOutcome(state, original.MutationID, push.Response); err != nil {
+				return err
+			}
+			acceptedIDs[original.MutationID] = true
 		}
 		if err := c.validateProofFinalTraffic(trace, s2, lane); err != nil {
 			return err
 		}
 	}
 	if name == "PREPARED-INTENT-001" || name == "COMMITTED-M1-LOCAL-001" || name == "COMMITTED-M2-INTENT-001" {
+		wantMutations := 1
+		if name == "COMMITTED-M2-INTENT-001" {
+			wantMutations = 2
+		}
+		if len(mutations) != wantMutations || state.MutationOutcomeCount != 0 {
+			return errors.New("authored write did not retain exactly one original mutation per intent")
+		}
 		expectedSchema := s1
 		if name == "COMMITTED-M2-INTENT-001" {
 			expectedSchema = s2
@@ -2623,7 +2611,7 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			if mutation.AuthoredSchema != expectedSchema {
 				continue
 			}
-			if mutation.Operation != "update" || mutation.TableName != c.tableName || mutation.RecordID != selectors[0]["primary_key"] || mutation.BaseVersion == nil {
+			if mutation.Operation != "update" || mutation.TableName != c.tableName || mutation.RecordID != selectors[0]["primary_key"] || mutation.BaseVersion == nil || mutation.Status != "pending" || mutation.SourceKind == "normalized" || mutation.NormalizedMutationID != nil || mutation.SealedBatchID != nil || mutation.SealedOrdinal != nil {
 				return errors.New("authored local mutation has the wrong row or base binding")
 			}
 			wantFields := 1
@@ -2633,14 +2621,16 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			if len(mutation.AuthoredFields) != wantFields {
 				return errors.New("authored local mutation lost a field or captured an extra field")
 			}
+			seenFields := make(map[string]bool, wantFields)
 			for _, field := range mutation.AuthoredFields {
-				if field.LogicalType != "string" || field.FieldID == valueField && !semanticRawJSONEqual(field.Value, valueRaw) || field.FieldID == noteField && !semanticRawJSONEqual(field.Value, []byte(`"later-note"`)) || field.FieldID != valueField && field.FieldID != noteField {
+				if seenFields[field.FieldID] || field.LogicalType != "string" || field.FieldID == valueField && !semanticRawJSONEqual(field.Value, valueRaw) || field.FieldID == noteField && !semanticRawJSONEqual(field.Value, []byte(`"later-note"`)) || field.FieldID != valueField && field.FieldID != noteField {
 					return errors.New("authored local mutation differs from its real local write")
 				}
+				seenFields[field.FieldID] = true
 			}
 			checked++
 		}
-		if checked == 0 {
+		if checked != 1 {
 			return errors.New("authored local mutation is absent")
 		}
 	}
@@ -2661,7 +2651,7 @@ func schemaProofWireIntent(push schemaCheckPush, capture finalCapture) error {
 		return err
 	}
 	sealed, err := schemaProofFindMutation(mutations, wire.MutationID)
-	if err != nil || sealed.Status != "sealed" || sealed.SealedBatchID == nil || *sealed.SealedBatchID != request.BatchID || sealed.SealedOrdinal == nil || *sealed.SealedOrdinal != 0 || sealed.TableID != wire.Table || sealed.AuthoredSchema != wire.AuthoredSchema || !reflect.DeepEqual(sealed.BaseVersion, wire.BaseVersion) || sealed.ClientVersion != wire.ClientVersion || len(wire.Columns) != len(sealed.AuthoredFields) {
+	if err != nil || sealed.Status != "sealed" || sealed.SourceKind == "normalized" || sealed.NormalizedMutationID != nil || sealed.SealedBatchID == nil || *sealed.SealedBatchID != request.BatchID || sealed.SealedOrdinal == nil || *sealed.SealedOrdinal != 0 || sealed.TableID != wire.Table || sealed.Operation != wire.Operation || sealed.AuthoredSchema != wire.AuthoredSchema || !reflect.DeepEqual(sealed.BaseVersion, wire.BaseVersion) || sealed.ClientVersion != wire.ClientVersion || len(wire.Columns) != len(sealed.AuthoredFields) {
 		return errors.New("actual outgoing bytes differ from their immutable sealed ledger binding")
 	}
 	record, _ := json.Marshal(sealed.RecordID)
@@ -2913,18 +2903,13 @@ func schemaProofNamedM2Push(before finalCapture, push schemaCheckPush) error {
 	if err != nil {
 		return err
 	}
-	var original schemaProofMutation
-	for _, mutation := range mutations {
-		if mutation.SourceKind != "normalized" && mutation.LocalOrder > original.LocalOrder {
-			original = mutation
-		}
+	if len(mutations) != 2 || mutations[1].Status != "pending" || mutations[1].SourceKind == "normalized" || mutations[1].NormalizedMutationID != nil {
+		return errors.New("schema proof original M2 singleton identity is absent")
 	}
-	if original.NormalizedMutationID == nil {
-		return errors.New("schema proof original M2 normalized identity is absent")
-	}
+	original := mutations[1]
 	mutation, err := schemaProofPushMutation(push)
-	if err != nil || mutation.MutationID != *original.NormalizedMutationID || mutation.AuthoredSchema != original.AuthoredSchema {
-		return errors.New("third actual push does not name the validated normalized M2 identity")
+	if err != nil || mutation.MutationID != original.MutationID || mutation.AuthoredSchema != original.AuthoredSchema {
+		return errors.New("third actual push does not name the validated original M2 identity")
 	}
 	return nil
 }
@@ -3019,42 +3004,25 @@ func (c *SchemaCheckCoordinator) validateProofLaterIntent(before, after finalCap
 	if err != nil {
 		return err
 	}
-	var original schemaProofMutation
-	for _, mutation := range prior {
-		if mutation.SourceKind != "normalized" && mutation.AuthoredSchema.Version > 0 && (original.MutationID == "" || mutation.LocalOrder > original.LocalOrder) {
-			original = mutation
-		}
+	if len(prior) != 2 || prior[0].MutationID != predecessorID || prior[0].Status != "sealed" {
+		return errors.New("M2 has no captured sealed M1 predecessor")
 	}
-	if original.MutationID == "" {
-		return errors.New("original later local record is absent")
-	}
-	retained, err := schemaProofFindMutation(current, original.MutationID)
-	if err != nil || !schemaProofSameOriginal(original, retained) {
-		return errors.New("original M2 local record changed during predecessor reconciliation")
-	}
-	if retained.NormalizedMutationID == nil {
-		return errors.New("M2 has no inspectable normalized successor")
-	}
-	normalized, err := schemaProofFindMutation(current, *retained.NormalizedMutationID)
-	if err != nil || normalized.AuthoredSchema != original.AuthoredSchema || !reflect.DeepEqual(normalized.AuthoredFields, original.AuthoredFields) || normalized.ClientVersion != original.ClientVersion || normalized.Operation != original.Operation || normalized.RecordID != original.RecordID || normalized.SourceKind != "normalized" || normalized.LocalOrder <= original.LocalOrder {
-		return errors.New("normalized M2 lost its original identity binding or authored fields")
+	original := prior[1]
+	if original.SourceKind == "normalized" || original.NormalizedMutationID != nil || original.Status != "pending" || original.SealedBatchID != nil || original.SealedOrdinal != nil || original.BaseVersion == nil || original.DependsOnMutationID == nil || *original.DependsOnMutationID != predecessorID {
+		return errors.New("original M2 is not an unsealed singleton with its actual M1 dependency")
 	}
 	if reconciled {
-		if original.NormalizedMutationID == nil || *original.NormalizedMutationID != normalized.MutationID {
-			return errors.New("M2 normalized identity changed after M1 reconciliation")
-		}
-		previous, err := schemaProofFindMutation(prior, normalized.MutationID)
-		if err != nil {
-			return err
-		}
-		allowed := previous
+		allowed := original
 		allowed.BaseVersion = &acceptedVersion
 		allowed.DependsOnMutationID = nil
-		if previous.DependsOnMutationID == nil || *previous.DependsOnMutationID != predecessorID || !schemaProofSameIntent(allowed, normalized) || normalized.Status != "sealed" || normalized.SealedBatchID == nil || normalized.SealedOrdinal == nil || normalized.DependsOnMutationID != nil || normalized.BaseVersion == nil || *normalized.BaseVersion != acceptedVersion {
+		if acceptedVersion == "" || len(current) != 1 || !schemaProofSameOriginal(allowed, current[0]) {
 			return errors.New("M2 changed more than the validated unsealed base and dependency transition")
 		}
-	} else if normalized.BaseVersion == nil || original.BaseVersion == nil || *normalized.BaseVersion != *original.BaseVersion || normalized.SealedBatchID != nil || normalized.Status != "pending" || normalized.DependsOnMutationID == nil || *normalized.DependsOnMutationID != predecessorID {
-		return errors.New("M2 normalized before M1 reconciliation with a substituted base or missing dependency")
+		return nil
+	}
+	// Replay can renew the batch envelope without changing the sealed mutation.
+	if len(current) != 2 || current[0].Status != "sealed" || current[0].SealedBatchID == nil || *current[0].SealedBatchID == "" || !reflect.DeepEqual(prior[0].SealedOrdinal, current[0].SealedOrdinal) || !schemaProofSameIntent(prior[0], current[0]) || !reflect.DeepEqual(original, current[1]) {
+		return errors.New("M1 or M2 changed before M1 reconciliation")
 	}
 	return nil
 }

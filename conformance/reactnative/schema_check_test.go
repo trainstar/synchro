@@ -720,68 +720,133 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 	}
 }
 
-func TestSchemaProofM2PermitsOnlyValidatedNormalizedBaseTransition(t *testing.T) {
-	old, accepted, predecessor, normalizedID, batch := "local-base", "accepted-M1-base", "m1", "m2-normalized", "m2-batch"
+func TestSchemaProofM2PermitsOnlyValidatedSingletonBaseTransition(t *testing.T) {
+	old, accepted, predecessor, batch, m1Batch := "local-base", "accepted-M1-base", "m1", "m2-batch", "m1-batch"
 	ordinal := uint64(0)
-	original := schemaProofMutation{MutationID: "m2-local", LocalOrder: 3, TableID: "items", TableName: "items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", AuthoredSchema: clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &old, ClientVersion: "client-version", Status: "superseded_before_send", SourceKind: "trigger", DependsOnMutationID: &predecessor, NormalizedMutationID: &normalizedID}
+	original := schemaProofMutation{MutationID: "m2-local", LocalOrder: 2, TableID: "items", TableName: "items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", AuthoredSchema: clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &old, ClientVersion: "client-version", Status: "pending", SourceKind: "application", DependsOnMutationID: &predecessor}
 	_ = json.Unmarshal([]byte(`[{"fieldID":"note","logicalType":"string","value":"later-note"},{"fieldID":"value","logicalType":"string","value":"42"}]`), &original.AuthoredFields)
-	normalized := original
-	normalized.MutationID, normalized.LocalOrder, normalized.SourceKind, normalized.Status, normalized.NormalizedMutationID = normalizedID, 4, "normalized", "pending", nil
-	sealed := normalized
+	m1 := original
+	m1.AuthoredFields = nil
+	m1.MutationID, m1.LocalOrder, m1.AuthoredSchema.Version, m1.AuthoredSchema.Hash = predecessor, 1, 1, strings.Repeat("a", 64)
+	m1.DependsOnMutationID, m1.Status, m1.SealedBatchID, m1.SealedOrdinal = nil, "sealed", &m1Batch, &ordinal
+	_ = json.Unmarshal([]byte(`[{"fieldID":"value","logicalType":"string","value":"41"}]`), &m1.AuthoredFields)
+	sealed := original
 	sealed.BaseVersion, sealed.DependsOnMutationID, sealed.Status, sealed.SealedBatchID, sealed.SealedOrdinal = &accepted, nil, "sealed", &batch, &ordinal
 	capture := func(records []schemaProofMutation) finalCapture {
 		raw, _ := json.Marshal(records)
 		return finalCapture{Pending: raw}
 	}
-	before := capture([]schemaProofMutation{original, normalized})
+	before := capture([]schemaProofMutation{m1, original})
 	coordinator := &SchemaCheckCoordinator{}
-	if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{original, sealed}), true, accepted, predecessor); err != nil {
-		t.Fatalf("documented normalization rejected: %v", err)
+	if err := coordinator.validateProofLaterIntent(before, before, false, "", predecessor); err != nil {
+		t.Fatalf("unchanged singleton before acknowledgement rejected: %v", err)
 	}
-	for _, name := range []string{"original base changed", "original status changed", "original seal changed", "original normalized link changed", "normalized base unchanged", "dependency retained", "local order changed", "identity changed", "original record removed", "authored fields changed"} {
+	renewed := m1
+	renewedBatch := "m1-successor-batch"
+	renewed.SealedBatchID = &renewedBatch
+	if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{renewed, original}), false, "", predecessor); err != nil {
+		t.Fatalf("immutable M1 in successor batch rejected: %v", err)
+	}
+	if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{sealed}), true, accepted, predecessor); err != nil {
+		t.Fatalf("documented singleton reconciliation rejected: %v", err)
+	}
+	for _, name := range []string{"base unchanged", "status changed", "normalization link added", "source changed", "dependency retained", "local order changed", "identity changed", "original record removed", "authored fields changed", "authored field type changed", "authored schema changed", "operation changed", "timestamp changed", "table changed", "physical table changed", "primary key field changed", "primary key type changed", "row changed", "seal absent", "ordinal absent", "ordinal changed", "extra retained record", "predecessor still retained"} {
 		t.Run(name, func(t *testing.T) {
-			local, current := original, sealed
-			records := []schemaProofMutation{local, current}
+			current := sealed
+			current.AuthoredFields = append(sealed.AuthoredFields[:0:0], sealed.AuthoredFields...)
+			records := []schemaProofMutation{current}
 			switch name {
-			case "original base changed":
-				records[0].BaseVersion = &accepted
-			case "original status changed":
+			case "base unchanged":
+				records[0].BaseVersion = &old
+			case "status changed":
 				records[0].Status = "cancelled_before_send"
-			case "original seal changed":
-				records[0].SealedBatchID = &batch
-			case "original normalized link changed":
-				changedLink := "other-normalized"
+			case "normalization link added":
+				changedLink := "invented-normalized"
 				records[0].NormalizedMutationID = &changedLink
-			case "normalized base unchanged":
-				records[1].BaseVersion = &old
+			case "source changed":
+				records[0].SourceKind = "normalized"
 			case "dependency retained":
-				records[1].DependsOnMutationID = &predecessor
+				records[0].DependsOnMutationID = &predecessor
 			case "local order changed":
-				records[1].LocalOrder++
+				records[0].LocalOrder++
 			case "identity changed":
-				records[1].MutationID = "other"
+				records[0].MutationID = "other"
 			case "original record removed":
-				records = records[1:]
+				records = []schemaProofMutation{}
 			case "authored fields changed":
-				records[1].AuthoredFields = append(records[1].AuthoredFields[:0:0], records[1].AuthoredFields...)
-				records[1].AuthoredFields[0].Value = []byte(`"lost-note"`)
+				records[0].AuthoredFields[0].Value = []byte(`"lost-note"`)
+			case "authored field type changed":
+				records[0].AuthoredFields[0].LogicalType = "integer"
+			case "authored schema changed":
+				records[0].AuthoredSchema = m1.AuthoredSchema
+			case "operation changed":
+				records[0].Operation = "insert"
+			case "timestamp changed":
+				records[0].ClientVersion = "other-time"
+			case "table changed":
+				records[0].TableID = "other-table"
+			case "physical table changed":
+				records[0].TableName = "other-physical-table"
+			case "primary key field changed":
+				records[0].PrimaryKeyFieldID = "other-key"
+			case "primary key type changed":
+				records[0].PrimaryKeyLogicalType = "uuid"
+			case "row changed":
+				records[0].RecordID = "other-row"
+			case "seal absent":
+				records[0].SealedBatchID = nil
+			case "ordinal absent":
+				records[0].SealedOrdinal = nil
+			case "ordinal changed":
+				changedOrdinal := uint64(1)
+				records[0].SealedOrdinal = &changedOrdinal
+			case "extra retained record":
+				extra := current
+				extra.MutationID, extra.LocalOrder = "extra", 3
+				records = append(records, extra)
+			case "predecessor still retained":
+				records = append([]schemaProofMutation{m1}, records...)
 			}
 			if err := coordinator.validateProofLaterIntent(before, capture(records), true, accepted, predecessor); err == nil {
 				t.Fatal("invalid M2 transition passed")
 			}
 		})
 	}
-	wrongDependency := normalized
-	other := "other-predecessor"
-	wrongDependency.DependsOnMutationID = &other
-	if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{original, wrongDependency}), false, "", predecessor); err == nil {
-		t.Fatal("M2 depended on a different predecessor")
+	for _, name := range []string{"M2 base refreshed early", "M2 dependency cleared early", "M2 dependency changed", "M2 sealed early", "M1 base changed", "M1 payload changed", "M1 identity changed", "M1 order changed", "M1 status changed"} {
+		t.Run(name, func(t *testing.T) {
+			earlier, later := m1, original
+			earlier.AuthoredFields = append(m1.AuthoredFields[:0:0], m1.AuthoredFields...)
+			switch name {
+			case "M2 base refreshed early":
+				later.BaseVersion = &accepted
+			case "M2 dependency cleared early":
+				later.DependsOnMutationID = nil
+			case "M2 dependency changed":
+				other := "other-predecessor"
+				later.DependsOnMutationID = &other
+			case "M2 sealed early":
+				later = sealed
+			case "M1 base changed":
+				earlier.BaseVersion = &accepted
+			case "M1 payload changed":
+				earlier.AuthoredFields[0].Value = []byte(`"42"`)
+			case "M1 identity changed":
+				earlier.MutationID = "other-m1"
+			case "M1 order changed":
+				earlier.LocalOrder = 3
+			case "M1 status changed":
+				earlier.Status = "pending"
+			}
+			if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{earlier, later}), false, "", predecessor); err == nil {
+				t.Fatal("invalid pre-acknowledgement transition passed")
+			}
+		})
 	}
-	push := schemaCheckPush{Request: []byte(`{"mutations":[{"mutation_id":"m2-normalized","authored_schema":{"version":2,"hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}`)}
+	push := schemaCheckPush{Request: []byte(`{"mutations":[{"mutation_id":"m2-local","authored_schema":{"version":2,"hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]}`)}
 	if err := schemaProofNamedM2Push(before, push); err != nil {
 		t.Fatal(err)
 	}
-	push.Request = []byte(strings.Replace(string(push.Request), `"m2-normalized"`, `"other-sealed-record"`, 1))
+	push.Request = []byte(strings.Replace(string(push.Request), `"m2-local"`, `"other-sealed-record"`, 1))
 	if err := schemaProofNamedM2Push(before, push); err == nil {
 		t.Fatal("third push named an unrelated sealed record")
 	}
@@ -884,5 +949,201 @@ func TestSchemaProofAcceptedOutcomesRequireCompleteNamedStoredEvidence(t *testin
 	raw := []byte(`{"schema":{"version":1,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"provenanceMaintenanceWorkCursor":"0","accepted_mutation_outcomes":{"m1":1},"accepted_mutation_outcomes_truncated":false}`)
 	if _, err := decodeClientState(raw); err == nil {
 		t.Fatal("non-string stored outcome decoded")
+	}
+}
+
+func TestSchemaProofFinalRequiresOnlyOriginalSingletonAcceptedOutcomes(t *testing.T) {
+	encode := func(value any) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	for _, prepared := range []bool{true, false} {
+		lane, clientID := "COMMITTED", "client-schema-proof-committed"
+		if prepared {
+			lane, clientID = "PREPARED", "client-schema-proof-prepared"
+		}
+		t.Run(lane, func(t *testing.T) {
+			newEvidence := func() (*SchemaCheckCoordinator, schemaCheckCall, finalCapture) {
+				s1 := clientSchema{Version: 1, Hash: strings.Repeat("a", 64)}
+				s2 := clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}
+				old, m1Version, m2Version, m1Batch, m2Batch, cursor := "local-base", "accepted-m1", "accepted-m2", "m1-batch", "m2-batch", "replacement-cursor"
+				ordinal := uint64(0)
+				complete, notTruncated := true, false
+				original := schemaProofMutation{MutationID: "m1", LocalOrder: 1, TableID: "items", TableName: "cf_items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", AuthoredSchema: s1, BaseVersion: &old, ClientVersion: "m1-time", Status: "pending", SourceKind: "application"}
+				value := "41"
+				if prepared {
+					value = "42"
+				}
+				_ = json.Unmarshal(encode([]map[string]any{{"fieldID": "value", "logicalType": "string", "value": value}}), &original.AuthoredFields)
+				sealed := original
+				sealed.Status, sealed.SealedBatchID, sealed.SealedOrdinal = "sealed", &m1Batch, &ordinal
+				push := func(record schemaProofMutation, envelope clientSchema, version string) schemaCheckPush {
+					columns := make(map[string]json.RawMessage)
+					for _, field := range record.AuthoredFields {
+						columns[field.FieldID] = field.Value
+					}
+					wire := schemaProofWireMutation{MutationID: record.MutationID, Table: record.TableID, PK: map[string]json.RawMessage{record.PrimaryKeyFieldID: encode(record.RecordID)}, AuthoredSchema: record.AuthoredSchema, Operation: record.Operation, BaseVersion: record.BaseVersion, ClientVersion: record.ClientVersion, Columns: columns}
+					outcome := map[string]any{"mutation_id": record.MutationID, "status": "applied", "outcome_schema": envelope, "server_version": version, "server_row": columns, "row_checksum": map[string]any{"digest": "checksum"}}
+					return schemaCheckPush{Request: encode(schemaProofPushRequest{ClientID: clientID, BatchID: *record.SealedBatchID, Schema: envelope, Mutations: []json.RawMessage{encode(wire)}}), Response: encode(map[string]any{"accepted": []any{outcome}, "rejected": []any{}}), Status: http.StatusOK}
+				}
+				pending := func(records ...schemaProofMutation) finalCapture {
+					return finalCapture{Pending: encode(records)}
+				}
+				captures := map[string]finalCapture{}
+				var pushes []schemaCheckPush
+				outcomes := make(map[string]string)
+				version := m1Version
+				if prepared {
+					pushes = []schemaCheckPush{push(sealed, s2, m1Version)}
+					captures["PREPARED-INTENT-001"], captures["PREPARED-PUSH-PAUSED-001"] = pending(original), pending(sealed)
+				} else {
+					initial := push(sealed, s1, m1Version)
+					replay := initial
+					var replayRequest schemaProofPushRequest
+					_ = json.Unmarshal(initial.Request, &replayRequest)
+					replayRequest.BatchID, replayRequest.Schema = "m1-successor-batch", s2
+					replay.Request = encode(replayRequest)
+					m2 := original
+					m2.AuthoredFields = nil
+					m2.MutationID, m2.LocalOrder, m2.AuthoredSchema, m2.ClientVersion, m2.DependsOnMutationID = "m2", 2, s2, "m2-time", &original.MutationID
+					_ = json.Unmarshal([]byte(`[{"fieldID":"value","logicalType":"string","value":"42"},{"fieldID":"note","logicalType":"string","value":"later-note"}]`), &m2.AuthoredFields)
+					m2Sealed := m2
+					m2Sealed.BaseVersion, m2Sealed.DependsOnMutationID, m2Sealed.Status, m2Sealed.SealedBatchID, m2Sealed.SealedOrdinal = &m1Version, nil, "sealed", &m2Batch, &ordinal
+					pushes = []schemaCheckPush{initial, replay, push(m2Sealed, s2, m2Version)}
+					captures["COMMITTED-M1-LOCAL-001"], captures["COMMITTED-M1-SEALED-001"] = pending(original), pending(sealed)
+					captures["COMMITTED-M2-INTENT-001"] = pending(sealed, m2)
+					renewed := sealed
+					renewed.SealedBatchID = &replayRequest.BatchID
+					captures["COMMITTED-M1-PAUSED-001"], captures["COMMITTED-M2-PAUSED-001"] = pending(renewed, m2), pending(m2Sealed)
+					version = m2Version
+				}
+				for _, actual := range pushes {
+					wire, err := schemaProofPushMutation(actual)
+					if err != nil {
+						t.Fatal(err)
+					}
+					outcome, err := schemaProofAccepted(actual.Response)
+					if err != nil {
+						t.Fatal(err)
+					}
+					outcomes[wire.MutationID] = string(outcome)
+				}
+				columns := []physicalSchemaColumn{
+					{TableName: "cf_items", Name: "id", Type: "TEXT", PrimaryKeyPosition: 1},
+					{TableName: "cf_items", Name: "value", Type: "TEXT", NotNull: true},
+					{TableName: "cf_items", Name: "note", Type: "TEXT"},
+					{TableName: "cf_items", Name: "owner_id", Type: "TEXT", NotNull: true},
+					{TableName: "cf_items", Name: "updated_at", Type: "TEXT", NotNull: true},
+					{TableName: "cf_items", Name: "deleted_at", Type: "TEXT"},
+				}
+				state := inspectedClientState{Schema: &s2, ScopeStates: []clientScopeState{{ScopeID: "scope", Cursor: &cursor}}, ScopeStateCount: 1, ProvenanceMaintenanceWorkCursor: "0", MutationLedgerCount: uint64(len(outcomes)), MutationOutcomeCount: uint64(len(outcomes)), AcceptedMutationOutcomes: outcomes, AcceptedMutationOutcomesTruncated: &notTruncated, MigrationJournal: []byte("null"), MigrationJournalTruncated: &notTruncated, PhysicalSchema: encode(columns), PhysicalSchemaTruncated: &notTruncated, CaptureOverflowed: &notTruncated}
+				captures[lane+"-RECOVERED-001"] = finalCapture{ClientState: encode(state)}
+				trace := traceSnapshot{Observations: []transportObservation{
+					{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(cursor)}, CursorFingerprintsComplete: &complete,
+						RequestFacts:         encode(map[string]any{"schema_version": s2.Version, "schema_hash": s2.Hash}),
+						ConnectResponseFacts: encode(map[string]any{"action": "none", "schema_version": s2.Version, "schema_hash": s2.Hash, "affected_scope_fingerprints": []string{}, "affected_scopes_complete": true, "scope_cursor_updates": map[string]any{}, "scope_cursor_updates_complete": true})},
+					{Sequence: 2, OperationClass: "pull", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(cursor)}, CursorFingerprintsComplete: &complete,
+						RequestFacts:      encode(map[string]any{"schema_version": s2.Version, "schema_hash": s2.Hash}),
+						PullResponseFacts: encode(map[string]any{"change_count": 0, "has_more": false, "rebuild_scope_count": 0, "checksum_count": 1, "scope_cursor_fingerprints": []string{}, "scope_cursor_fingerprints_complete": true})},
+				}, SequenceCheckpoint: 2}
+				capture := finalCapture{ClientState: encode(state), Pending: []byte("[]"), Rejected: []byte("[]"), Events: []byte("[]"), Rows: []byte(`[{"id":"row","value":"42","note":"later-note"},{"id":"sentinel","value":"preserve-local"}]`), Status: []byte(`{"state":"ready","retry_at":null,"operation":null,"failure":null}`), Trace: encode(trace), DurableProof: encode(durableProof{RowMetadata: &durableMetadata{TableName: "cf_items", RecordID: "row", ServerVersion: version}})}
+				if prepared {
+					capture.Rows = []byte(`[{"id":"row","value":"42","note":null},{"id":"sentinel","value":"preserve-local"}]`)
+				}
+				coordinator := &SchemaCheckCoordinator{tableName: "cf_items", primaryKey: "id", runtimeIDs: map[string]json.RawMessage{"schema-v1": encode(s1), "schema-v2": encode(s2), "proof-prepared-row": encode("row"), "proof-committed-row": encode("row")}, proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{s2: columns}, proofCaptures: captures, proxyPushes: map[string][]schemaCheckPush{clientID: pushes}}
+				call := schemaCheckCall{serverSchemaAlias: "schema-v2", step: scenarios.Step{NativeBinding: &scenarios.NativeStepBinding{ClientID: clientID}}}
+				return coordinator, call, capture
+			}
+			coordinator, call, capture := newEvidence()
+			if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err != nil {
+				t.Fatalf("valid singleton final rejected: %v", err)
+			}
+			for _, name := range []string{"retained accepted record", "extra retained record", "extra accepted outcome", "missing accepted outcome", "substituted accepted identity", "changed stored outcome", "wrong ledger count", "wrong outcome count", "extra push", "failed actual push", "original identity changed", "original base changed", "original operation changed", "original timestamp changed", "original normalized link added", "sealed payload changed", "wire operation changed", "wire identity changed"} {
+				t.Run(name, func(t *testing.T) {
+					coordinator, call, capture := newEvidence()
+					var state inspectedClientState
+					_ = json.Unmarshal(capture.ClientState, &state)
+					originalName, sealedName := "COMMITTED-M1-LOCAL-001", "COMMITTED-M1-SEALED-001"
+					if prepared {
+						originalName, sealedName = "PREPARED-INTENT-001", "PREPARED-PUSH-PAUSED-001"
+					}
+					originals, _ := schemaProofMutations(coordinator.proofCaptures[originalName])
+					sealed, _ := schemaProofMutations(coordinator.proofCaptures[sealedName])
+					pushes := coordinator.proxyPushes[clientID]
+					var wireRequest schemaProofPushRequest
+					_ = json.Unmarshal(pushes[0].Request, &wireRequest)
+					wire, _ := schemaProofPushMutation(pushes[0])
+					switch name {
+					case "retained accepted record", "extra retained record":
+						record := sealed[0]
+						record.Status = "accepted"
+						if name == "extra retained record" {
+							record.MutationID = "extra"
+							record.Status = "superseded_before_send"
+						}
+						capture.Pending = encode([]schemaProofMutation{record})
+						state.MutationLedgerCount++
+					case "extra accepted outcome":
+						state.AcceptedMutationOutcomes["extra"] = strings.Replace(state.AcceptedMutationOutcomes["m1"], `"m1"`, `"extra"`, 1)
+						state.MutationLedgerCount++
+						state.MutationOutcomeCount++
+					case "missing accepted outcome":
+						delete(state.AcceptedMutationOutcomes, "m1")
+						state.MutationLedgerCount--
+						state.MutationOutcomeCount--
+					case "substituted accepted identity":
+						state.AcceptedMutationOutcomes["other"] = strings.Replace(state.AcceptedMutationOutcomes["m1"], `"m1"`, `"other"`, 1)
+						delete(state.AcceptedMutationOutcomes, "m1")
+					case "changed stored outcome":
+						state.AcceptedMutationOutcomes["m1"] = strings.Replace(state.AcceptedMutationOutcomes["m1"], `"accepted-m1"`, `"other-version"`, 1)
+					case "wrong ledger count":
+						state.MutationLedgerCount++
+					case "wrong outcome count":
+						state.MutationOutcomeCount++
+					case "extra push":
+						pushes = append(pushes, pushes[0])
+					case "failed actual push":
+						pushes[len(pushes)-1].Status = http.StatusConflict
+					case "original identity changed":
+						originals[0].MutationID = "other-original"
+					case "original base changed":
+						changed := "other-base"
+						originals[0].BaseVersion = &changed
+					case "original operation changed":
+						originals[0].Operation = "delete"
+					case "original timestamp changed":
+						originals[0].ClientVersion = "other-time"
+					case "original normalized link added":
+						changed := "invented-normalized"
+						originals[0].NormalizedMutationID = &changed
+					case "sealed payload changed":
+						sealed[0].AuthoredFields[0].Value = []byte(`"other-value"`)
+					case "wire operation changed":
+						wire.Operation = "delete"
+						wireRequest.Mutations[0] = encode(wire)
+						pushes[0].Request = encode(wireRequest)
+					case "wire identity changed":
+						wire.MutationID = "other-wire"
+						wireRequest.Mutations[0] = encode(wire)
+						pushes[0].Request = encode(wireRequest)
+					}
+					capture.ClientState = encode(state)
+					originalCapture := coordinator.proofCaptures[originalName]
+					originalCapture.Pending = encode(originals)
+					coordinator.proofCaptures[originalName] = originalCapture
+					sealedCapture := coordinator.proofCaptures[sealedName]
+					sealedCapture.Pending = encode(sealed)
+					coordinator.proofCaptures[sealedName] = sealedCapture
+					coordinator.proxyPushes[clientID] = pushes
+					if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err == nil {
+						t.Fatal("invalid singleton final passed")
+					}
+				})
+			}
+		})
 	}
 }
