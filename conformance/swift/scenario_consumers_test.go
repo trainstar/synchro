@@ -111,27 +111,23 @@ func TestSteadyPullBaselineRejectsUnexpectedWireOutcome(t *testing.T) {
 	}
 }
 
-func TestSchemaProofOriginalAndNormalizedRecordsHaveSeparateComparisons(t *testing.T) {
+func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 	localBase, acceptedBase, m1, batch := "local-base", "accepted-base", "actual-m1", "m2-batch"
-	ordinal := int64(1)
-	original := retainedMutation{MutationID: "original-m2", LocalOrder: 2, TableID: "items", TableName: "physical_items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", ClientVersion: "2026-10-09T00:00:03.000000Z", SourceKind: "local", AuthoredSchema: schemaRef{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &localBase, Status: "pending", AuthoredFields: []retainedField{{FieldID: "value", Value: []byte(`"42"`)}, {FieldID: "note", Value: []byte(`"later-note"`)}}}
-	normalized := original
-	normalized.MutationID = "actual-normalized-m2"
-	normalized.SourceKind = "normalized"
-	normalized.LocalOrder = 3
-	normalized.DependsOnMutationID = &m1
-	normalizedAfter := normalized
-	normalizedAfter.BaseVersion = &acceptedBase
-	normalizedAfter.DependsOnMutationID = nil
-	normalizedAfter.SealedBatchID = &batch
-	normalizedAfter.SealedOrdinal = &ordinal
-	if err := requireSchemaProofNormalizedTransition(normalized, normalizedAfter, acceptedBase); err != nil {
+	ordinal := int64(0)
+	original := retainedMutation{MutationID: "original-m2", LocalOrder: 2, TableID: "items", TableName: "cf_items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", ClientVersion: "2026-10-09T00:00:03.000000Z", SourceKind: "application", AuthoredSchema: schemaRef{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &localBase, DependsOnMutationID: &m1, Status: "pending", AuthoredFields: []retainedField{{FieldID: "value", Value: []byte(`"42"`)}, {FieldID: "note", Value: []byte(`"later-note"`)}}}
+	sealed := original
+	sealed.BaseVersion = &acceptedBase
+	sealed.DependsOnMutationID = nil
+	sealed.Status = "sealed"
+	sealed.SealedBatchID = &batch
+	sealed.SealedOrdinal = &ordinal
+	if err := requireSchemaProofSuccessorTransition(original, sealed, acceptedBase); err != nil {
 		t.Fatal(err)
 	}
-	mutation := wireMutation{MutationID: "actual-normalized-m2", Table: "items", Operation: "update", PrimaryKey: map[string]json.RawMessage{"id": []byte(`"row"`)}, AuthoredSchema: normalizedAfter.AuthoredSchema, BaseVersion: &acceptedBase, ClientVersion: "2026-10-09T00:00:03.000000Z"}
+	mutation := wireMutation{MutationID: "original-m2", Table: "items", Operation: "update", PrimaryKey: map[string]json.RawMessage{"id": []byte(`"row"`)}, AuthoredSchema: sealed.AuthoredSchema, BaseVersion: &acceptedBase, ClientVersion: "2026-10-09T00:00:03.000000Z"}
 	for _, value := range []string{`"42"`, `"4\u0032"`} {
 		mutation.Columns = map[string]json.RawMessage{"value": []byte(value), "note": []byte(`"later-note"`)}
-		if err := requireSchemaProofMutation(normalizedAfter, mutation); err != nil {
+		if err := requireSchemaProofMutation(sealed, mutation); err != nil {
 			t.Fatalf("matching string fields rejected: %v", err)
 		}
 	}
@@ -148,7 +144,7 @@ func TestSchemaProofOriginalAndNormalizedRecordsHaveSeparateComparisons(t *testi
 	} {
 		t.Run("wire string "+test.name, func(t *testing.T) {
 			mutation.Columns = map[string]json.RawMessage{"value": []byte(test.value), "note": []byte(`"later-note"`)}
-			if requireSchemaProofMutation(normalizedAfter, mutation) == nil {
+			if requireSchemaProofMutation(sealed, mutation) == nil {
 				t.Fatal("invalid wire field passed")
 			}
 		})
@@ -156,16 +152,16 @@ func TestSchemaProofOriginalAndNormalizedRecordsHaveSeparateComparisons(t *testi
 			continue
 		}
 		t.Run("authored string "+test.name, func(t *testing.T) {
-			intent := normalizedAfter
-			intent.AuthoredFields = []retainedField{{FieldID: "value", Value: []byte(test.value)}, normalizedAfter.AuthoredFields[1]}
+			intent := sealed
+			intent.AuthoredFields = []retainedField{{FieldID: "value", Value: []byte(test.value)}, sealed.AuthoredFields[1]}
 			mutation.Columns = map[string]json.RawMessage{"value": []byte(`"42"`), "note": []byte(`"later-note"`)}
 			if requireSchemaProofMutation(intent, mutation) == nil {
 				t.Fatal("invalid authored field passed")
 			}
 		})
 	}
-	emptyIntent := normalizedAfter
-	emptyIntent.AuthoredFields = []retainedField{{FieldID: "value", Value: []byte(`""`)}, normalizedAfter.AuthoredFields[1]}
+	emptyIntent := sealed
+	emptyIntent.AuthoredFields = []retainedField{{FieldID: "value", Value: []byte(`""`)}, sealed.AuthoredFields[1]}
 	mutation.Columns = map[string]json.RawMessage{"value": []byte(`""`), "note": []byte(`"later-note"`)}
 	if err := requireSchemaProofMutation(emptyIntent, mutation); err != nil {
 		t.Fatal(err)
@@ -179,23 +175,36 @@ func TestSchemaProofOriginalAndNormalizedRecordsHaveSeparateComparisons(t *testi
 	if requireSchemaProofMutation(emptyIntent, mutation) == nil {
 		t.Fatal("null authored field matched an empty string")
 	}
-	retainedOriginal := original
-	retainedOriginal.Status = "superseded_before_send"
-	retainedOriginal.NormalizedMutationID = &normalized.MutationID
-	if err := requireSchemaProofOriginal(original, []retainedMutation{retainedOriginal}); err != nil {
+	direct := original
+	direct.DependsOnMutationID = nil
+	directSealed := sealed
+	directSealed.BaseVersion = &localBase
+	if err := requireSchemaProofOriginal(direct, []retainedMutation{directSealed}); err != nil {
 		t.Fatal(err)
 	}
-	for _, successor := range []retainedMutation{normalized, normalizedAfter} {
-		if value, err := schemaProofNormalized(original, []retainedMutation{retainedOriginal, successor}, false); err != nil || value.MutationID != normalized.MutationID {
-			t.Fatalf("valid later normalized successor rejected: %v", err)
-		}
+	if err := requireSchemaProofOriginal(directSealed, []retainedMutation{directSealed}); err != nil {
+		t.Fatal(err)
+	}
+	if requireSchemaProofOriginal(direct, []retainedMutation{sealed}) == nil {
+		t.Fatal("M1 base refreshed after sealing")
+	}
+	if requireSchemaProofOriginal(direct, nil) == nil {
+		t.Fatal("missing original passed")
+	}
+	if requireSchemaProofOriginal(direct, []retainedMutation{directSealed, directSealed}) == nil {
+		t.Fatal("duplicate original passed")
+	}
+	mutation.Columns = map[string]json.RawMessage{"value": []byte(`"42"`), "note": []byte(`"later-note"`)}
+	mutation.MutationID = "other"
+	if requireSchemaProofMutation(sealed, mutation) == nil {
+		t.Fatal("push substituted the original identity")
 	}
 	for _, test := range []struct {
 		name   string
 		mutate func(*retainedMutation)
 	}{
-		{"successor source", func(v *retainedMutation) { v.SourceKind = "local" }},
-		{"successor equal order", func(v *retainedMutation) { v.LocalOrder = original.LocalOrder }},
+		{"successor source", func(v *retainedMutation) { v.SourceKind = "normalized" }},
+		{"successor later order", func(v *retainedMutation) { v.LocalOrder = 3 }},
 		{"successor earlier order", func(v *retainedMutation) { v.LocalOrder = 1 }},
 		{"successor table", func(v *retainedMutation) { v.TableID = "other" }},
 		{"successor table name", func(v *retainedMutation) { v.TableName = "other" }},
@@ -207,60 +216,36 @@ func TestSchemaProofOriginalAndNormalizedRecordsHaveSeparateComparisons(t *testi
 		{"successor schema", func(v *retainedMutation) { v.AuthoredSchema.Version = 1 }},
 		{"successor fields", func(v *retainedMutation) { v.AuthoredFields = original.AuthoredFields[:1] }},
 		{"successor identity", func(v *retainedMutation) { v.MutationID = "other" }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			changed := normalized
-			test.mutate(&changed)
-			if _, err := schemaProofNormalized(original, []retainedMutation{retainedOriginal, changed}, false); err == nil {
-				t.Fatal("invalid named normalized successor passed")
-			}
-		})
-	}
-	changedOriginal := retainedOriginal
-	initial := normalized
-	initial.DependsOnMutationID = nil
-	if _, err := schemaProofNormalized(original, []retainedMutation{retainedOriginal, initial}, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		name   string
-		mutate func(*retainedMutation)
-	}{
-		{"initial changed base", func(v *retainedMutation) { v.BaseVersion = &acceptedBase }},
-		{"initial missing base", func(v *retainedMutation) { v.BaseVersion = nil }},
-		{"initial predecessor", func(v *retainedMutation) { v.DependsOnMutationID = &m1 }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			changed := initial
-			test.mutate(&changed)
-			if _, err := schemaProofNormalized(original, []retainedMutation{retainedOriginal, changed}, true); err == nil {
-				t.Fatal("invalid initial normalized causality passed")
-			}
-		})
-	}
-	changedOriginal.BaseVersion = &acceptedBase
-	if requireSchemaProofOriginal(original, []retainedMutation{changedOriginal}) == nil {
-		t.Fatal("original base changed with normalized successor")
-	}
-	for _, test := range []struct {
-		name   string
-		mutate func(*retainedMutation)
-	}{
-		{"normalized identity", func(v *retainedMutation) { v.MutationID = "other" }},
-		{"normalized field order", func(v *retainedMutation) {
+		{"successor field order", func(v *retainedMutation) {
 			v.AuthoredFields = []retainedField{original.AuthoredFields[1], original.AuthoredFields[0]}
 		}},
-		{"normalized local order", func(v *retainedMutation) { v.LocalOrder = 1 }},
-		{"normalized dependency", func(v *retainedMutation) { v.DependsOnMutationID = &m1 }},
-		{"normalized base", func(v *retainedMutation) { v.BaseVersion = &localBase }},
+		{"successor lineage", func(v *retainedMutation) { v.NormalizedMutationID = &m1 }},
+		{"successor dependency", func(v *retainedMutation) { v.DependsOnMutationID = &m1 }},
+		{"successor base", func(v *retainedMutation) { v.BaseVersion = &localBase }},
+		{"successor state", func(v *retainedMutation) { v.Status = "pending" }},
+		{"successor missing batch", func(v *retainedMutation) { v.SealedBatchID = nil }},
+		{"successor ordinal", func(v *retainedMutation) { other := int64(1); v.SealedOrdinal = &other }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			changed := normalizedAfter
+			changed := sealed
 			test.mutate(&changed)
-			if requireSchemaProofNormalizedTransition(normalized, changed, acceptedBase) == nil {
-				t.Fatal("invalid normalized successor passed")
+			if requireSchemaProofSuccessorTransition(original, changed, acceptedBase) == nil {
+				t.Fatal("invalid singleton successor transition passed")
 			}
 		})
+	}
+	alreadySealed := original
+	alreadySealed.Status = "sealed"
+	alreadySealed.SealedBatchID = &batch
+	alreadySealed.SealedOrdinal = &ordinal
+	if requireSchemaProofSuccessorTransition(alreadySealed, sealed, acceptedBase) == nil {
+		t.Fatal("already sealed M2 rebased in place")
+	}
+	changedMembership := directSealed
+	otherBatch := "other-batch"
+	changedMembership.SealedBatchID = &otherBatch
+	if requireSchemaProofOriginal(directSealed, []retainedMutation{changedMembership}) == nil {
+		t.Fatal("sealed M1 membership changed")
 	}
 }
 
@@ -437,14 +422,14 @@ func TestSchemaProofPhysicalComparisonChecksEveryColumn(t *testing.T) {
 	}
 }
 
-func TestSchemaProofStoredOutcomeRequiresActualNormalizedIdentity(t *testing.T) {
-	id := "actual-normalized-m1"
+func TestSchemaProofStoredOutcomeRequiresActualOriginalIdentity(t *testing.T) {
+	id := "original-m1"
 	schema := strings.Repeat("a", 64)
 	outcome := `{"mutation_id":"` + id + `","status":"applied","outcome_schema":{"version":1,"hash":"` + schema + `"},"server_version":"accepted-base","server_row":{"value":"41"}}`
 	push := schemaProofPush{Status: 200, Request: []byte(`{"batch_id":"actual-batch","mutations":[{"mutation_id":"` + id + `"}]}`), Response: []byte(`{"accepted":[` + outcome + `],"rejected":[]}`)}
 	flag := false
-	ledger := 2
-	capture := runnerResult{RetainedMutations: []retainedMutation{{MutationID: "original-m1"}}, AcceptedMutationOutcomes: acceptedMutationOutcomes{id: outcome}, AcceptedMutationOutcomesTruncated: &flag, MutationLedgerCount: &ledger}
+	ledger := 1
+	capture := runnerResult{RetainedMutations: []retainedMutation{}, AcceptedMutationOutcomes: acceptedMutationOutcomes{id: outcome}, AcceptedMutationOutcomesTruncated: &flag, MutationLedgerCount: &ledger}
 	if err := requireSchemaProofStoredOutcome(capture, push); err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +472,7 @@ func TestSchemaProofStoredOutcomeRequiresActualNormalizedIdentity(t *testing.T) 
 		})
 	}
 	changed := capture
-	changed.AcceptedMutationOutcomes = acceptedMutationOutcomes{"other-normalized": strings.Replace(outcome, id, "other-normalized", 1)}
+	changed.AcceptedMutationOutcomes = acceptedMutationOutcomes{"other-original": strings.Replace(outcome, id, "other-original", 1)}
 	if requireSchemaProofStoredOutcome(changed, push) == nil {
 		t.Fatal("count-only accepted identity passed")
 	}
@@ -501,6 +486,16 @@ func TestSchemaProofStoredOutcomeRequiresActualNormalizedIdentity(t *testing.T) 
 	changed.AcceptedMutationOutcomesTruncated = &truncated
 	if requireSchemaProofStoredOutcome(changed, push) == nil {
 		t.Fatal("truncated accepted outcomes passed")
+	}
+	changed = capture
+	changed.AcceptedMutationOutcomes = acceptedMutationOutcomes{id: outcome, "extra": strings.Replace(outcome, id, "extra", 1)}
+	if requireSchemaProofStoredOutcome(changed, push) == nil {
+		t.Fatal("extra accepted record passed exact ledger closure")
+	}
+	changed = capture
+	changed.RetainedMutations = []retainedMutation{{MutationID: id}}
+	if requireSchemaProofStoredOutcome(changed, push) == nil {
+		t.Fatal("accepted original also appeared in retained records")
 	}
 }
 
