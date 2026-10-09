@@ -1451,7 +1451,7 @@ final class PullProcessor: @unchecked Sendable {
 
     /// Selects protected record IDs for one table. Argument: the table name.
     static let protectedRecordIDsSQL =
-        "SELECT DISTINCT record_id FROM (\(protectedApplicationRowsSQL)) WHERE table_name = ?"
+        "SELECT record_id FROM (\(protectedApplicationRowsSQL)) WHERE table_name = ?"
 
     private static func hasLocalRow(_ db: GRDB.Database, schema: LocalSchemaTable, recordID: String) throws -> Bool {
         let pkCol = schema.primaryKey.first ?? "id"
