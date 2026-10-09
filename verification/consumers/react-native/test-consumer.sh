@@ -200,6 +200,16 @@ fi
 
 case "$platform" in
   ios)
+    cp "$source_dir/AppDelegate.swift" "$work_dir/app/ios/SynchroConsumer/AppDelegate.swift"
+    plist="$work_dir/app/ios/SynchroConsumer/Info.plist"
+    if ! /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest" "$plist" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest dict" "$plist"
+    fi
+    if /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes" "$plist" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Set :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes false" "$plist"
+    else
+      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes bool false" "$plist"
+    fi
     if [ "$mode" = "smoke" ]; then simulator_udid=$IOS_SIMULATOR_UDID; fi
     if [ "$rn_version" = "0.82.1" ]; then
       patch --batch --forward -p1 -d "$work_dir/app/node_modules/react-native" \

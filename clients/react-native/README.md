@@ -7,6 +7,7 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 - React Native `>=0.82.1 <0.84.0`, with its compatible React version.
 - React Native `0.82.1` needs the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27.
 - React Native `0.83.10` contains the fmt correction.
+- Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
 - iOS `17.0+`
 - Android `minSdk 24`
 - Node `20.19.4+`

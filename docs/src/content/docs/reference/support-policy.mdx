@@ -36,6 +36,9 @@ Use React Native 0.83.5 or later in the 0.83 line with Xcode 27.
 Earlier patches require the fmt dependency correction.
 The [upstream correction](https://github.com/react/react-native/commit/faeef2b90a56633ad44289b994d31e7ce590b145) updates fmt to 12.1.0.
 
+Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
+The example and consumer hosts use this lifecycle.
+
 ## React Native 0.82.1 fmt Backport
 
 RN 0.82.1 pins fmt 11.0.2, which fails with the Xcode 27 compiler.
