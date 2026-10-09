@@ -528,6 +528,16 @@ final class SchemaManager: @unchecked Sendable {
                 let updates = journal.scopeCursorUpdates.filter {
                     !affectedScopeIDs.contains($0.key) || existingScopeIDs.contains($0.key)
                 }
+                if !journal.schemaReset {
+                    for (scopeID, cursor) in updates where cursor != nil && !affectedScopeIDs.contains(scopeID) {
+                        try recomputeRetainedScopeIntegrity(
+                            db,
+                            scopeID: scopeID,
+                            schemaHash: journal.targetManifest.schemaHash,
+                            tables: targetTables
+                        )
+                    }
+                }
                 try SynchroMeta.applyScopeCursorUpdates(
                     db,
                     updates: updates,
