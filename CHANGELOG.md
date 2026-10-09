@@ -23,6 +23,11 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 - React Native applications can use RN 0.82.1 through 0.83.x. RN 0.82.1 iOS applications require the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27. ([#303](https://github.com/trainstar/synchro/issues/303))
 - Breaking: Apple clients require iOS 17 or later. Increase the application deployment target before upgrading. See [client requirements](https://trainstar.github.io/synchro/clients/consumption/). ([#303](https://github.com/trainstar/synchro/issues/303))
 
+### Fixed
+
+- Native clients reject inconsistent migration journals and retain unfinished scope rebuild work during schema changes. ([#331](https://github.com/trainstar/synchro/issues/331))
+- Kotlin clients preserve rows when fields become nullable and support required-field additions without invented defaults. ([#331](https://github.com/trainstar/synchro/issues/331))
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.

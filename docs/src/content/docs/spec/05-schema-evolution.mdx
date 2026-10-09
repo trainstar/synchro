@@ -487,6 +487,13 @@ can coerce exact decimal text to a lossy binary value. A client bridge carries
 `decimal` as canonical text. It never carries either value as an untyped JSON
 number.
 
+The manifest's logical nullability controls value validation.
+A required field without a constant default can use nullable SQLite storage when a migration adds the field.
+This storage can remain nullable after rebuild.
+Clients must not invent defaults or accept canonical nulls for logically nonnullable fields.
+A logically nullable field must not have physical `NOT NULL` enforcement.
+Physical nullability does not verify rows or complete a migration.
+
 ## Explicit Local Composition
 
 Every table declares exactly one `composition` value:
