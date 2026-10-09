@@ -177,8 +177,9 @@ class EmulatorRunnerTests(unittest.TestCase):
         }
         self.assertEqual(self.run_fixture(environment=environment), 0)
         curl = self.commands("curl")[0][0]
-        self.assertEqual(curl[:12], [
+        self.assertEqual(curl[:15], [
             "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+            "--retry", "3", "--retry-all-errors",
             "--connect-timeout", "30", "--max-time", "180", "--output",
         ])
         self.assertEqual(curl[-1], runner.ARCHIVE_URL)
