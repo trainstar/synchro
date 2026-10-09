@@ -1007,9 +1007,14 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             throw SynchroError.InvalidResponse("scope cursor update targets an unknown scope $scopeId")
         }
         val tablesByName = tables.associateBy { it.tableName }
-        val entries = SynchroMeta.getScopeRows(db, scopeId).map { (tableName, recordId) ->
+        var hasProtectedProvenance = false
+        val entries = SynchroMeta.getScopeRows(db, scopeId).mapNotNull { (tableName, recordId) ->
             val table = tablesByName[tableName]
                 ?: throw SynchroError.InvalidResponse("scope references unknown table $tableName")
+            if (isApplicationRowProtected(db, tableName, recordId)) {
+                hasProtectedProvenance = true
+                return@mapNotNull null
+            }
             val row = loadWireRow(db, table, recordId)
             val primaryKey = row[table.primaryKeyFieldID]
                 ?: throw SynchroError.InvalidResponse("scope row lacks its primary key field")
@@ -1031,11 +1036,14 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             )
             computed.identity to computed.checksum
         }
-        val localChecksum = Integrity.scopeDigest(schemaHash, scopeId, entries)
+        // Protected rows retain source provenance, which cannot verify target-schema integrity.
+        val localChecksum = if (hasProtectedProvenance) "" else {
+            json.encodeToString(ChecksumObject.serializer(), Integrity.scopeDigest(schemaHash, scopeId, entries))
+        }
         SynchroMeta.setScopeLocalChecksum(
             db,
             scopeId,
-            json.encodeToString(ChecksumObject.serializer(), localChecksum),
+            localChecksum,
         )
     }
 

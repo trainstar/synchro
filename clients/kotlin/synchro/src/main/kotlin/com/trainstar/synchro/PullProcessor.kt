@@ -41,6 +41,15 @@ internal val PROTECTED_RECORD_IDS_SQL = """
       )
 """.trimIndent()
 
+internal fun isApplicationRowProtected(
+    db: SQLiteDatabase,
+    tableName: String,
+    recordId: String,
+): Boolean = db.rawQuery(
+    "SELECT 1 FROM ($PROTECTED_RECORD_IDS_SQL) WHERE record_id = ? LIMIT 1",
+    arrayOf(tableName, recordId),
+).use { it.moveToFirst() }
+
 internal class PullProcessor(private val database: SynchroDatabase) {
     @OptIn(ExperimentalSerializationApi::class)
     private val rebuildJSON = Json {
@@ -1085,15 +1094,6 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         if (canonical != value) throw SynchroError.InvalidResponse("invalid bytes value for $fieldID")
         return decoded
     }
-
-    private fun isApplicationRowProtected(
-        db: SQLiteDatabase,
-        tableName: String,
-        recordId: String,
-    ): Boolean = db.rawQuery(
-        "SELECT 1 FROM ($PROTECTED_RECORD_IDS_SQL) WHERE record_id = ? LIMIT 1",
-        arrayOf(tableName, recordId),
-    ).use { it.moveToFirst() }
 
     private fun scopeRowIdentity(table: LocalSchemaTable, recordId: String): ByteArray {
         val primaryKey = table.columns.singleOrNull { it.fieldID == table.primaryKeyFieldID }
