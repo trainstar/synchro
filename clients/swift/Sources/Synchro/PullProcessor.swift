@@ -1416,7 +1416,7 @@ final class PullProcessor: @unchecked Sendable {
         ) != nil
     }
 
-    private static func isProtectedApplicationRow(
+    static func isProtectedApplicationRow(
         db: GRDB.Database,
         tableName: String,
         recordID: String

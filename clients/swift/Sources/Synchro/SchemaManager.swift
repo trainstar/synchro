@@ -864,10 +864,19 @@ final class SchemaManager: @unchecked Sendable {
         let scopeRows = try SynchroMeta.getScopeRowRecordIDs(db, scopeID: scopeID)
         var entries: [(identity: Data, digest: ChecksumObject)] = []
         entries.reserveCapacity(scopeRows.count)
+        var hasProtectedProvenance = false
 
         for scopeRow in scopeRows {
             guard let table = tablesByName[scopeRow.tableName] else {
                 throw SynchroError.invalidResponse(message: "scope references unknown table \(scopeRow.tableName)")
+            }
+            if try PullProcessor.isProtectedApplicationRow(
+                db: db,
+                tableName: table.tableName,
+                recordID: scopeRow.recordID
+            ) {
+                hasProtectedProvenance = true
+                continue
             }
             let row = try loadWireRow(db, table: table, recordID: scopeRow.recordID)
             guard let primaryKey = row[table.primaryKeyFieldID] else {
@@ -897,6 +906,10 @@ final class SchemaManager: @unchecked Sendable {
             entries.append((identity: computed.identity, digest: computed.checksum))
         }
 
+        if hasProtectedProvenance {
+            try SynchroMeta.setScopeLocalChecksum(db, scopeID: scopeID, checksum: "")
+            return
+        }
         let localChecksum = try Integrity.scopeDigest(
             schemaHash: schemaHash,
             scopeID: scopeID,

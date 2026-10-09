@@ -1279,6 +1279,7 @@ final class SchemaManagerTests: XCTestCase {
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("synchro_prepared_migration_\(UUID().uuidString).sqlite")
         let scopeID = "orders:settled"
+        let protectedScopeID = "orders:protected"
         let serverVersion = "settled-server-version"
         var sourceManifest = protocolOrdersSchemaManifest(includeNotes: false)
         sourceManifest.schemaHash = try Integrity.schemaManifestHash(sourceManifest)
@@ -1319,6 +1320,24 @@ final class SchemaManagerTests: XCTestCase {
             entries: [(identity: sourceDigest.identity, digest: sourceDigest.checksum)]
         )
         let sourceScopeJSON = String(decoding: try JSONEncoder.synchroEncoder().encode(sourceScopeDigest), as: UTF8.self)
+        let scopeSources = try ["edited", "deleted", "unprotected"].map { recordID in
+            var row = sourceRow
+            row["field-id"] = AnyCodable(recordID)
+            let version = "server-\(recordID)"
+            return (recordID: recordID, version: version, digest: try Integrity.rowDigest(
+                schemaHash: sourceManifest.schemaHash,
+                table: sourceManifest.localTables()[0],
+                pk: ["field-id": AnyCodable(recordID)],
+                row: row,
+                serverVersion: version
+            ))
+        }
+        let protectedScopeDigest = try Integrity.scopeDigest(
+            schemaHash: sourceManifest.schemaHash,
+            scopeID: protectedScopeID,
+            entries: scopeSources.map { (identity: $0.digest.identity, digest: $0.digest.checksum) }
+        )
+        let protectedScopeJSON = String(decoding: try JSONEncoder.synchroEncoder().encode(protectedScopeDigest), as: UTF8.self)
         try database.writeSyncLockedTransaction { connection in
             try connection.execute(
                 sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
@@ -1336,6 +1355,24 @@ final class SchemaManagerTests: XCTestCase {
                 connection, scopeID: scopeID, tableName: "orders", recordID: "settled",
                 checksum: sourceDigest.checksum.digest, generation: 7
             )
+            try SynchroMeta.upsertScope(
+                connection, scopeID: protectedScopeID, cursor: "protected-source-cursor",
+                checksum: protectedScopeJSON, generation: 7, localChecksum: protectedScopeJSON
+            )
+            for source in scopeSources {
+                try connection.execute(
+                    sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                    arguments: [source.recordID, "authoritative", "u1", "2026-01-01T00:00:00.000000Z"]
+                )
+                try SynchroMeta.upsertRowVersion(
+                    connection, tableName: "orders", recordID: source.recordID,
+                    serverVersion: source.version, rowChecksum: source.digest.checksum
+                )
+                try SynchroMeta.upsertScopeRow(
+                    connection, scopeID: protectedScopeID, tableName: "orders", recordID: source.recordID,
+                    checksum: source.digest.checksum.digest, generation: 7
+                )
+            }
         }
         _ = try database.execute(
             "CREATE TABLE local_settings (key TEXT PRIMARY KEY, value TEXT)",
@@ -1349,23 +1386,32 @@ final class SchemaManagerTests: XCTestCase {
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES ('o1', 'offline', 'u1', '2026-01-01T00:00:00.000000Z')",
             params: nil
         )
+        _ = try database.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["pending-edit", "edited"])
+        _ = try database.execute("DELETE FROM orders WHERE id = ?", params: ["deleted"])
         let pendingBefore = try ChangeTracker(database: database).inspectPendingMutations()
+        let protectedRowsBefore = try database.query(
+            "SELECT id, ship_address, user_id, updated_at, deleted_at FROM orders WHERE id IN ('edited', 'deleted', 'unprotected') ORDER BY id",
+            params: nil
+        )
+        XCTAssertEqual(try database.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["edited"])?["ship_address"] as String?, "pending-edit")
         let settledRowBefore = try XCTUnwrap(database.queryOne(
             "SELECT id, ship_address, user_id, updated_at, deleted_at FROM orders WHERE id = ?",
             params: ["settled"]
         ))
         let scopeBefore = try database.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID) }
+        let protectedScopeBefore = try database.readTransaction { try SynchroMeta.getScope($0, scopeID: protectedScopeID) }
 
         _ = try manager.prepareMigration(
             targetManifest: targetManifest,
             action: .replace,
             affectedScopes: [],
-            scopeCursorUpdates: [scopeID: "target-cursor"],
+            scopeCursorUpdates: [scopeID: "target-cursor", protectedScopeID: "protected-target-cursor"],
             schemaReset: false
         )
         XCTAssertFalse(try database.query("PRAGMA table_info(orders)", params: nil)
             .contains { ($0["name"] as String?) == "notes" })
         XCTAssertEqual(try database.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID) }, scopeBefore)
+        XCTAssertEqual(try database.readTransaction { try SynchroMeta.getScope($0, scopeID: protectedScopeID) }, protectedScopeBefore)
         XCTAssertEqual(try database.readTransaction {
             try SynchroMeta.getScopeRowChecksums($0, scopeID: scopeID).single?.checksum
         }, sourceDigest.checksum.digest)
@@ -1383,6 +1429,7 @@ final class SchemaManagerTests: XCTestCase {
         try recoveredDatabase.writeTransaction { try $0.execute(sql: rejectIntegrityRebindSQL) }
         XCTAssertThrowsError(try recoveredManager.recoverMigrationIfNeeded())
         XCTAssertEqual(try recoveredDatabase.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID) }, scopeBefore)
+        XCTAssertEqual(try recoveredDatabase.readTransaction { try SynchroMeta.getScope($0, scopeID: protectedScopeID) }, protectedScopeBefore)
         XCTAssertEqual(try recoveredDatabase.readTransaction { try SynchroMeta.getInt64($0, key: .schemaVersion) }, 1)
         XCTAssertFalse(try recoveredDatabase.query("PRAGMA table_info(orders)", params: nil)
             .contains { ($0["name"] as String?) == "notes" })
@@ -1448,6 +1495,43 @@ final class SchemaManagerTests: XCTestCase {
             "SELECT id, ship_address, user_id, updated_at, deleted_at FROM orders WHERE id = ?",
             params: ["settled"]
         )), settledRowBefore)
+        let protectedScopeAfter = try recoveredDatabase.readTransaction { connection in
+            let rows = try SynchroMeta.getScopeRowChecksums(connection, scopeID: protectedScopeID)
+            XCTAssertEqual(rows.count, scopeSources.count)
+            for source in scopeSources {
+                let stored = try XCTUnwrap(rows.first { $0.recordID == source.recordID })
+                if source.recordID == "unprotected" {
+                    var row = sourceRow
+                    row["field-id"] = AnyCodable(source.recordID)
+                    row["field-notes"] = AnyCodable(NSNull())
+                    let digest = try Integrity.rowDigest(
+                        schemaHash: targetManifest.schemaHash,
+                        table: targetManifest.localTables()[0],
+                        pk: ["field-id": AnyCodable(source.recordID)],
+                        row: row,
+                        serverVersion: source.version
+                    )
+                    XCTAssertNotEqual(digest.checksum, source.digest.checksum)
+                    XCTAssertEqual(stored.checksum, digest.checksum.digest)
+                } else {
+                    XCTAssertEqual(stored.checksum, source.digest.checksum.digest)
+                }
+                XCTAssertEqual(stored.generation, 7)
+                XCTAssertEqual(try SynchroMeta.getRowVersion(
+                    connection, tableName: "orders", recordID: source.recordID
+                ), source.version)
+            }
+            let scope = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: protectedScopeID))
+            XCTAssertEqual(scope.cursor, "protected-target-cursor")
+            XCTAssertNil(scope.checksum)
+            XCTAssertEqual(scope.localChecksum, "")
+            XCTAssertEqual(scope.generation, 7)
+            return scope
+        }
+        XCTAssertEqual(try recoveredDatabase.query(
+            "SELECT id, ship_address, user_id, updated_at, deleted_at FROM orders WHERE id IN ('edited', 'deleted', 'unprotected') ORDER BY id",
+            params: nil
+        ), protectedRowsBefore)
         XCTAssertNil(try recoveredManager.activeMigration())
 
         // An applied journal can survive process loss before cleanup.
@@ -1460,6 +1544,7 @@ final class SchemaManagerTests: XCTestCase {
         let appliedManager = SchemaManager(database: appliedDatabase)
         XCTAssertEqual(try appliedManager.recoverMigrationIfNeeded()?.phase, .applied)
         XCTAssertEqual(try appliedDatabase.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID) }, scopeAfter)
+        XCTAssertEqual(try appliedDatabase.readTransaction { try SynchroMeta.getScope($0, scopeID: protectedScopeID) }, protectedScopeAfter)
         XCTAssertEqual(try appliedDatabase.readTransaction {
             try SynchroMeta.getScopeRowChecksums($0, scopeID: scopeID).single?.checksum
         }, targetDigest.checksum.digest)
