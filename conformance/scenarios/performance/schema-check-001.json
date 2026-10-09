@@ -1438,7 +1438,8 @@
         "call_id": "schema_current_1",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Observe exact-current schema dispatch for an independent client.",
       "measurement_sample": {
@@ -1494,7 +1495,8 @@
         "call_id": "schema_current_2",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Repeat exact-current schema dispatch for another client.",
       "measurement_sample": {
@@ -1550,7 +1552,8 @@
         "call_id": "schema_current_3",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Repeat exact-current schema dispatch for a third client.",
       "measurement_sample": {
@@ -1580,15 +1583,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1620,15 +1619,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1660,15 +1655,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1700,15 +1691,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1856,15 +1843,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1912,15 +1895,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1968,15 +1947,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2008,15 +1983,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2048,15 +2019,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2499,15 +2466,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2539,15 +2502,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2579,15 +2538,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2619,15 +2574,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2659,15 +2610,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2699,15 +2646,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -3536,7 +3479,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-002",
@@ -3544,7 +3488,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-003",
@@ -3552,7 +3497,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
@@ -3560,7 +3506,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
@@ -3568,7 +3515,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
@@ -3576,7 +3524,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-004",
@@ -3584,7 +3533,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-005",
@@ -3592,7 +3542,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-006",
@@ -3600,7 +3551,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
@@ -3608,7 +3560,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
@@ -3616,7 +3569,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
@@ -3624,7 +3578,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-007",
@@ -3632,7 +3587,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-008",
@@ -3640,7 +3596,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-009",
@@ -3648,7 +3605,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
@@ -3656,7 +3614,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
@@ -3664,7 +3623,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
@@ -3672,7 +3632,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
@@ -3680,7 +3641,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
@@ -3688,7 +3650,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
@@ -3696,7 +3659,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
@@ -3704,7 +3668,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
@@ -3712,7 +3677,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
@@ -3720,7 +3686,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-010",
@@ -3728,7 +3695,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-011",
@@ -3736,7 +3704,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-012",
@@ -3744,7 +3713,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-013",
@@ -3752,7 +3722,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-014",
@@ -3760,7 +3731,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-015",
@@ -3768,7 +3740,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
@@ -3776,7 +3749,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
@@ -3784,7 +3758,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
@@ -3792,7 +3767,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-016",

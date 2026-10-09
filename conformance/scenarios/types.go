@@ -478,14 +478,15 @@ type Step struct {
 // NativeStepBinding maps one authored step to its real native proof boundary.
 // Equal call IDs identify effects from one public client call.
 type NativeStepBinding struct {
-	Kind       string                    `json:"kind"`
-	UserID     string                    `json:"user_id,omitempty"`
-	ClientID   string                    `json:"client_id,omitempty"`
-	CallID     *NativeCallID             `json:"call_id,omitempty"`
-	Stage      string                    `json:"stage,omitempty"`
-	Method     string                    `json:"method,omitempty"`
-	Completion string                    `json:"completion,omitempty"`
-	Workload   *NativeWorkloadParameters `json:"workload,omitempty"`
+	Kind           string                    `json:"kind"`
+	UserID         string                    `json:"user_id,omitempty"`
+	ClientID       string                    `json:"client_id,omitempty"`
+	CallID         *NativeCallID             `json:"call_id,omitempty"`
+	Stage          string                    `json:"stage,omitempty"`
+	Method         string                    `json:"method,omitempty"`
+	Completion     string                    `json:"completion,omitempty"`
+	Initialization string                    `json:"initialization,omitempty"`
+	Workload       *NativeWorkloadParameters `json:"workload,omitempty"`
 }
 
 // NativeWorkloadParameters are consumed by validateNativeWorkload and

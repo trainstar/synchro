@@ -251,7 +251,8 @@ export class PublicConformanceRunner {
     const clientKey = requireClientKey(command);
     const parameters = command.action.action.parameters;
     const mode = requiredString(parameters.database_mode);
-    if ((mode !== 'create' && mode !== 'reuse') || this.sessions.has(clientKey)) {
+    if ((mode !== 'create' && mode !== 'reuse') || this.sessions.has(clientKey) ||
+      (parameters.initialization === 'current' && mode !== 'create')) {
       throw new ConformanceCommandError('invalid_command', new Error('open mode is invalid or the client session already exists'));
     }
     const databasePath = appPrivateDatabasePath(command.runtime.database_path);
@@ -282,6 +283,18 @@ export class PublicConformanceRunner {
         throw new ConformanceCommandError('invalid_command');
       }
       throw error;
+    }
+    if (parameters.initialization === 'current') {
+      const task = client.start().then(
+        () => undefined,
+        (error: unknown) => toError(error)
+      );
+      await task;
+      const observation = await this.waitForCompletion(client, task, false);
+      if (observation.completion !== 'idle') {
+        throw new ConformanceCommandError('execution_failed');
+      }
+      await client.stop();
     }
     return {
       kind: 'opened',

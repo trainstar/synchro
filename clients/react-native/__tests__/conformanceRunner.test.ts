@@ -152,6 +152,31 @@ describe('PublicConformanceRunner call lifecycle', () => {
     await runner.close();
   });
 
+  it('rejects current initialization when bootstrap loses its connection', async () => {
+    mockNativeModule.start.mockRejectedValue(new Error('connection lost'));
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091',
+      authToken: 'test-token',
+      appVersion: '1.0.0',
+    });
+    await expect(runner.execute(command('client', 'open', 'client-a', {
+      database_mode: 'create', initialization: 'current', seed_step_id: null,
+    }))).rejects.toMatchObject({ code: 'execution_failed' });
+    await runner.close();
+  });
+
+  it('rejects current initialization against a reused database', async () => {
+    const runner = new PublicConformanceRunner({
+      serverURL: 'http://localhost:8091',
+      authToken: 'test-token',
+      appVersion: '1.0.0',
+    });
+    await expect(runner.execute(command('client', 'open', 'client-a', {
+      database_mode: 'reuse', initialization: 'current', seed_step_id: null,
+    }))).rejects.toMatchObject({ code: 'invalid_command' });
+    await runner.close();
+  });
+
   it('uses paired runtime connection values instead of constructor defaults', async () => {
     const runner = new PublicConformanceRunner({
       serverURL: 'http://default.invalid',

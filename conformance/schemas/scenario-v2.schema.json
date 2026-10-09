@@ -167,9 +167,17 @@
         "stage": { "type": "string", "enum": ["synchronous", "begin", "observe", "await-step", "await-call"] },
         "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
         "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
+        "initialization": { "type": "string", "enum": ["current"] },
         "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }
       },
       "allOf": [
+        {
+          "if": { "required": ["initialization"] },
+          "then": {
+            "properties": { "kind": { "const": "public-call" }, "stage": { "const": "synchronous" } },
+            "required": ["stage"]
+          }
+        },
         {
           "if": { "properties": { "kind": { "const": "controller" } }, "required": ["kind"] },
           "then": {
