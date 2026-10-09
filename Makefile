@@ -1176,7 +1176,7 @@ ci-candidate-rn-ios:
 	$(MAKE) test-rn-e2e-ios-build
 	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
-	$(MAKE) test-consumer-rn-ios
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.83.10
 	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-ios
 	$(MAKE) test-rn-scenarios-ios
@@ -1184,7 +1184,7 @@ ci-candidate-rn-ios:
 ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
-	$(MAKE) test-consumer-rn-android
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.83.10
 	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-android
 	$(MAKE) test-rn-scenarios-android
