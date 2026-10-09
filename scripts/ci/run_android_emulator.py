@@ -239,6 +239,7 @@ class Runner:
             raise Cancelled()
 
     def command(self, command: list[str], *, timeout: float = 180, input: str | None = None) -> str:
+        cleaning = self.cleaning
         self.command_process = subprocess.Popen(
             command, env=self.environment, start_new_session=True,
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -258,7 +259,7 @@ class Runner:
                     break
                 except subprocess.TimeoutExpired:
                     input = None
-                    if self.emulator is not None and self.emulator.poll() is not None:
+                    if not self.cleaning and self.emulator is not None and self.emulator.poll() is not None:
                         raise RunnerError("The emulator exited during an Android command")
             self.log.write(output)
             self.log.flush()
@@ -301,8 +302,8 @@ class Runner:
                                 raise
             finally:
                 self.command_process = None
-                self.cleaning = False
-        if self.cancel_signal:
+                self.cleaning = cleaning
+        if self.cancel_signal and not self.cleaning:
             raise Cancelled()
         return output
 
@@ -482,12 +483,20 @@ class Runner:
                     if process is None:
                         continue
                     try:
-                        stop_group(process)
+                        try:
+                            if process is self.emulator and process.poll() is None:
+                                if self.adb_server is None:
+                                    raise RunnerError("The owned ADB server is unavailable for emulator shutdown")
+                                self.check_adb_server()
+                                self.adb(["emu", "kill"], timeout=15)
+                                process.wait(timeout=30)
+                        finally:
+                            stop_group(process)
                         if process is self.emulator:
                             result = process.wait(timeout=0)
                             if result not in (0, -signal.SIGTERM):
                                 raise RunnerError(f"The emulator exited with status {result}")
-                    except (RunnerError, OSError, ValueError) as error:
+                    except (RunnerError, OSError, ValueError, subprocess.TimeoutExpired) as error:
                         print(f"Android emulator cleanup failed: {error}", file=sys.stderr)
                         if self.log:
                             try:
