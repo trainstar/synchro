@@ -497,6 +497,33 @@ private class ClientSession(private val context: Context) : Closeable {
     private fun captureInTransaction(client: SynchroClient, selectors: JsonArray): JsonObject {
         val retainedMutationCount = client.retainedMutationCount()
         val capture = SynchroInspection(client).captureState(MAXIMUM_RECORDS)
+        if (capture.physicalSchemaTruncated) throw CaptureQueryException()
+        val syncedTables = capture.physicalSchema.map { it.tableName }.toSet()
+        val validatedSelectors = selectors.map { value ->
+            val selector = value.requireObject("row selector")
+            selector.requireOnly("table_name", "primary_key_field", "primary_key")
+            val table = selector.requiredIdentifier("table_name")
+            val field = selector.requiredIdentifier("primary_key_field")
+            require(!isReservedTable(table)) { "reserved table is unavailable" }
+            val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
+            require(primaryKey != null) { "primary key is null" }
+            Triple(table, field, primaryKey)
+        }
+        var applicationRowCount = capture.applicationRowCount.toLong()
+        if (applicationRowCount < 0) throw CaptureCardinalityException()
+        (validatedSelectors.map { it.first }.toSet() - syncedTables).forEach { table ->
+            val counts = try {
+                client.query("SELECT COUNT(*) AS row_count FROM ${quoteIdentifier(table)}")
+            } catch (_: Throwable) {
+                throw CaptureQueryException()
+            }
+            val count = counts.singleOrNull()?.get("row_count") as? Long
+                ?: throw CaptureCardinalityException()
+            if (count < 0 || count > Int.MAX_VALUE.toLong() - applicationRowCount) {
+                throw CaptureCardinalityException()
+            }
+            applicationRowCount += count
+        }
         val durableStateFingerprint = durableStateFingerprint()
         val retainedMutations = if (retainedMutationCount <= MAXIMUM_RECORDS) {
             client.inspectRetainedMutationRecords()
@@ -514,16 +541,9 @@ private class ClientSession(private val context: Context) : Closeable {
             ?.toSet()
             ?: emptySet()
         val capturedRows = mutableListOf<Map<String, Any?>>()
-        if (capture.applicationRowCount <= MAXIMUM_ROWS) {
-            selectors.forEach { value ->
-                val selector = value.requireObject("row selector")
-                selector.requireOnly("table_name", "primary_key_field", "primary_key")
-                val table = selector.requiredIdentifier("table_name")
-                val field = selector.requiredIdentifier("primary_key_field")
-                require(!isReservedTable(table)) { "reserved table is unavailable" }
+        if (applicationRowCount <= MAXIMUM_ROWS) {
+            validatedSelectors.forEach { (table, field, primaryKey) ->
                 if (table in scopedTables) return@forEach
-                val primaryKey = decodeTypedValue(selector.requiredObject("primary_key"))
-                require(primaryKey != null) { "primary key is null" }
                 val selected = try {
                     client.query(
                         "SELECT * FROM ${quoteIdentifier(table)} WHERE ${quoteIdentifier(field)} = ?",
@@ -549,7 +569,7 @@ private class ClientSession(private val context: Context) : Closeable {
         return stateResult(
             applicationRows = buildJsonArray { capturedRows.forEach { add(normalizeRow(it)) } },
             applicationRowStorageClasses = buildJsonArray { capturedRows.forEach { add(storageClasses(it)) } },
-            captureState = capture,
+            captureState = capture.copy(applicationRowCount = applicationRowCount.toInt()),
             retainedMutations = retainedMutations,
             retainedMutationCount = retainedMutationCount,
             rejectedMutations = rejectedMutations,
