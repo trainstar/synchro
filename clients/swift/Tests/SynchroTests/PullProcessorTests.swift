@@ -1488,7 +1488,8 @@ final class PullProcessorTests: XCTestCase {
             if recordID != "hard-pending" {
                 let rejected = try makeRejectedMutation(
                     mutationID: sent.mutationID, schema: hardDeleteTable,
-                    pk: ["id": AnyCodable(recordID)], status: .rejectedTerminal, code: .policyRejected
+                    pk: ["id": AnyCodable(recordID)], status: .rejectedTerminal,
+                    code: .policyRejected, message: "write denied"
                 )
                 _ = try PushProcessor(database: db, changeTracker: tracker).applyRejected(
                     rejected: [rejected], syncedTables: tables, sentPending: [sent.mutationID: sent]

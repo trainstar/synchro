@@ -738,16 +738,21 @@ class PullProcessorTests {
             val before = db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) }
             val provenanceBefore = db.query("SELECT * FROM _synchro_scope_rows")
 
-            assertThrows(SynchroError.InvalidResponse::class.java) {
-                processor.applyScopeChanges(
-                    changes = emptyList(),
-                    syncedTables = listOf(localTestTable),
-                    scopeCursors = mapOf(scopeId to "unverified-cursor"),
-                    checksums = null,
-                    schemaHash = targetSchemaHash,
-                )
-            }
-            assertEquals(before, db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) })
+            processor.applyScopeChanges(
+                changes = emptyList(),
+                syncedTables = listOf(localTestTable),
+                scopeCursors = mapOf(scopeId to "unverified-cursor"),
+                checksums = null,
+                schemaHash = targetSchemaHash,
+            )
+            val invalidated = db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) }
+            assertNull(invalidated?.cursor)
+            assertNull(invalidated?.checksum)
+            assertEquals("", invalidated?.localChecksum)
+            assertEquals(before?.generation, invalidated?.generation)
+            assertEquals(provenanceBefore, db.query("SELECT * FROM _synchro_scope_rows"))
+            assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("retained")))
+            assertEquals(0, pendingChangeCount(db))
 
             processor.applyScopeChanges(
                 changes = emptyList(),
