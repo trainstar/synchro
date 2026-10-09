@@ -579,7 +579,7 @@ func runSchemaProofReplay(ctx context.Context, fixture *scenarios.NativeLocalFix
 			m2Original = value
 		}
 	}
-	if m2Original.MutationID == "" || m2Original.AuthoredSchema != *beforeM2.Schema || !equalKotlinOptionalStrings(m2Original.BaseVersion, lane.localOriginal.BaseVersion) || m2Original.Status != "pending" || m2Original.NormalizedMutationID != nil || m2Original.SealedBatchID != nil || m2Original.SealedOrdinal != nil || m2Original.DependsOnMutationID == nil || *m2Original.DependsOnMutationID != lane.localOriginal.MutationID {
+	if m2Original.MutationID == "" || m2Original.AuthoredSchema != *beforeM2.Schema || m2Original.BaseVersion != nil || m2Original.Status != "pending" || m2Original.NormalizedMutationID != nil || m2Original.SealedBatchID != nil || m2Original.SealedOrdinal != nil || m2Original.DependsOnMutationID == nil || *m2Original.DependsOnMutationID != lane.localOriginal.MutationID {
 		return errors.New("M2 original did not retain its actual local base and S2 binding")
 	}
 	if err := scenarios.RequireLocalWriteRow(m2, beforeM2.ApplicationRows); err != nil {
@@ -862,7 +862,7 @@ func requireSchemaProofOriginal(original retainedMutation, values []retainedMuta
 }
 
 func requireSchemaProofSuccessorTransition(before, after retainedMutation, base string) error {
-	if before.Status != "pending" || before.SealedBatchID != nil || before.SealedOrdinal != nil || before.DependsOnMutationID == nil || base == "" || after.Status != "sealed" || after.BaseVersion == nil || *after.BaseVersion != base || after.DependsOnMutationID != nil || after.SealedBatchID == nil || *after.SealedBatchID == "" || after.SealedOrdinal == nil || *after.SealedOrdinal != 0 {
+	if before.Status != "pending" || before.BaseVersion != nil || before.SealedBatchID != nil || before.SealedOrdinal != nil || before.DependsOnMutationID == nil || base == "" || after.Status != "sealed" || after.BaseVersion == nil || *after.BaseVersion != base || after.DependsOnMutationID != nil || after.SealedBatchID == nil || *after.SealedBatchID == "" || after.SealedOrdinal == nil || *after.SealedOrdinal != 0 {
 		return errors.New("M2 did not seal against its validated accepted predecessor base")
 	}
 	compare := after

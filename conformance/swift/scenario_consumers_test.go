@@ -114,7 +114,7 @@ func TestSteadyPullBaselineRejectsUnexpectedWireOutcome(t *testing.T) {
 func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 	localBase, acceptedBase, m1, batch := "local-base", "accepted-base", "actual-m1", "m2-batch"
 	ordinal := int64(0)
-	original := retainedMutation{MutationID: "original-m2", LocalOrder: 2, TableID: "items", TableName: "cf_items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", ClientVersion: "2026-10-09T00:00:03.000000Z", SourceKind: "application", AuthoredSchema: schemaRef{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &localBase, DependsOnMutationID: &m1, Status: "pending", AuthoredFields: []retainedField{{FieldID: "value", Value: []byte(`"42"`)}, {FieldID: "note", Value: []byte(`"later-note"`)}}}
+	original := retainedMutation{MutationID: "original-m2", LocalOrder: 2, TableID: "items", TableName: "cf_items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", ClientVersion: "2026-10-09T00:00:03.000000Z", SourceKind: "application", AuthoredSchema: schemaRef{Version: 2, Hash: strings.Repeat("b", 64)}, DependsOnMutationID: &m1, Status: "pending", AuthoredFields: []retainedField{{FieldID: "value", Value: []byte(`"42"`)}, {FieldID: "note", Value: []byte(`"later-note"`)}}}
 	sealed := original
 	sealed.BaseVersion = &acceptedBase
 	sealed.DependsOnMutationID = nil
@@ -123,6 +123,21 @@ func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 	sealed.SealedOrdinal = &ordinal
 	if err := requireSchemaProofSuccessorTransition(original, sealed, acceptedBase); err != nil {
 		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		base *string
+	}{
+		{"invented old base", &localBase},
+		{"premature accepted base", &acceptedBase},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := original
+			before.BaseVersion = test.base
+			if requireSchemaProofSuccessorTransition(before, sealed, acceptedBase) == nil {
+				t.Fatal("unresolved M2 used an invented usable base")
+			}
+		})
 	}
 	mutation := wireMutation{MutationID: "original-m2", Table: "items", Operation: "update", PrimaryKey: map[string]json.RawMessage{"id": []byte(`"row"`)}, AuthoredSchema: sealed.AuthoredSchema, BaseVersion: &acceptedBase, ClientVersion: "2026-10-09T00:00:03.000000Z"}
 	for _, value := range []string{`"42"`, `"4\u0032"`} {
@@ -176,6 +191,7 @@ func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 		t.Fatal("null authored field matched an empty string")
 	}
 	direct := original
+	direct.BaseVersion = &localBase
 	direct.DependsOnMutationID = nil
 	directSealed := sealed
 	directSealed.BaseVersion = &localBase
@@ -240,6 +256,7 @@ func TestSchemaProofSingleWritesPreserveIdentityAcrossSealing(t *testing.T) {
 		{"successor lineage", func(v *retainedMutation) { v.NormalizedMutationID = &m1 }},
 		{"successor dependency", func(v *retainedMutation) { v.DependsOnMutationID = &m1 }},
 		{"successor base", func(v *retainedMutation) { v.BaseVersion = &localBase }},
+		{"successor missing accepted base", func(v *retainedMutation) { v.BaseVersion = nil }},
 		{"successor state", func(v *retainedMutation) { v.Status = "pending" }},
 		{"successor missing batch", func(v *retainedMutation) { v.SealedBatchID = nil }},
 		{"successor ordinal", func(v *retainedMutation) { other := int64(1); v.SealedOrdinal = &other }},
