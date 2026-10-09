@@ -1130,7 +1130,7 @@ func (p *Platform) Synchronize(ctx context.Context, request SynchronizeRequest) 
 	}
 	mapped, err := mapTransportOperations(request.Operations, observations, before)
 	if err != nil {
-		return SynchronizationResult{}, err
+		return SynchronizationResult{}, fmt.Errorf("Kotlin public call state=%s completion=%s: %w", completed.State, completed.Completion, err)
 	}
 	window, err := p.completeWindow(ctx, state, checkpoint, started, before)
 	if err != nil {
@@ -2445,7 +2445,15 @@ func mapTransportOperations(operations []scenarios.Operation, observations []Tra
 		observations = observations[1:]
 	}
 	if len(operations) != len(observations) {
-		return nil, errors.New("Kotlin Android transport observations do not close covered requests")
+		metadata := make([]string, 0, min(len(observations), 8))
+		for _, observation := range observations[:min(len(observations), 8)] {
+			if validateTransportObservation(observation) != nil {
+				metadata = append(metadata, "invalid")
+				continue
+			}
+			metadata = append(metadata, fmt.Sprintf("%s:%d", observation.OperationClass, observation.StatusCode))
+		}
+		return nil, fmt.Errorf("Kotlin Android transport observations do not close covered requests: expected=%d observed=%d metadata=%v", len(operations), len(observations), metadata)
 	}
 	mapped := make([]StepObservation, len(operations))
 	withinCallCheckpoints := make(map[string]string)
