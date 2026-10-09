@@ -408,6 +408,13 @@ def android_process(sdk_root: Path, serial: str, avd_name: str) -> tuple[dict[st
             for fd in (process / "fd").iterdir():
                 try:
                     link = os.readlink(fd)
+                except PermissionError:
+                    text = run_command(["sudo", "--non-interactive", "readlink", "--", str(fd)], "Android descriptor link")
+                    if not text.endswith("\n"):
+                        raise ProbeError("Android descriptor link is malformed")
+                    link = text[:-1]
+                    if not link or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in link):
+                        raise ProbeError("Android descriptor link is malformed")
                 except FileNotFoundError:
                     continue
                 if link in {f"socket:[{inode}]" for inode in inodes}:

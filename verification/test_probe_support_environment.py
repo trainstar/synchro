@@ -813,6 +813,70 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
         with mock.patch.object(Path, "iterdir", unreadable):
             self.rejected()
 
+    def test_restricted_descriptors_are_inspected_and_duplicate_owner_rejects(self) -> None:
+        descriptor = self.proc / "999/fd/0"
+        descriptor.parent.mkdir(parents=True)
+        descriptor.symlink_to("/dev/null")
+        restricted = {descriptor}
+        original = os.readlink
+
+        def unreadable(path: Path, *args: object, **options: object) -> str:
+            if Path(path) in restricted:
+                raise PermissionError("private descriptor details")
+            return original(path, *args, **options)
+
+        def execute(command: list[str], **options: object) -> subprocess.CompletedProcess:
+            if command[:4] == ["sudo", "--non-interactive", "readlink", "--"]:
+                self.assertEqual(len(command), 5)
+                self.assertIn(Path(command[4]), restricted)
+                self.assertEqual(options, {"capture_output": True, "text": True, "check": True, "timeout": 30})
+                return subprocess.CompletedProcess(command, 0, original(command[4]) + "\n", "private tool diagnostics")
+            return self.execute(command, **options)
+
+        self.command.side_effect = execute
+        with mock.patch.object(probe.os, "readlink", unreadable):
+            self.measure()
+            command = ["sudo", "--non-interactive", "readlink", "--", str(descriptor)]
+            self.assertEqual(sum(call.args[0] == command for call in self.command.call_args_list), 2)
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            duplicate = self.process(322)
+            (duplicate / "fd/1").unlink()
+            restricted.add(duplicate / "fd/0")
+            self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_descriptor_denial_timeout_and_malformed_text_reject(self) -> None:
+        descriptor = self.proc / "321/fd/0"
+        command = ["sudo", "--non-interactive", "readlink", "--", str(descriptor)]
+        original = os.readlink
+        self.output.write_text("previous environment", encoding="utf-8")
+        self.identity.write_text("previous identity", encoding="utf-8")
+
+        def unreadable(path: Path, *args: object, **options: object) -> str:
+            if Path(path) == descriptor:
+                raise PermissionError("private descriptor details")
+            return original(path, *args, **options)
+
+        failures = [
+            subprocess.CalledProcessError(1, command, output="private output", stderr="private error"),
+            subprocess.TimeoutExpired(command, 30, output="private output", stderr="private error"),
+            "", "\n", "/dev/null", "/dev/null\n\n", "/dev/null\nother\n", "/dev/null\r\n",
+            "/dev/\x00null\n", "/dev/\tnull\n", "/dev/\x7fnull\n", "/dev/\x85null\n",
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def execute(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+                    if arguments == command:
+                        self.assertEqual(options, {"capture_output": True, "text": True, "check": True, "timeout": 30})
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return subprocess.CompletedProcess(arguments, 0, failure, "private tool diagnostics")
+                    return self.execute(arguments, **options)
+                self.command.side_effect = execute
+                with mock.patch.object(probe.os, "readlink", unreadable):
+                    self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
     def test_wrong_duplicate_missing_avd_selectors_and_stat(self) -> None:
         for selectors in (["-avd", "Wrong"], ["-avd", self.name, "@" + self.name], ["-avd", self.name, "-avd", self.name], [], ["-avd"]):
             with self.subTest(selectors=selectors):

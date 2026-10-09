@@ -468,9 +468,6 @@ jobs:
           make local-postgres-start
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
-      - name: Build React Native Android app
-        run: make test-rn-e2e-android-build
-
       - name: Enable KVM permissions
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -484,7 +481,7 @@ jobs:
           python3 scripts/ci/run_android_emulator.py \
             --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
             --api 34 --image-api 34 --avd-name Pixel_7_API_34 --profile pixel_7 --memory 6144 \
-            --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make ci-candidate-rn-android
+            --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make test-rn-e2e-android-build ci-candidate-rn-android
 
   pull-request:
     name: pull-request

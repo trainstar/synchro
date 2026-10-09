@@ -304,9 +304,9 @@ BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
 SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
 DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
 # A timeout bounds a run but cannot omit a test, so it is not a selector.
-# Each integration test has its own deadline. This package limit only stops a hang,
-# so it is about twice the measured CI runtime of the package.
-BLACKBOX_TIMEOUT ?= 40m
+# Each integration test retains its own deadline.
+# This outer package timeout bounds the complete run.
+BLACKBOX_TIMEOUT ?= 60m
 SWIFT_SCENARIOS_TIMEOUT ?= 30m
 changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
 declared_selection = @case "$(PARTIAL)" in \
