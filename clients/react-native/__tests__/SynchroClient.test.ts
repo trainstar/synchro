@@ -25,9 +25,13 @@ const CLIENT_STATE_COUNTS = {
 function snapshotResult(clientState: Record<string, unknown>, details: Record<string, unknown> = {}) {
   return {
     inspection: JSON.stringify({
-      client_state: clientState,
+      client_state: { capture_overflowed: false, ...clientState },
       retained_mutations: [],
       rejected_mutations: [],
+      migration_journal: null,
+      migration_journal_truncated: false,
+      physical_schema: [],
+      physical_schema_truncated: false,
       ...details,
     }),
     applicationRows: [],
@@ -826,6 +830,19 @@ describe('SynchroClient', () => {
     );
 
     it('reads client state, retained details, and application rows from one native snapshot', async () => {
+      const migrationJournal = {
+        source: { version: 1, hash: 'a'.repeat(64) },
+        target: { version: 2, hash: 'b'.repeat(64) },
+        action: 'replace',
+        phase: 'prepared',
+        stored: {
+          journal_version: '1', target_manifest_json: '{ "schema_version": 2 }',
+          affected_scopes_json: '[]', scope_cursor_updates_json: '{}',
+          migration_plan_version: '1', migration_plan_json: '{ "operations": ["add_column"] }',
+          migration_plan_hash: 'c'.repeat(64), is_schema_reset: '0',
+        },
+      };
+      const physicalSchema = [{ table_name: 'orders', name: 'id', type: 'TEXT', not_null: true, primary_key_position: 1 }];
       const clientState = {
         schema: null,
         scope_states: [],
@@ -850,6 +867,8 @@ describe('SynchroClient', () => {
         ...snapshotResult(clientState, {
           retained_mutations: [legacy],
           rejected_mutations: null,
+          migration_journal: migrationJournal,
+          physical_schema: physicalSchema,
         }),
         applicationRows: [{ id: 'r1', name: 'first' }],
       });
@@ -885,6 +904,11 @@ describe('SynchroClient', () => {
         retainedMutations: [legacy],
         rejectedMutations: null,
         applicationRows: [{ id: 'r1', name: 'first' }],
+        migrationJournal,
+        captureOverflowed: false,
+        migrationJournalTruncated: false,
+        physicalSchema,
+        physicalSchemaTruncated: false,
       });
       await client.close();
     });
@@ -893,6 +917,11 @@ describe('SynchroClient', () => {
       ['retained_mutations', {}],
       ['rejected_mutations', [{}]],
       ['client_state', null],
+      ['migration_journal', undefined],
+      ['migration_journal', { source: { version: 1, hash: 'a'.repeat(64) }, target: { version: 2, hash: 'b'.repeat(64) }, action: 'replace', phase: 'prepared', stored: {} }],
+      ['migration_journal_truncated', undefined],
+      ['physical_schema', [{ table_name: 'orders', name: 'note', type: 'TEXT', not_null: 'false', primary_key_position: 0 }]],
+      ['physical_schema_truncated', undefined],
     ])('rejects an invalid snapshot %s member', async (member, value) => {
       mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
         schema: null,
@@ -907,6 +936,20 @@ describe('SynchroClient', () => {
       await expect(inspection.captureSnapshot()).rejects.toMatchObject({
         code: 'INVALID_RESPONSE',
       });
+      await client.close();
+    });
+
+    it('passes migration targets through the existing pause controls', async () => {
+      const { client, inspection } = await makeInspection();
+      for (const target of ['migration_prepared', 'migration_committed', 'connect'] as const) {
+        await inspection.armTransportPause(target);
+        await inspection.awaitTransportPause(target, 1000);
+        await inspection.resumeTransportPause();
+        expect(mockNativeModule.armTransportPause).toHaveBeenLastCalledWith(target);
+        expect(mockNativeModule.awaitTransportPause).toHaveBeenLastCalledWith(target, 1000);
+      }
+      await expect(inspection.armTransportPause('prepared' as never)).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+      expect(mockNativeModule.armTransportPause).toHaveBeenCalledTimes(3);
       await client.close();
     });
 

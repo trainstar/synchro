@@ -11,6 +11,10 @@ import type {
   DurableStateInspection,
   ScopeRowInspection,
   TransportObservationSnapshot,
+  MigrationJournalInspection,
+  PhysicalSchemaColumnInspection,
+  MigrationCheckpoint,
+  TransportOperationClass,
 } from '@trainstar/synchro-react-native/inspection';
 import type {
   PendingMutationInspection,
@@ -39,6 +43,7 @@ import {
   isCallID,
   isLifecycleOperation,
   isSynchronizeMethod,
+  utf8ByteLength,
 } from './types';
 
 // The native runners bound a detail record set at 512 and a row set at 256.
@@ -119,6 +124,7 @@ export type ConformanceActionResult =
       process: RawProcessIdentity;
     }
   | { kind: 'awaited'; status: RawSyncStatus; process: RawProcessIdentity }
+  | { kind: 'pause-control'; operation: 'arm' | 'await' | 'resume'; target: string | null; process: RawProcessIdentity }
   | {
       kind: 'lifecycle';
       operation: LifecycleOperation;
@@ -132,7 +138,13 @@ export interface ConformanceCapture {
   application_row_storage_classes?: Row[];
   pending_mutations?: PendingMutationInspection[];
   rejected_mutations?: RejectedMutationInspection[];
-  client_state?: ClientStateInspection;
+  client_state?: ClientStateInspection & {
+    capture_overflowed: boolean;
+    migration_journal: MigrationJournalInspection | null;
+    migration_journal_truncated: boolean;
+    physical_schema: PhysicalSchemaColumnInspection[];
+    physical_schema_truncated: boolean;
+  };
   durable_proof?: RawDurableProof;
   provenance?: ScopeRowInspection[];
   request_trace?: TransportObservationSnapshot;
@@ -168,6 +180,7 @@ interface ClientSession {
   events: SyncEvent[];
   unsubscribeEvents: (() => void) | null;
   pendingSynchronization: Promise<Error | undefined> | null;
+  pausedMigrationCheckpoint: MigrationCheckpoint | null;
 }
 
 interface ClientCall {
@@ -214,6 +227,8 @@ export class PublicConformanceRunner {
           return this.boundedResult(await this.lifecycle(command));
         case 'observer/await-step':
           return this.boundedResult(await this.awaitStep(command));
+        case 'observer/transport-pause':
+          return this.boundedResult(await this.transportPause(command));
         case 'observer/capture':
           return this.boundedResult(await this.capture(command));
         default:
@@ -259,6 +274,22 @@ export class PublicConformanceRunner {
     if (mode === 'create' && command.runtime.seed_database_path !== undefined) {
       throw new ConformanceCommandError('invalid_command');
     }
+    let fixture: { tableName: string; id: string; value: string } | null = null;
+    if (parameters.local_fixture !== undefined) {
+      const input = requiredRecord(parameters.local_fixture);
+      const tableName = requiredIdentifier(input.table_name);
+      const id = requiredString(input.id);
+      const value = requiredString(input.value);
+      if (mode !== 'create' || Object.keys(input).length !== 3 ||
+        !Object.keys(input).every((key) => ['table_name', 'id', 'value'].includes(key)) ||
+        tableName.length > 128 || tableName.toLowerCase().startsWith('sqlite_') ||
+        ['grdb_migrations', '_grdb_migrations'].includes(tableName.toLowerCase()) ||
+        tableName.toLowerCase().startsWith('_synchro_') ||
+        utf8ByteLength(id) > 256 || utf8ByteLength(value) > 1024) {
+        throw new ConformanceCommandError('invalid_command');
+      }
+      fixture = { tableName, id, value };
+    }
     this.sessions.set(clientKey, {
       runtime: {
         ...command.runtime,
@@ -273,6 +304,7 @@ export class PublicConformanceRunner {
       events: [],
       unsubscribeEvents: null,
       pendingSynchronization: null,
+      pausedMigrationCheckpoint: null,
     });
     let client: SynchroClient;
     try {
@@ -283,6 +315,13 @@ export class PublicConformanceRunner {
         throw new ConformanceCommandError('invalid_command');
       }
       throw error;
+    }
+    if (fixture !== null) {
+      await client.createTable(fixture.tableName, [
+        { name: 'id', type: 'TEXT', nullable: false, primaryKey: true },
+        { name: 'value', type: 'TEXT', nullable: false },
+      ], { ifNotExists: false });
+      await client.execute(`INSERT INTO ${quoteIdentifier(fixture.tableName)} (id, value) VALUES (?, ?)`, [fixture.id, fixture.value]);
     }
     if (parameters.initialization === 'current') {
       const task = client.start().then(
@@ -511,6 +550,48 @@ export class PublicConformanceRunner {
     };
   }
 
+  private async transportPause(command: ConformanceCommand): Promise<ConformanceActionResult> {
+    const clientKey = requireClientKey(command);
+    const parameters = command.action.action.parameters;
+    const operation = parameters.operation;
+    if (operation !== 'arm' && operation !== 'await' && operation !== 'resume') {
+      throw new ConformanceCommandError('invalid_command');
+    }
+    const client = await this.activate(clientKey);
+    const inspection = this.requireInspection(clientKey);
+    const session = this.requireSession(clientKey);
+    let target: TransportOperationClass | MigrationCheckpoint | null = null;
+    if (operation === 'resume') {
+      if (parameters.transport_operation !== undefined || parameters.timeout_ms !== undefined) {
+        throw new ConformanceCommandError('invalid_command');
+      }
+      await inspection.resumeTransportPause();
+      session.pausedMigrationCheckpoint = null;
+    } else {
+      const value = parameters.transport_operation;
+      if (typeof value !== 'string' || ![
+        'connect', 'pull', 'push', 'checkpoint', 'schemas', 'rebuild', 'other',
+        'migration_prepared', 'migration_committed',
+      ].includes(value)) {
+        throw new ConformanceCommandError('invalid_command');
+      }
+      target = value as TransportOperationClass | MigrationCheckpoint;
+      if (operation === 'arm') {
+        if (parameters.timeout_ms !== undefined) throw new ConformanceCommandError('invalid_command');
+        await inspection.armTransportPause(target);
+      } else {
+        const timeout = parameters.timeout_ms;
+        if (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 60_000) {
+          throw new ConformanceCommandError('invalid_command');
+        }
+        await inspection.awaitTransportPause(target, timeout);
+        session.pausedMigrationCheckpoint = target === 'migration_prepared' || target === 'migration_committed'
+          ? target : null;
+      }
+    }
+    return { kind: 'pause-control', operation, target, process: await this.processIdentity(clientKey, client) };
+  }
+
   private async capture(command: ConformanceCommand): Promise<ConformanceActionResult> {
     const parameters = command.action.action.parameters;
     const clientKeys = requiredStringArray(parameters.client_keys);
@@ -525,7 +606,8 @@ export class PublicConformanceRunner {
       : [];
     // Every inspection source reads the same snapshot, taken at its first use.
     let snapshot: Promise<ClientStateSnapshotInspection> | null = null;
-    const state = () => (snapshot ??= captureSnapshot(client, inspection, selectors));
+    const normalize = this.requireSession(clientKeys[0]).pausedMigrationCheckpoint === null;
+    const state = () => (snapshot ??= captureSnapshot(client, inspection, selectors, normalize));
     const capture: ConformanceCapture = {};
     for (const source of sources) {
       switch (source) {
@@ -559,7 +641,7 @@ export class PublicConformanceRunner {
           const rows = decodeRetainedMutationRows(parameters.retained_mutation_rows);
           let retained: RetainedMutationInspection[];
           try {
-            await client.pendingChangeCount();
+            if (normalize) await client.pendingChangeCount();
             retained = await client.inspectRetainedMutationRecords();
           } catch {
             throw new ConformanceCommandError('capture_inspection_failed');
@@ -589,9 +671,18 @@ export class PublicConformanceRunner {
         case 'sync-events':
           capture.sync_events = bounded(rawEvents(this.requireSession(clientKeys[0]).events), 'sync-events');
           break;
-        case 'scope-state':
-          capture.client_state = (await state()).clientState;
+        case 'scope-state': {
+          const captured = await state();
+          capture.client_state = {
+            ...captured.clientState,
+            capture_overflowed: captured.captureOverflowed,
+            migration_journal: captured.migrationJournal,
+            migration_journal_truncated: captured.migrationJournalTruncated,
+            physical_schema: captured.physicalSchema,
+            physical_schema_truncated: captured.physicalSchemaTruncated,
+          };
           break;
+        }
         case 'durable-proof': {
           const captured = await state();
           const identity = durableProofIdentity(parameters.durable_proof_identity, captured.clientState.scopeRows);
@@ -1009,10 +1100,11 @@ async function captureStorageClasses(inspection: SynchroInspection, selectors: R
 async function captureSnapshot(
   client: SynchroClient,
   inspection: SynchroInspection,
-  selectors: RowSelector[]
+  selectors: RowSelector[],
+  normalize: boolean
 ): Promise<ClientStateSnapshotInspection> {
   try {
-    await client.pendingChangeCount();
+    if (normalize) await client.pendingChangeCount();
     return await inspection.captureSnapshot(
       selectors.map((selector) => ({
         sql: `SELECT * FROM ${quoteIdentifier(selector.table_name)} WHERE ${quoteIdentifier(selector.primary_key_field)} = ?`,

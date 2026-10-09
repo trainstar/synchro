@@ -268,7 +268,8 @@ class SynchroModuleTransactionTest {
         assertEquals("first", rows.getMap(0)!!.getString("name"))
         val inspection = JSONObject(result.getString("inspection")!!)
         assertEquals(
-            setOf("client_state", "retained_mutations", "rejected_mutations"),
+            setOf("client_state", "retained_mutations", "rejected_mutations", "migration_journal",
+                "migration_journal_truncated", "physical_schema", "physical_schema_truncated"),
             inspection.keys().asSequence().toSet(),
         )
         // bridge_items is a local table, so the mutation ledger stays empty.

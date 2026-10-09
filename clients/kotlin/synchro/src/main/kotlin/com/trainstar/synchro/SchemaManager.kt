@@ -143,11 +143,10 @@ internal class SchemaManager(private val database: SynchroDatabase) {
     }
 
     /** Recovery runs before any connect, push, pull, or rebuild request. */
-    internal fun recoverPendingMigration() {
+    internal fun recoverPendingMigration(): LocalMigrationJournal? =
         database.writeTransaction { db ->
             applyPreparedMigrationInTransaction(db)
         }
-    }
 
     /** Clears a journal only after every required scope reached verified finality. */
     internal fun completeMigrationIfReady(authoritativeAssignmentsInstalled: Boolean = false) {

@@ -53,9 +53,13 @@ const CLIENT_STATE_COUNTS = {
 function snapshotResult(clientState: Record<string, unknown>, details: Record<string, unknown>) {
   return {
     inspection: JSON.stringify({
-      client_state: clientState,
+      client_state: { capture_overflowed: false, ...clientState },
       retained_mutations: [],
       rejected_mutations: [],
+      migration_journal: null,
+      migration_journal_truncated: false,
+      physical_schema: [],
+      physical_schema_truncated: false,
       ...details,
     }),
     applicationRows: [],
@@ -107,6 +111,34 @@ describe('PublicConformanceRunner call lifecycle', () => {
     mockNativeModule.getSyncStatus.mockReset().mockResolvedValue(READY_STATUS);
   });
 
+  it('captures a migration pause without normalizing durable intent', async () => {
+    const runner = new PublicConformanceRunner({ serverURL: 'http://localhost:8080', authToken: 'test', appVersion: 'test' });
+    try {
+      await runner.execute(command('client', 'open', 'client-a', { database_mode: 'create' }));
+      await runner.execute(command('observer', 'transport-pause', 'client-a', {
+        operation: 'arm', transport_operation: 'migration_prepared',
+      }));
+      await expect(runner.execute(command('observer', 'transport-pause', 'client-a', {
+        operation: 'await', transport_operation: 'migration_prepared', timeout_ms: 0,
+      }))).rejects.toMatchObject({ code: 'invalid_command' });
+      await runner.execute(command('observer', 'transport-pause', 'client-a', {
+        operation: 'await', transport_operation: 'migration_prepared', timeout_ms: 60_000,
+      }));
+      mockNativeModule.pendingChangeCount.mockRejectedValueOnce(new Error('capture must remain read-only'));
+      const captured = await runner.execute(command('observer', 'capture', 'client-a', {
+        client_keys: ['client-a'], sources: ['scope-state'],
+      }));
+      expect(captured).toMatchObject({ kind: 'capture', capture: { client_state: { migration_journal: null, capture_overflowed: false } } });
+      await runner.execute(command('observer', 'transport-pause', 'client-a', { operation: 'resume' }));
+      await expect(runner.execute(command('observer', 'capture', 'client-a', {
+        client_keys: ['client-a'], sources: ['scope-state'],
+      }))).rejects.toMatchObject({ code: 'capture_inspection_failed' });
+    } finally {
+      mockNativeModule.pendingChangeCount.mockResolvedValue(0);
+      await runner.close();
+    }
+  });
+
   it('rejects create mode when the database survives a runner relaunch', async () => {
     const databases = new Set<string>();
     mockNativeModule.initialize.mockImplementation(async (config: {
@@ -150,6 +182,39 @@ describe('PublicConformanceRunner call lifecycle', () => {
       runner.execute(command('controller', 'unsupported', 'client-a', {}))
     ).rejects.toMatchObject({ code: 'unavailable' });
     await runner.close();
+  });
+
+  it('creates the authored local fixture only during database creation', async () => {
+    const options = { serverURL: 'http://localhost:8091', authToken: 'test-token', appVersion: '1.0.0' };
+    const fixture = { table_name: 'local_sentinel', id: 'sentinel-id', value: 'keep-value' };
+    const first = new PublicConformanceRunner(options);
+    try {
+      await first.execute(command('client', 'open', 'client-a', {
+        database_mode: 'create', seed_step_id: null, local_fixture: fixture,
+      }));
+      expect(mockNativeModule.createTable).toHaveBeenCalledWith('local_sentinel', JSON.stringify([
+        { name: 'id', type: 'TEXT', nullable: false, primaryKey: true },
+        { name: 'value', type: 'TEXT', nullable: false },
+      ]), JSON.stringify({ ifNotExists: false }));
+      expect(mockNativeModule.execute).toHaveBeenCalledWith(
+        'INSERT INTO "local_sentinel" (id, value) VALUES (?, ?)', ['sentinel-id', 'keep-value']
+      );
+    } finally {
+      await first.close();
+    }
+    const restarted = new PublicConformanceRunner(options);
+    try {
+      await expect(restarted.execute(command('client', 'open', 'client-a', {
+        database_mode: 'reuse', seed_step_id: null, local_fixture: fixture,
+      }))).rejects.toMatchObject({ code: 'invalid_command' });
+      await restarted.execute(command('client', 'open', 'client-a', {
+        database_mode: 'reuse', seed_step_id: null,
+      }));
+      expect(mockNativeModule.createTable).toHaveBeenCalledTimes(1);
+      expect(mockNativeModule.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      await restarted.close();
+    }
   });
 
   it('rejects current initialization when bootstrap loses its connection', async () => {
@@ -650,7 +715,14 @@ describe('PublicConformanceRunner call lifecycle', () => {
           application_rows: [{ id: 'row-a', name: 'first' }],
           pending_mutations: [wireMutation],
           rejected_mutations: [],
-          client_state: { mutationLedgerCount: 1 },
+          client_state: {
+            mutationLedgerCount: 1,
+            capture_overflowed: false,
+            migration_journal: null,
+            migration_journal_truncated: false,
+            physical_schema: [],
+            physical_schema_truncated: false,
+          },
           provenance: [],
         },
       });

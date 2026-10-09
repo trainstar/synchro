@@ -139,6 +139,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testImmediateStopStartKeepsNewLifecycleOwnership() async throws {
+        let collector = TransportObservationCollector()
         let oldConnectStarted = XCTestExpectation(description: "old connect started")
         let releaseOldConnect = DispatchSemaphore(value: 0)
         let connectCount = OSAllocatedUnfairLock(initialState: 0)
@@ -165,7 +166,7 @@ final class SyncEngineTests: XCTestCase {
             return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
         }
 
-        let (engine, _) = try makeIntegrationEnv()
+        let (engine, _) = try makeIntegrationEnv(transportObservationCollector: collector)
         let oldStart = Task { () -> Bool in
             do {
                 try await engine.start()
@@ -182,6 +183,8 @@ final class SyncEngineTests: XCTestCase {
         releaseOldConnect.signal()
         let oldStartSucceeded = await oldStart.value
         XCTAssertFalse(oldStartSucceeded)
+        XCTAssertGreaterThanOrEqual(connectCount.withLock { $0 }, 2)
+        XCTAssertTrue(collector.snapshot().observations.contains { $0.operationClass == .connect && $0.statusCode == 200 })
         await engine.stop()
     }
 

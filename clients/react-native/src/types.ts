@@ -329,6 +329,24 @@ export interface ClientStateInspection {
   provenanceMaintenanceWorkCursor: string;
 }
 
+export type MigrationCheckpoint = 'migration_prepared' | 'migration_committed';
+
+export interface MigrationJournalInspection {
+  source: SchemaRef;
+  target: SchemaRef;
+  action: string;
+  phase: string;
+  stored: Record<string, string>;
+}
+
+export interface PhysicalSchemaColumnInspection {
+  table_name: string;
+  name: string;
+  type: string;
+  not_null: boolean;
+  primary_key_position: number;
+}
+
 export type TransportOperationClass =
   | 'connect'
   | 'pull'

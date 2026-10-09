@@ -1635,6 +1635,12 @@ public class SynchroModuleImpl: NSObject {
             }
             let inspection: [String: Any] = [
                 "client_state": clientStatePayload(snapshot.capture),
+                "migration_journal": try snapshot.capture.migrationJournal.map {
+                    try JSONSerialization.jsonObject(with: JSONEncoder().encode($0))
+                } ?? NSNull(),
+                "migration_journal_truncated": snapshot.capture.migrationJournalTruncated,
+                "physical_schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot.capture.physicalSchema)),
+                "physical_schema_truncated": snapshot.capture.physicalSchemaTruncated,
                 "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
                 "rejected_mutations": snapshot.rejectedMutations.map { $0.map(retainedRejectionPayload) } ?? NSNull(),
             ]
@@ -1724,13 +1730,18 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let collector = transportObservations,
-              let operation = TransportOperationClass(rawValue: operationClass) else {
+        guard let collector = transportObservations else {
             reject("INVALID_CONFIG", "Transport pause operation is invalid", nil)
             return
         }
         do {
-            try collector.armPause(for: operation)
+            if let checkpoint = MigrationCheckpoint(rawValue: operationClass) {
+                try collector.armPause(for: checkpoint)
+            } else if let operation = TransportOperationClass(rawValue: operationClass) {
+                try collector.armPause(for: operation)
+            } else {
+                throw SynchroError.invalidResponse(message: "pause target is invalid")
+            }
             resolve(nil)
         } catch {
             rejectWithError(reject, error)
@@ -1745,14 +1756,19 @@ public class SynchroModuleImpl: NSObject {
         reject: @escaping RCTPromiseRejectBlock
     ) {
         guard let collector = transportObservations,
-              let operation = TransportOperationClass(rawValue: operationClass),
               timeoutMs.isFinite, timeoutMs >= 1, timeoutMs <= 60_000 else {
             reject("INVALID_CONFIG", "Transport pause wait is invalid", nil)
             return
         }
         Task {
             do {
-                try await collector.awaitPause(for: operation, timeout: timeoutMs / 1_000)
+                if let checkpoint = MigrationCheckpoint(rawValue: operationClass) {
+                    try await collector.awaitPause(for: checkpoint, timeout: timeoutMs / 1_000)
+                } else if let operation = TransportOperationClass(rawValue: operationClass) {
+                    try await collector.awaitPause(for: operation, timeout: timeoutMs / 1_000)
+                } else {
+                    throw SynchroError.invalidResponse(message: "pause target is invalid")
+                }
                 DispatchQueue.main.async { resolve(nil) }
             } catch {
                 DispatchQueue.main.async { self.rejectWithError(reject, error) }

@@ -270,6 +270,31 @@ public struct ScopeRowInspection: Sendable, Equatable {
 }
 
 @_spi(Inspection)
+public struct MigrationJournalInspection: Codable, Sendable, Equatable {
+    public let source: SchemaRef
+    public let target: SchemaRef
+    public let action: String
+    public let phase: String
+    public let stored: [String: String]
+}
+
+@_spi(Inspection)
+public struct PhysicalSchemaColumnInspection: Codable, Sendable, Equatable {
+    public let tableName: String
+    public let name: String
+    public let type: String
+    public let notNull: Bool
+    public let primaryKeyPosition: Int
+
+    enum CodingKeys: String, CodingKey {
+        case tableName = "table_name"
+        case name, type
+        case notNull = "not_null"
+        case primaryKeyPosition = "primary_key_position"
+    }
+}
+
+@_spi(Inspection)
 public struct ClientStateCaptureInspection: Sendable, Equatable {
     public let schema: SchemaRef?
     public let scopeStates: [ScopeStateInspection]
@@ -295,6 +320,10 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
     public let rebuildAttemptCount: Int
     public let rebuildReceiptCount: Int
     public let provenanceMaintenanceWorkCursor: Int64
+    public let migrationJournal: MigrationJournalInspection?
+    public let migrationJournalTruncated: Bool
+    public let physicalSchema: [PhysicalSchemaColumnInspection]
+    public let physicalSchemaTruncated: Bool
 
     public init(
         schema: SchemaRef?,
@@ -320,7 +349,11 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
         rowMetadataCount: Int,
         rebuildAttemptCount: Int,
         rebuildReceiptCount: Int,
-        provenanceMaintenanceWorkCursor: Int64
+        provenanceMaintenanceWorkCursor: Int64,
+        migrationJournal: MigrationJournalInspection? = nil,
+        migrationJournalTruncated: Bool = false,
+        physicalSchema: [PhysicalSchemaColumnInspection] = [],
+        physicalSchemaTruncated: Bool = false
     ) {
         self.schema = schema
         self.scopeStates = scopeStates
@@ -346,6 +379,10 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
         self.rebuildAttemptCount = rebuildAttemptCount
         self.rebuildReceiptCount = rebuildReceiptCount
         self.provenanceMaintenanceWorkCursor = provenanceMaintenanceWorkCursor
+        self.migrationJournal = migrationJournal
+        self.migrationJournalTruncated = migrationJournalTruncated
+        self.physicalSchema = physicalSchema
+        self.physicalSchemaTruncated = physicalSchemaTruncated
     }
 }
 

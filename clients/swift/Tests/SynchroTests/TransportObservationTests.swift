@@ -357,6 +357,61 @@ final class TransportObservationTests: XCTestCase {
         try await secondPause.value
     }
 
+    func testMigrationPausesShareTransportBarrierAndRequireResume() async throws {
+        let collector = TransportObservationCollector()
+        try collector.armPause(for: MigrationCheckpoint.prepared)
+        try await collector.pauseIfArmed(for: TransportOperationClass.connect)
+        let task = Task {
+            try await collector.pauseIfArmed(for: MigrationCheckpoint.prepared)
+            try await collector.pauseIfArmed(for: MigrationCheckpoint.committed)
+        }
+        try await collector.awaitPause(for: MigrationCheckpoint.prepared, timeout: 1)
+        XCTAssertTrue(collector.isMigrationCheckpointPaused)
+        XCTAssertEqual(collector.snapshot().sequenceCheckpoint, 0)
+        try collector.armPause(for: MigrationCheckpoint.committed)
+        try collector.resumePause()
+        try await collector.awaitPause(for: MigrationCheckpoint.committed, timeout: 1)
+        XCTAssertTrue(collector.isMigrationCheckpointPaused)
+        try collector.resumePause()
+        try await task.value
+        XCTAssertFalse(collector.isMigrationCheckpointPaused)
+        try collector.armPause(for: TransportOperationClass.pull)
+        let transport = Task { try await collector.pauseIfArmed(for: TransportOperationClass.pull) }
+        try await collector.awaitPause(for: TransportOperationClass.pull, timeout: 1)
+        XCTAssertFalse(collector.isMigrationCheckpointPaused)
+        try collector.resumePause()
+        try await transport.value
+    }
+
+    func testMigrationTimeoutAndCancellationFailClosed() async throws {
+        let timedOut = TransportObservationCollector()
+        try timedOut.armPause(for: MigrationCheckpoint.prepared)
+        do {
+            try await timedOut.awaitPause(for: MigrationCheckpoint.prepared, timeout: 0.01)
+            XCTFail("Expected timeout")
+        } catch let error as TransportPauseBarrierError {
+            XCTAssertEqual(error, .timedOut)
+        }
+        do {
+            try await timedOut.pauseIfArmed(for: MigrationCheckpoint.prepared)
+            XCTFail("Expected closed barrier")
+        } catch let error as TransportPauseBarrierError {
+            XCTAssertEqual(error, .timedOut)
+        }
+        let cancelled = TransportObservationCollector()
+        try cancelled.armPause(for: MigrationCheckpoint.committed)
+        let task = Task { try await cancelled.pauseIfArmed(for: MigrationCheckpoint.committed) }
+        try await cancelled.awaitPause(for: MigrationCheckpoint.committed, timeout: 1)
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("Expected cancellation")
+        } catch let error as TransportPauseBarrierError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        XCTAssertFalse(cancelled.isMigrationCheckpointPaused)
+    }
+
     func testWrongAwaitOperationFailsClosed() async throws {
         let collector = TransportObservationCollector()
         try collector.armPause(for: .pull)

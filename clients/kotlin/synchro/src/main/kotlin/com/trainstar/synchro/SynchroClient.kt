@@ -8,6 +8,8 @@ import android.app.Application
 import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
 import com.trainstar.synchro.inspection.ClientStateCaptureInspection
+import com.trainstar.synchro.inspection.MigrationJournalInspection
+import com.trainstar.synchro.inspection.PhysicalSchemaColumnInspection
 import com.trainstar.synchro.inspection.ClientStateSnapshotInspection
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
@@ -407,6 +409,8 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         val rebuildAttemptsTruncated = rebuildAttemptCount > maximumRecords
         val rebuildReceiptsTruncated = rebuildReceiptGroupCount > maximumRecords
         val rowMetadataTruncated = rowMetadataCount > maximumRecords
+        val migration = inspectMigrationJournal(db, maximumRecords)
+        val physicalSchema = inspectPhysicalSchema(db, maximumRecords, migration)
         val provenanceCount = inspectionCount(
             db,
             "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
@@ -427,7 +431,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 scopeRowsTruncated ||
                 rebuildAttemptsTruncated ||
                 rebuildReceiptsTruncated ||
-                rowMetadataTruncated,
+                rowMetadataTruncated || migration.second || physicalSchema.second,
             applicationRowCount = inspectApplicationRowCount(db),
             mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
             mutationOutcomeCount = inspectionCount(
@@ -443,7 +447,177 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
             rebuildAttemptCount = rebuildAttemptCount,
             rebuildReceiptCount = rebuildReceiptCount,
             provenanceMaintenanceWorkCursor = provenanceMaintenanceWork,
+            migrationJournal = migration.first,
+            migrationJournalTruncated = migration.second,
+            physicalSchema = physicalSchema.first,
+            physicalSchemaTruncated = physicalSchema.second,
         )
+    }
+
+    private fun inspectMigrationJournal(db: SQLiteDatabase, maximumRecords: Int): Pair<MigrationJournalInspection?, Boolean> {
+        val preflight = db.rawQuery("""
+            SELECT typeof(source_schema_version) = 'integer' AND typeof(target_schema_version) = 'integer' AND
+                typeof(journal_version) = 'integer' AND typeof(migration_plan_version) = 'integer' AND
+                typeof(reset_materialization) = 'integer' AND typeof(source_schema_hash) = 'text' AND
+                typeof(target_schema_hash) = 'text' AND typeof(action) = 'text' AND typeof(phase) = 'text' AND
+                typeof(target_manifest_json) = 'text' AND typeof(affected_scopes_json) = 'text' AND
+                typeof(scope_cursor_updates_json) = 'text' AND typeof(target_tables_json) = 'text' AND
+                typeof(migration_plan_json) = 'text' AND typeof(migration_plan_hash) = 'text' AS storage_valid,
+                CASE WHEN ? = 0 THEN 0 ELSE
+                coalesce(length(CAST(source_schema_version AS BLOB)), 0) + coalesce(length(CAST(target_schema_version AS BLOB)), 0) +
+                coalesce(length(CAST(journal_version AS BLOB)), 0) + coalesce(length(CAST(target_manifest_json AS BLOB)), 0) +
+                coalesce(length(CAST(affected_scopes_json AS BLOB)), 0) + coalesce(length(CAST(scope_cursor_updates_json AS BLOB)), 0) +
+                coalesce(length(CAST(target_tables_json AS BLOB)), 0) + coalesce(length(CAST(migration_plan_version AS BLOB)), 0) +
+                coalesce(length(CAST(migration_plan_json AS BLOB)), 0) + coalesce(length(CAST(migration_plan_hash AS BLOB)), 0) +
+                coalesce(length(CAST(reset_materialization AS BLOB)), 0) + coalesce(length(CAST(action AS BLOB)), 0) +
+                coalesce(length(CAST(phase AS BLOB)), 0) + coalesce(length(CAST(source_schema_hash AS BLOB)), 0) +
+                coalesce(length(CAST(target_schema_hash AS BLOB)), 0) END AS byte_count
+            FROM _synchro_migration_journal WHERE singleton = 1
+            """.trimIndent(), arrayOf(maximumRecords.toString())).use { cursor ->
+            if (!cursor.moveToFirst()) return null to false
+            if (cursor.getType(0) != android.database.Cursor.FIELD_TYPE_INTEGER ||
+                cursor.getType(1) != android.database.Cursor.FIELD_TYPE_INTEGER
+            ) throw SynchroError.InvalidResponse("migration inspection preflight is invalid")
+            (cursor.getInt(0) == 1) to cursor.getLong(1)
+        }
+        val byteCount = preflight.second
+        if (maximumRecords == 0 || byteCount > 65_536) return null to true
+        if (!preflight.first || byteCount < 0) throw SynchroError.InvalidResponse("migration inspection journal storage is invalid")
+        return db.rawQuery("""
+            SELECT source_schema_version, source_schema_hash, target_schema_version, target_schema_hash,
+                   action, phase, journal_version, target_manifest_json, affected_scopes_json,
+                   scope_cursor_updates_json, target_tables_json, migration_plan_version,
+                   migration_plan_json, migration_plan_hash, reset_materialization
+            FROM _synchro_migration_journal WHERE singleton = 1
+            """.trimIndent(), null).use { cursor ->
+            if (!cursor.moveToFirst()) throw SynchroError.InvalidResponse("migration inspection journal is missing")
+            fun text(key: String): String {
+                val index = cursor.getColumnIndexOrThrow(key)
+                if (cursor.getType(index) != android.database.Cursor.FIELD_TYPE_STRING) {
+                    throw SynchroError.InvalidResponse("migration inspection journal text is invalid")
+                }
+                return cursor.getString(index)
+            }
+            fun number(key: String): Long {
+                val index = cursor.getColumnIndexOrThrow(key)
+                if (cursor.getType(index) != android.database.Cursor.FIELD_TYPE_INTEGER) {
+                    throw SynchroError.InvalidResponse("migration inspection journal integer is invalid")
+                }
+                return cursor.getLong(index)
+            }
+            val keys = listOf("target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json",
+                "target_tables_json", "migration_plan_json", "migration_plan_hash")
+            val stored = keys.associateWith(::text).toMutableMap()
+            for (key in listOf("journal_version", "migration_plan_version", "reset_materialization")) {
+                stored[key] = number(key).toString()
+            }
+            val action = text("action")
+            val phase = text("phase")
+            val sourceHash = text("source_schema_hash")
+            val targetHash = text("target_schema_hash")
+            MigrationJournalInspection(
+                SchemaRef(number("source_schema_version"), sourceHash),
+                SchemaRef(number("target_schema_version"), targetHash), action, phase, stored,
+            ) to false
+        }
+    }
+
+    private fun inspectPhysicalSchema(
+        db: SQLiteDatabase,
+        maximumRecords: Int,
+        migration: Pair<MigrationJournalInspection?, Boolean>,
+    ): Pair<List<PhysicalSchemaColumnInspection>, Boolean> {
+        if (migration.second) return emptyList<PhysicalSchemaColumnInspection>() to true
+        val source: Pair<List<LocalSchemaTable>?, Boolean>
+        var targetNames = emptyList<String>()
+        val journal = migration.first
+        if (journal != null) {
+            try {
+                if (journal.source != SchemaRef(0, "")) journal.source.validate()
+                journal.target.validate()
+                val encoded = journal.stored["target_manifest_json"]
+                    ?: throw SynchroError.InvalidResponse("migration inspection target is missing")
+                val target = RECEIPT_JSON.decodeFromString<SchemaManifest>(encoded)
+                target.validate()
+                if (SchemaRef(target.schemaVersion, target.schemaHash) != journal.target ||
+                    Integrity.schemaManifestHash(target) != journal.target.hash
+                ) throw SynchroError.InvalidResponse("migration inspection target binding is invalid")
+                targetNames = target.tables.map { it.name }
+                source = if (journal.source.version == 0L) {
+                    emptyList<LocalSchemaTable>() to false
+                } else {
+                    inspectSchemaProjection(db, maximumRecords,
+                        "SELECT manifest_json AS metadata FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
+                        arrayOf(journal.source.version.toString(), journal.source.hash)).also {
+                        if (it.first.isNullOrEmpty() && !it.second) {
+                            throw SynchroError.InvalidResponse("migration inspection source archive is missing")
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                throw SynchroError.InvalidResponse("migration inspection identities are invalid")
+            }
+        } else {
+            source = inspectSchemaProjection(db, maximumRecords,
+                "SELECT value AS metadata FROM _synchro_meta WHERE key = 'local_schema'", null)
+        }
+        if (source.second) return emptyList<PhysicalSchemaColumnInspection>() to true
+        val tables = source.first.orEmpty()
+        if (tables.map { it.tableID }.toSet().size != tables.size ||
+            tables.map { it.tableName }.toSet().size != tables.size ||
+            tables.any { it.tableID.isEmpty() || it.relationID.isEmpty() }
+        ) throw SynchroError.InvalidResponse("inspection source table identities are invalid")
+        val names = (tables.map { it.tableName } + targetNames).toSortedSet()
+        if (names.any { it.isEmpty() || '\u0000' in it || it.startsWith("_synchro_", ignoreCase = true) ||
+                it.startsWith("sqlite_", ignoreCase = true) }
+        ) throw SynchroError.InvalidResponse("inspection table names are invalid")
+        if (names.size > maximumRecords) return emptyList<PhysicalSchemaColumnInspection>() to true
+        val columns = mutableListOf<PhysicalSchemaColumnInspection>()
+        var byteCount = 0L
+        for (tableName in names) {
+            db.rawQuery("PRAGMA table_info(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
+                val nameColumn = cursor.getColumnIndexOrThrow("name")
+                val typeColumn = cursor.getColumnIndexOrThrow("type")
+                val notNullColumn = cursor.getColumnIndexOrThrow("notnull")
+                val primaryKeyColumn = cursor.getColumnIndexOrThrow("pk")
+                while (cursor.moveToNext()) {
+                    if (columns.size == maximumRecords) return columns to true
+                    val name = cursor.getString(nameColumn)
+                    val type = cursor.getString(typeColumn)
+                    byteCount += (tableName.toByteArray(Charsets.UTF_8).size.toLong() +
+                        name.toByteArray(Charsets.UTF_8).size + type.toByteArray(Charsets.UTF_8).size)
+                    if (byteCount > 65_536) return columns to true
+                    columns += PhysicalSchemaColumnInspection(tableName, name, type,
+                        cursor.getInt(notNullColumn) != 0, cursor.getInt(primaryKeyColumn))
+                }
+            }
+        }
+        return columns to false
+    }
+
+    private fun inspectSchemaProjection(
+        db: SQLiteDatabase,
+        maximumRecords: Int,
+        sql: String,
+        arguments: Array<String>?,
+    ): Pair<List<LocalSchemaTable>?, Boolean> {
+        val byteCount = db.rawQuery("SELECT length(CAST(metadata AS BLOB)) FROM ($sql)", arguments).use { cursor ->
+            if (!cursor.moveToFirst()) return null to false
+            cursor.getLong(0)
+        }
+        if (maximumRecords == 0 || byteCount > 65_536) return null to true
+        if (byteCount < 0) throw SynchroError.InvalidResponse("inspection schema projection is invalid")
+        val encoded = db.rawQuery(sql, arguments).use { cursor ->
+            if (!cursor.moveToFirst()) throw SynchroError.InvalidResponse("inspection schema projection is missing")
+            cursor.getString(0)
+        }
+        val tables = try {
+            RECEIPT_JSON.decodeFromString<List<LocalSchemaTable>>(encoded)
+        } catch (_: Exception) {
+            throw SynchroError.InvalidResponse("inspection schema projection is invalid")
+        }
+        if (tables.size > maximumRecords) return null to true
+        return tables to false
     }
 
     internal fun inspectProvenanceMaintenanceWorkCursor(): Long =

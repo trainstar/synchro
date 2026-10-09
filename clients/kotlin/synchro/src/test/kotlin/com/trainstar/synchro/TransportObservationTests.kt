@@ -3,6 +3,7 @@
 package com.trainstar.synchro
 
 import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.MigrationCheckpoint
 import com.trainstar.synchro.inspection.TransportOperationClass
 import com.trainstar.synchro.inspection.TransportPauseBarrierError
 import com.trainstar.synchro.inspection.TransportPauseBarrierException
@@ -83,6 +84,48 @@ class TransportObservationTests {
         assertFalse(request.isCompleted)
         collector.resumePause()
         request.await()
+    }
+
+    @Test
+    fun migrationPausesShareTransportBarrierAndRequireResume() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(MigrationCheckpoint.PREPARED)
+        collector.pauseIfArmed(TransportOperationClass.CONNECT)
+        val migration = async {
+            collector.pauseIfArmed(MigrationCheckpoint.PREPARED)
+            collector.pauseIfArmed(MigrationCheckpoint.COMMITTED)
+        }
+        collector.awaitPause(MigrationCheckpoint.PREPARED, 1_000)
+        assertFalse(migration.isCompleted)
+        assertEquals(0L, collector.snapshot().sequenceCheckpoint)
+        collector.armPause(MigrationCheckpoint.COMMITTED)
+        collector.resumePause()
+        collector.awaitPause(MigrationCheckpoint.COMMITTED, 1_000)
+        assertFalse(migration.isCompleted)
+        collector.resumePause()
+        migration.await()
+        collector.armPause(TransportOperationClass.PULL)
+        val transport = async { collector.pauseIfArmed(TransportOperationClass.PULL) }
+        collector.awaitPause(TransportOperationClass.PULL, 1_000)
+        collector.resumePause()
+        transport.await()
+    }
+
+    @Test
+    fun migrationTimeoutAndCancellationFailClosed() = runTest {
+        val timedOut = TransportObservationCollector()
+        timedOut.armPause(MigrationCheckpoint.PREPARED)
+        val failure = runCatching { timedOut.awaitPause(MigrationCheckpoint.PREPARED, 10) }.exceptionOrNull()
+        assertEquals(TransportPauseBarrierError.TIMED_OUT, (failure as TransportPauseBarrierException).error)
+        assertSame(failure, runCatching { timedOut.pauseIfArmed(MigrationCheckpoint.PREPARED) }.exceptionOrNull())
+        val cancelled = TransportObservationCollector()
+        cancelled.armPause(MigrationCheckpoint.COMMITTED)
+        val migration = async { cancelled.pauseIfArmed(MigrationCheckpoint.COMMITTED) }
+        cancelled.awaitPause(MigrationCheckpoint.COMMITTED, 1_000)
+        migration.cancelAndJoin()
+        assertTrue(migration.isCancelled)
+        val cancelledFailure = assertThrows(TransportPauseBarrierException::class.java) { cancelled.resumePause() }
+        assertEquals(TransportPauseBarrierError.CANCELLED, cancelledFailure.error)
     }
 
     @Test

@@ -1,12 +1,14 @@
 package com.trainstar.synchro
 
 import android.content.Context
+import com.trainstar.synchro.inspection.withTransportObservation
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -68,6 +70,7 @@ import kotlin.time.Duration.Companion.seconds
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
+@OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
 class SyncEngineTests {
 
     private var server: MockWebServer? = null
@@ -80,6 +83,84 @@ class SyncEngineTests {
     }
 
     // MARK: - Unit Tests
+
+    @Test
+    fun neverArmedCollectorSurvivesStopAndStart() = runBlocking {
+        val collector = com.trainstar.synchro.inspection.TransportObservationCollector()
+        val connects = AtomicInteger()
+        val (engine, _) = makeIntegrationEnv(transportObservationCollector = collector) { request ->
+            if (request.path.orEmpty().endsWith("/sync/connect")) {
+                mockResponse(if (connects.getAndIncrement() == 0) connectJSON else connectResumeJSON)
+            } else {
+                readyServerResponse(request)
+            }
+        }
+        try {
+            withTimeout(5_000) { engine.start() }
+            engine.stop()
+            withTimeout(5_000) { engine.start() }
+            assertEquals(SyncStatus.Ready, engine.getSyncStatus())
+            assertEquals(2, collector.snapshot().observations.count { it.operationClass == com.trainstar.synchro.inspection.TransportOperationClass.CONNECT })
+        } finally {
+            engine.stop()
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun registeredStartupCancelledBeforeDispatchCompletesItsGate() = runTest(timeout = 5.seconds) {
+        val collector = com.trainstar.synchro.inspection.TransportObservationCollector()
+        val (engine, _) = makeIntegrationEnv(
+            transportObservationCollector = collector,
+            managedDispatcher = StandardTestDispatcher(testScheduler),
+        ) { mockResponse("{}", 500) }
+        val startup = async(start = CoroutineStart.UNDISPATCHED) { runCatching { engine.start() } }
+        assertFalse(startup.isCompleted)
+        val stop = launch(start = CoroutineStart.UNDISPATCHED) { engine.stop() }
+        try {
+            testScheduler.advanceUntilIdle()
+            assertTrue(startup.await().exceptionOrNull() is CancellationException)
+            assertTrue(stop.isCompleted)
+            assertEquals(0, server!!.requestCount)
+            assertEquals(0L, collector.snapshot().sequenceCheckpoint)
+        } finally {
+            startup.cancel()
+            testScheduler.advanceUntilIdle()
+            stop.join()
+            engine.stop()
+        }
+    }
+
+    @Test
+    fun stoppedStartupPersistsCorruptJournalFailureBeforeNetwork() = runTest {
+        val (engine, database) = makeIntegrationEnv { mockResponse("{}", 500) }
+        val source = protocolOrdersSchemaManifest()
+        installTestSchema(database, 1, source.schemaHash, source.localTables())
+        val draft = protocolOrdersSchemaManifest(
+            includeNotes = true, schemaVersion = 2,
+            parentSchema = SchemaRef(1, source.schemaHash), transitionClass = "class_2",
+        )
+        val target = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+        SchemaManager(database).prepareConnectMigration(
+            ConnectResponse(
+                serverTime = "2026-01-01T00:00:00.000000Z", protocolVersion = 3,
+                clientGeneration = 1, scopeSetVersion = 0,
+                schema = SchemaDescriptor(2, target.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()),
+                scopeCursorUpdates = emptyMap(), schemaDefinition = target,
+            ),
+            target.localTables(), false,
+        )
+        database.execute("UPDATE _synchro_migration_journal SET phase = 'awaiting_rebuild'")
+        engine.stop()
+        val failure = runCatching { engine.start() }.exceptionOrNull()
+        assertTrue(failure is SynchroError.InvalidResponse)
+        val durable = database.readTransaction { SynchroMeta.getClientState(it) }
+        assertEquals(SyncLifecycleState.ERROR, durable.lifecycleState)
+        assertEquals(SyncFailureCode.INVALID_RESPONSE, durable.failure?.code)
+        assertEquals(0, server!!.requestCount)
+        assertEquals(1L, database.readTransaction { SynchroMeta.getInt64(it, MetaKey.SCHEMA_VERSION) })
+    }
 
     @Test
     fun recoveryWithoutBlockingFailureRejectsWithoutChangingState() = runTest {
@@ -341,13 +422,14 @@ class SyncEngineTests {
             SyncStatus::class.java,
             Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
+            Long::class.javaObjectType,
         ).apply { isAccessible = true }
         try {
             database.writeTransaction {
                 SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.CONNECTING)
             }
             val memoryFailure = assertThrows(InvocationTargetException::class.java) {
-                transition.invoke(engine, SyncStatus.Ready, false, false)
+                transition.invoke(engine, SyncStatus.Ready, false, false, null)
             }.cause
             assertTrue(memoryFailure is SynchroError.InvalidStateTransition)
             assertEquals(SyncStatus.LocalReady, engine.getSyncStatus())
@@ -358,7 +440,7 @@ class SyncEngineTests {
                 SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.LOCAL_READY, processRecovery = true)
             }
             val durableFailure = assertThrows(InvocationTargetException::class.java) {
-                transition.invoke(engine, SyncStatus.Ready, false, false)
+                transition.invoke(engine, SyncStatus.Ready, false, false, null)
             }.cause
             assertTrue(durableFailure is SynchroError.InvalidStateTransition)
             assertEquals(SyncStatus.Connecting, engine.getSyncStatus())
@@ -367,7 +449,7 @@ class SyncEngineTests {
             database.writeTransaction {
                 SynchroMeta.transitionClientLifecycleState(it, SyncLifecycleState.CONNECTING)
             }
-            transition.invoke(engine, SyncStatus.Ready, false, false)
+            transition.invoke(engine, SyncStatus.Ready, false, false, null)
             assertEquals(SyncStatus.Ready, engine.getSyncStatus())
             assertEquals(SyncLifecycleState.READY, database.readTransaction { SynchroMeta.getClientState(it).lifecycleState })
         } finally {
@@ -4272,6 +4354,8 @@ class SyncEngineTests {
         pushDebounce: Double = 0.5,
         retryTiming: RetryTiming? = null,
         authProvider: suspend () -> String = { "token" },
+        transportObservationCollector: com.trainstar.synchro.inspection.TransportObservationCollector? = null,
+        managedDispatcher: CoroutineDispatcher = Dispatchers.Default,
         handler: (RecordedRequest) -> MockResponse
     ): Pair<SyncEngine, SynchroDatabase> {
         server?.shutdown()
@@ -4292,14 +4376,15 @@ class SyncEngineTests {
             pushDebounce = pushDebounce,
             maxRetryAttempts = maxRetryAttempts
         )
+        val observedConfig = transportObservationCollector?.let { config.withTransportObservation(it) } ?: config
         val db = databases.open(context, dbName)
-        val httpClient = HttpClient(config, OkHttpClient())
+        val httpClient = HttpClient(observedConfig, OkHttpClient())
         val schemaManager = SchemaManager(db)
         val changeTracker = ChangeTracker(db)
         val pullProcessor = PullProcessor(db)
         val pushProcessor = PushProcessor(db, changeTracker)
 
-        val engine = SyncEngine(config, db, httpClient, schemaManager, changeTracker, pullProcessor, pushProcessor)
+        val engine = SyncEngine(observedConfig, db, httpClient, schemaManager, changeTracker, pullProcessor, pushProcessor, managedDispatcher)
         retryTiming?.let { engine.retryTiming = it }
         return Pair(engine, db)
     }

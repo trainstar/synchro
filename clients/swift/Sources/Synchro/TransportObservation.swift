@@ -291,6 +291,12 @@ public struct TransportObservationSnapshot: Codable, Sendable, Equatable {
 }
 
 @_spi(Inspection)
+public enum MigrationCheckpoint: String, Codable, Sendable, CaseIterable {
+    case prepared = "migration_prepared"
+    case committed = "migration_committed"
+}
+
+@_spi(Inspection)
 public enum TransportPauseBarrierError: Error, Sendable, Equatable {
     case alreadyArmed
     case wrongOperation
@@ -309,20 +315,25 @@ public final class TransportObservationCollector: @unchecked Sendable {
     private var observations: [TransportObservation] = []
     private var sequence: UInt64 = 0
     private var pausePhase: PausePhase = .idle
-    private var nextPauseOperation: TransportOperationClass?
+    private var nextPauseOperation: PauseTarget?
     private var pauseWaiter: PauseWaiter?
     private var pauseTimeoutTask: Task<Void, Never>?
 
+    private enum PauseTarget: Equatable {
+        case transport(TransportOperationClass)
+        case migration(MigrationCheckpoint)
+    }
+
     private enum PausePhase {
         case idle
-        case armed(TransportOperationClass)
-        case paused(TransportOperationClass, CheckedContinuation<Void, Error>)
+        case armed(PauseTarget)
+        case paused(PauseTarget, CheckedContinuation<Void, Error>)
         case failed(TransportPauseBarrierError)
         case cancelled
     }
 
     private struct PauseWaiter {
-        let operationClass: TransportOperationClass
+        let operationClass: PauseTarget
         let continuation: CheckedContinuation<Void, Error>
     }
 
@@ -348,6 +359,21 @@ public final class TransportObservationCollector: @unchecked Sendable {
     }
 
     public func armPause(for operationClass: TransportOperationClass) throws {
+        try armPause(for: .transport(operationClass))
+    }
+
+    public func armPause(for checkpoint: MigrationCheckpoint) throws {
+        try armPause(for: .migration(checkpoint))
+    }
+
+    public var isMigrationCheckpointPaused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .paused(.migration(_), _) = pausePhase { return true }
+        return false
+    }
+
+    private func armPause(for operationClass: PauseTarget) throws {
         lock.lock()
         switch pausePhase {
         case .idle:
@@ -365,6 +391,14 @@ public final class TransportObservationCollector: @unchecked Sendable {
         for operationClass: TransportOperationClass,
         timeout: TimeInterval
     ) async throws {
+        try await awaitPause(for: .transport(operationClass), timeout: timeout)
+    }
+
+    public func awaitPause(for checkpoint: MigrationCheckpoint, timeout: TimeInterval) async throws {
+        try await awaitPause(for: .migration(checkpoint), timeout: timeout)
+    }
+
+    private func awaitPause(for operationClass: PauseTarget, timeout: TimeInterval) async throws {
         guard timeout.isFinite, timeout > 0 else {
             throw failPauseBarrier(with: .timedOut)
         }
@@ -445,6 +479,14 @@ public final class TransportObservationCollector: @unchecked Sendable {
     }
 
     func pauseIfArmed(for operationClass: TransportOperationClass) async throws {
+        try await pauseIfArmed(for: .transport(operationClass))
+    }
+
+    func pauseIfArmed(for checkpoint: MigrationCheckpoint) async throws {
+        try await pauseIfArmed(for: .migration(checkpoint))
+    }
+
+    private func pauseIfArmed(for operationClass: PauseTarget) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 var waiter: PauseWaiter?
@@ -553,7 +595,7 @@ public final class TransportObservationCollector: @unchecked Sendable {
         return error
     }
 
-    private func pauseWaitDidTimeOut(operationClass: TransportOperationClass) {
+    private func pauseWaitDidTimeOut(operationClass: PauseTarget) {
         var waiterContinuation: CheckedContinuation<Void, Error>?
         lock.lock()
         if case .armed(let armedOperation) = pausePhase {

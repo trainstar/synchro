@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.os.Process
 import android.util.Base64
 import com.trainstar.synchro.AnyCodable
+import com.trainstar.synchro.ColumnDef
 import com.trainstar.synchro.Operation
 import com.trainstar.synchro.RetainedMutationInspection
 import com.trainstar.synchro.RetainedRejectionInspection
@@ -18,6 +19,7 @@ import com.trainstar.synchro.SyncEvent
 import com.trainstar.synchro.inspection.TransportPauseBarrierException
 import com.trainstar.synchro.SyncFailure
 import com.trainstar.synchro.SyncStatus
+import com.trainstar.synchro.TableOptions
 import com.trainstar.synchro.inspection.ClientStateCaptureInspection
 import com.trainstar.synchro.inspection.RebuildAttemptInspection
 import com.trainstar.synchro.inspection.RebuildReceiptInspection
@@ -220,7 +222,7 @@ private class ClientSession(private val context: Context) : Closeable {
         command.requireAllowed(
             "schema_version", "operation", "database_key", "database_mode", "server_url",
             "auth_token", "client_id", "seed_database_name", "platform", "app_version",
-            "pull_page_size", "push_batch_size", "transport_capacity",
+            "pull_page_size", "push_batch_size", "transport_capacity", "local_fixture",
         )
         check(client == null) { "client is already open" }
         val databaseKey = command.requiredString("database_key")
@@ -229,6 +231,19 @@ private class ClientSession(private val context: Context) : Closeable {
         }
         val file = context.getDatabasePath(databaseKey)
         val databaseMode = command.requiredString("database_mode")
+        val fixture = command["local_fixture"]?.let { element ->
+            require(databaseMode == "create" && element is JsonObject) { "local fixture requires database creation" }
+            element.requireAllowed("table_name", "id", "value")
+            val table = element.requiredString("table_name")
+            val id = element.requiredString("id")
+            val value = element.requiredString("value")
+            require(table.length in 1..128 && table.matches(Regex("[A-Za-z_][A-Za-z0-9_]*")) && !isReservedTable(table)) {
+                "local fixture table is invalid"
+            }
+            require(id.isNotEmpty() && id.toByteArray(Charsets.UTF_8).size <= 256 &&
+                value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size <= 1024) { "local fixture row is invalid" }
+            Triple(table, id, value)
+        }
         when (databaseMode) {
             "create" -> context.deleteDatabase(databaseKey)
             "reuse" -> context.deleteDatabase(databaseKey)
@@ -286,6 +301,13 @@ private class ClientSession(private val context: Context) : Closeable {
         databaseFile = file
         transportObservations = collector
         client = newClient
+        fixture?.let { (table, id, value) ->
+            newClient.createTable(table, listOf(
+                ColumnDef("id", "TEXT", nullable = false, primaryKey = true),
+                ColumnDef("value", "TEXT", nullable = false),
+            ), TableOptions(ifNotExists = false))
+            newClient.execute("INSERT INTO ${quoteIdentifier(table)} (id, value) VALUES (?, ?)", arrayOf(id, value))
+        }
         eventSubscription = newClient.onSyncEvent { event ->
             synchronized(events) {
                 if (events.size < MAXIMUM_EVENTS) {
@@ -414,17 +436,23 @@ private class ClientSession(private val context: Context) : Closeable {
 
     private fun armTransportPause(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "transport_operation")
-        requireTransportObservations().armPause(command.requiredTransportOperation())
+        val collector = requireTransportObservations()
+        val target = command.requiredString("transport_operation")
+        val checkpoint = com.trainstar.synchro.inspection.MigrationCheckpoint.fromWire(target)
+        if (checkpoint != null) collector.armPause(checkpoint) else collector.armPause(command.requiredTransportOperation())
         return transportControlResult()
     }
 
     private fun awaitTransportPause(command: JsonObject): JsonObject {
         command.requireOnly("schema_version", "operation", "transport_operation")
         runBlocking {
-            requireTransportObservations().awaitPause(
-                command.requiredTransportOperation(),
-                TRANSPORT_PAUSE_TIMEOUT_MILLIS,
-            )
+            val collector = requireTransportObservations()
+            val checkpoint = com.trainstar.synchro.inspection.MigrationCheckpoint.fromWire(command.requiredString("transport_operation"))
+            if (checkpoint != null) {
+                collector.awaitPause(checkpoint, TRANSPORT_PAUSE_TIMEOUT_MILLIS)
+            } else {
+                collector.awaitPause(command.requiredTransportOperation(), TRANSPORT_PAUSE_TIMEOUT_MILLIS)
+            }
         }
         return transportControlResult()
     }
@@ -582,12 +610,23 @@ private class ClientSession(private val context: Context) : Closeable {
             put("row_metadata_count", capture.rowMetadataCount)
             put("rebuild_attempt_count", capture.rebuildAttemptCount)
             put("rebuild_receipt_count", capture.rebuildReceiptCount)
+            put("capture_overflowed", capture.overflowed)
             put("durable_state_fingerprint", stateFingerprint)
             if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRows?.let { put("application_rows", it) }
             if (capture.applicationRowCount <= MAXIMUM_ROWS) applicationRowStorageClasses?.let { put("application_row_storage_classes", it) }
             pending?.let { put("retained_mutations", normalizePending(it)) }
             rejected?.let { put("rejected_mutations", normalizeRejected(it)) }
             capture.schema?.let { put("schema", normalizeSchema(it)) }
+            put("migration_journal", capture.migrationJournal?.let {
+                json.encodeToJsonElement(com.trainstar.synchro.inspection.MigrationJournalInspection.serializer(), it)
+            } ?: JsonNull)
+            put("migration_journal_truncated", capture.migrationJournalTruncated)
+            put("physical_schema", buildJsonArray {
+                capture.physicalSchema.forEach {
+                    add(json.encodeToJsonElement(com.trainstar.synchro.inspection.PhysicalSchemaColumnInspection.serializer(), it))
+                }
+            })
+            put("physical_schema_truncated", capture.physicalSchemaTruncated)
             scopeStates?.let { put("scope_states", normalizeScopes(it)) }
             scopeRows?.let { put("scope_rows", normalizeScopeRows(it)) }
             metadata?.let { put("row_metadata", normalizeRowMetadata(it)) }

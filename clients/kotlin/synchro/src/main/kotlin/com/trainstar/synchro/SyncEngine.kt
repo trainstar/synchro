@@ -25,7 +25,8 @@ internal class SyncEngine(
     private val schemaManager: SchemaManager,
     private val changeTracker: ChangeTracker,
     private val pullProcessor: PullProcessor,
-    private val pushProcessor: PushProcessor
+    private val pushProcessor: PushProcessor,
+    private val managedDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
     private data class ConnectExecution(
         val response: ConnectResponse,
@@ -151,6 +152,7 @@ internal class SyncEngine(
         startInternal(options, schemaReset = true, recoveringError = true)
     }
 
+    @OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
     private suspend fun startInternal(
         options: SyncOptions?,
         schemaReset: Boolean,
@@ -182,8 +184,6 @@ internal class SyncEngine(
                     }
                 }
             }
-            // A pending typed journal is recovered before the first network request.
-            schemaManager.recoverPendingMigration()
             val localReadyAlreadyPersisted = database.readTransaction { db ->
                 SynchroMeta.getClientState(db).lifecycleState == SyncLifecycleState.LOCAL_READY
             }
@@ -192,14 +192,19 @@ internal class SyncEngine(
                     SyncStatus.LocalReady,
                     processRecovery = currentStatus.state == SyncLifecycleState.UNINITIALIZED,
                     persistedStateAlreadyApplied = localReadyAlreadyPersisted,
+                    expectedGeneration = generation,
                 )
             } else if (!localReadyAlreadyPersisted) {
                 throw SynchroError.InvalidResponse("local-ready initialization was not persisted")
             }
+            if (!isCurrentLifecycleGeneration(generation)) throw CancellationException("sync engine lifecycle changed")
+            // Recovery needs a legal error transition before the first network request.
+            val recoveredMigration = schemaManager.recoverPendingMigration() != null
+            if (!isCurrentLifecycleGeneration(generation)) throw CancellationException("sync engine lifecycle changed")
             bindClientIdentityBeforeConnect()
 
             // Create a fresh scope
-            val createdScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val createdScope = CoroutineScope(SupervisorJob() + managedDispatcher)
             val createdRetryWakeups = Channel<RetryWakeup>(Channel.CONFLATED)
 
             // Clear any stale sync lock from a previous crash.
@@ -220,13 +225,17 @@ internal class SyncEngine(
                 scope = createdScope
                 retryWakeups = createdRetryWakeups
                 syncJob = createdScope.launch {
-                    runManagedLoop(startupGate, options, generation, schemaReset, createdRetryWakeups)
+                    runManagedLoop(startupGate, options, generation, schemaReset, createdRetryWakeups, recoveredMigration)
+                }.also { job ->
+                    job.invokeOnCompletion { cause ->
+                        if (cause != null) startupGate.completeExceptionally(cause)
+                    }
                 }
             }
             startupGate.await()
         } catch (e: Exception) {
             if (e !is CancellationException && e !is SynchroError.BlockingFailure) {
-                recordBlockingFailure(e)
+                recordBlockingFailure(e, generation)
             }
             teardownAfterFailedStart(generation)
             throw e
@@ -489,13 +498,14 @@ internal class SyncEngine(
         generation: Long,
         schemaReset: Boolean,
         retryWakeups: ReceiveChannel<RetryWakeup>,
+        recoveredMigration: Boolean,
     ) {
         if (!beginOperation()) {
             startupGate.complete(Unit)
             return
         }
         try {
-            val startupCompleted = runStartupSequence(startupGate, options, generation, schemaReset)
+            val startupCompleted = runStartupSequence(startupGate, options, generation, schemaReset, recoveredMigration)
             if (!startupCompleted) return
             syncLoop(retryWakeups)
         } finally {
@@ -503,11 +513,13 @@ internal class SyncEngine(
         }
     }
 
+    @OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
     private suspend fun runStartupSequence(
         startupGate: CompletableDeferred<Unit>,
         options: SyncOptions?,
         generation: Long,
         schemaReset: Boolean,
+        recoveredMigration: Boolean,
     ): Boolean {
         var gateResolved = false
         var connected = false
@@ -519,6 +531,9 @@ internal class SyncEngine(
             try {
                 if (!recoveryChecked) {
                     recoveryChecked = true
+                    if (recoveredMigration) {
+                        config.transportObservationCollector?.pauseIfArmed(com.trainstar.synchro.inspection.MigrationCheckpoint.COMMITTED)
+                    }
                     DurableBackoffStore.load(database)?.let { recovered ->
                         if (!gateResolved && recovered.nextRetryAtMs > retryTiming.currentTimeMillis()) {
                             startupGate.complete(Unit)
@@ -1162,6 +1177,7 @@ internal class SyncEngine(
         }
     }
 
+    @OptIn(com.trainstar.synchro.inspection.SynchroProofApi::class)
     internal suspend fun installConnectResponse(
         response: ConnectResponse,
         resolvedRequestJSON: String? = null,
@@ -1183,6 +1199,9 @@ internal class SyncEngine(
         }
         if (schemaEvent != null && lifecycleManaged) transitionTo(SyncStatus.SchemaApplying)
         schemaEvent?.let { fireEvent(SyncEvent.SchemaApplying(it)) }
+        if (migration != null) {
+            config.transportObservationCollector?.pauseIfArmed(com.trainstar.synchro.inspection.MigrationCheckpoint.PREPARED)
+        }
         database.writeSyncLockedTransaction { db ->
             bindClientIdentityInTransaction(db)
             if (migration != null) {
@@ -1221,13 +1240,16 @@ internal class SyncEngine(
                 DurableBackoffStore.clearMatching(db, backoff.resumeState, backoff.workIdentity)
             }
         }
+        if (migration != null) {
+            config.transportObservationCollector?.pauseIfArmed(com.trainstar.synchro.inspection.MigrationCheckpoint.COMMITTED)
+        }
         syncedTables = connectSchema.first
         schemaVersion = connectSchema.second.first
         schemaHash = connectSchema.second.second
         clientGeneration = response.clientGeneration
         connectionReady = true
         schemaEvent?.let { fireEvent(SyncEvent.SchemaApplied(it)) }
-        schemaManager.completeMigrationIfReady()
+        schemaManager.completeMigrationIfReady(authoritativeAssignmentsInstalled = true)
         if (lifecycleManaged) transitionTo(SyncStatus.Ready)
     }
 
@@ -1447,11 +1469,11 @@ internal class SyncEngine(
         recordBlockingFailure(error)
     }
 
-    private fun recordBlockingFailure(error: Exception) {
+    private fun recordBlockingFailure(error: Exception, generation: Long? = null) {
         if (error is CancellationException) return
         val current = synchronized(lifecycleLock) { currentStatus.state }
         if (current in setOf(SyncLifecycleState.STOPPED, SyncLifecycleState.ERROR)) return
-        transitionTo(SyncStatus.Error(failureFor(error, operationForState(current))))
+        transitionTo(SyncStatus.Error(failureFor(error, operationForState(current))), expectedGeneration = generation)
     }
 
     private fun failureFor(error: Exception, operation: SyncOperationKind): SyncFailure = when (error) {
@@ -1592,9 +1614,11 @@ internal class SyncEngine(
         status: SyncStatus,
         processRecovery: Boolean = false,
         persistedStateAlreadyApplied: Boolean = false,
+        expectedGeneration: Long? = null,
     ) {
         val previous: SyncStatus
         synchronized(lifecycleLock) {
+            if (expectedGeneration != null && !isCurrentLifecycleGeneration(expectedGeneration)) return
             previous = currentStatus
             LifecycleTransitions.requireAllowed(previous.state, status.state)
             database.writeTransaction { db ->

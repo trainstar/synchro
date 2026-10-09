@@ -246,8 +246,9 @@ final class SyncEngine: @unchecked Sendable {
                 throw SynchroError.notStarted
             }
 
+            let recoveredMigration: Bool
             do {
-                _ = try schemaManager.recoverMigrationIfNeeded(requiringSchemaResetFor: existingFailure)
+                recoveredMigration = try schemaManager.recoverMigrationIfNeeded(requiringSchemaResetFor: existingFailure) != nil
                 try ensureLifecycleActive(generation)
                 if existingFailure != nil && getSyncStatus() != .localReady {
                     try transition(to: .localReady, lifecycleGeneration: generation)
@@ -276,7 +277,8 @@ final class SyncEngine: @unchecked Sendable {
             try await launchReservedStart(
                 options: options,
                 generation: generation,
-                schemaReset: false
+                schemaReset: false,
+                recoveredMigration: recoveredMigration
             )
         } catch {
             teardownAfterFailedStart(generation)
@@ -287,7 +289,8 @@ final class SyncEngine: @unchecked Sendable {
     private func launchReservedStart(
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool = false
     ) async throws {
         // Clear sync lock in case of prior crash
         try database.writeTransaction { db in
@@ -312,7 +315,8 @@ final class SyncEngine: @unchecked Sendable {
                     startupGate: startupGate,
                     options: options,
                     generation: generation,
-                    schemaReset: schemaReset
+                    schemaReset: schemaReset,
+                    recoveredMigration: recoveredMigration
                 )
             }
             return true
@@ -498,7 +502,8 @@ final class SyncEngine: @unchecked Sendable {
         startupGate: StartupGate,
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool
     ) async {
         guard beginManagedOperation(generation: generation) else {
             await startupGate.succeed()
@@ -509,7 +514,8 @@ final class SyncEngine: @unchecked Sendable {
             startupGate: startupGate,
             options: options,
             generation: generation,
-            schemaReset: schemaReset
+            schemaReset: schemaReset,
+            recoveredMigration: recoveredMigration
         )
         guard startupCompleted else { return }
         await syncLoop(generation: generation)
@@ -519,7 +525,8 @@ final class SyncEngine: @unchecked Sendable {
         startupGate: StartupGate,
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool
     ) async -> Bool {
         var gateResolved = false
         var deferredCycles = 0
@@ -528,6 +535,9 @@ final class SyncEngine: @unchecked Sendable {
         var replayCycleBackoff: LocalBackoffRecord?
 
         do {
+            if recoveredMigration {
+                try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.committed)
+            }
             if let recoveredBackoff = try loadPersistedBackoff() {
                 if isFutureDeadline(recoveredBackoff) {
                     emitBackoffEvent(recoveredBackoff)
@@ -1392,6 +1402,7 @@ final class SyncEngine: @unchecked Sendable {
                 scopeCursorUpdates: response.scopeCursorUpdates,
                 schemaReset: try loadBlockingFailure()?.recoveryAction == .schemaReset
             )
+            try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.prepared)
         } else {
             schemaEvent = nil
         }
@@ -1434,6 +1445,9 @@ final class SyncEngine: @unchecked Sendable {
                     workIdentity: completedConnectRequestJSON
                 )
             }
+        }
+        if schemaChanged {
+            try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.committed)
         }
         database.updateApplicationSyncedTables(connectSchema.tables)
         if let schemaEvent {

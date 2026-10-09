@@ -17,6 +17,9 @@ import type {
   SQLStatement,
   TransportObservationSnapshot,
   TransportOperationClass,
+  MigrationCheckpoint,
+  MigrationJournalInspection,
+  PhysicalSchemaColumnInspection,
 } from './types';
 
 const TRANSPORT_OPERATION_CLASSES: readonly TransportOperationClass[] = [
@@ -59,9 +62,14 @@ export interface DurableStateInspection {
  */
 export interface ClientStateSnapshotInspection {
   clientState: ClientStateInspection;
+  captureOverflowed: boolean;
   retainedMutations: RetainedMutationInspection[] | null;
   rejectedMutations: RetainedRejectionInspection[] | null;
   applicationRows: Row[];
+  migrationJournal: MigrationJournalInspection | null;
+  migrationJournalTruncated: boolean;
+  physicalSchema: PhysicalSchemaColumnInspection[];
+  physicalSchemaTruncated: boolean;
 }
 
 export interface SynchroInspectionOptions {
@@ -89,8 +97,15 @@ export class SynchroInspection {
       }));
       const result = await nativeForInspection(this.client).inspectClientStateSnapshot(statements);
       const snapshot = requireRecord(parseJSON(result.inspection), 'client state snapshot');
+      const migration = parseMigrationCapture(snapshot);
+      const clientState = requireRecord(snapshot.client_state, 'client state');
+      if (typeof clientState.capture_overflowed !== 'boolean') {
+        throw new InvalidResponseError('Native bridge returned invalid capture bound');
+      }
       return {
-        clientState: parseClientStateInspection(snapshot.client_state),
+        ...migration,
+        clientState: parseClientStateInspection(clientState),
+        captureOverflowed: clientState.capture_overflowed,
         retainedMutations:
           nullableArray(snapshot.retained_mutations, 'retained mutations')?.map(parseRetainedMutationInspection) ?? null,
         rejectedMutations:
@@ -137,8 +152,8 @@ export class SynchroInspection {
     }
   }
 
-  async armTransportPause(operationClass: TransportOperationClass): Promise<void> {
-    requireTransportOperationClass(operationClass);
+  async armTransportPause(operationClass: TransportOperationClass | MigrationCheckpoint): Promise<void> {
+    requirePauseTarget(operationClass);
     try {
       await nativeForInspection(this.client).armTransportPause(operationClass);
     } catch (error) {
@@ -146,8 +161,8 @@ export class SynchroInspection {
     }
   }
 
-  async awaitTransportPause(operationClass: TransportOperationClass, timeoutMs: number): Promise<void> {
-    requireTransportOperationClass(operationClass);
+  async awaitTransportPause(operationClass: TransportOperationClass | MigrationCheckpoint, timeoutMs: number): Promise<void> {
+    requirePauseTarget(operationClass);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
       throw new InvalidResponseError('Transport pause request is invalid');
     }
@@ -248,10 +263,54 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
 }
 
-function requireTransportOperationClass(value: TransportOperationClass): void {
-  if (!TRANSPORT_OPERATION_CLASSES.includes(value)) {
-    throw new InvalidResponseError('Transport operation class is invalid');
+function requirePauseTarget(value: TransportOperationClass | MigrationCheckpoint): void {
+  if (value !== 'migration_prepared' && value !== 'migration_committed' &&
+      !TRANSPORT_OPERATION_CLASSES.includes(value as TransportOperationClass)) {
+    throw new InvalidResponseError('Pause target is invalid');
   }
+}
+
+function parseMigrationCapture(snapshot: Record<string, unknown>): Pick<ClientStateSnapshotInspection,
+  'migrationJournal' | 'migrationJournalTruncated' | 'physicalSchema' | 'physicalSchemaTruncated'> {
+  if (typeof snapshot.migration_journal_truncated !== 'boolean' ||
+      typeof snapshot.physical_schema_truncated !== 'boolean' || !Array.isArray(snapshot.physical_schema) ||
+      snapshot.physical_schema.length > 512) {
+    throw new InvalidResponseError('Native bridge returned invalid migration capture');
+  }
+  const journal = snapshot.migration_journal;
+  if (journal !== null) {
+    const value = requireRecord(journal, 'migration journal');
+    for (const key of ['source', 'target']) {
+      const schema = requireRecord(value[key], 'migration schema');
+      if (!isNonnegativeSafeInteger(schema.version) || typeof schema.hash !== 'string') {
+        throw new InvalidResponseError('Native bridge returned invalid migration schema');
+      }
+    }
+    const stored = requireRecord(value.stored, 'stored migration bindings');
+    if (typeof value.action !== 'string' || typeof value.phase !== 'string' ||
+        Object.values(stored).some((item) => typeof item !== 'string') ||
+        ['journal_version', 'target_manifest_json', 'affected_scopes_json', 'scope_cursor_updates_json',
+          'migration_plan_version', 'migration_plan_json', 'migration_plan_hash'].some((key) => typeof stored[key] !== 'string')) {
+      throw new InvalidResponseError('Native bridge returned invalid migration journal');
+    }
+  }
+  const physicalSchema = snapshot.physical_schema.map((item) => {
+    const column = requireRecord(item, 'physical schema column');
+    if (typeof column.table_name !== 'string' || typeof column.name !== 'string' || typeof column.type !== 'string' ||
+        typeof column.not_null !== 'boolean' || !isNonnegativeSafeInteger(column.primary_key_position)) {
+      throw new InvalidResponseError('Native bridge returned invalid physical schema column');
+    }
+    return column as unknown as PhysicalSchemaColumnInspection;
+  });
+  if (snapshot.migration_journal_truncated && journal !== null) {
+    throw new InvalidResponseError('Native bridge returned truncated migration details');
+  }
+  return {
+    migrationJournal: journal as MigrationJournalInspection | null,
+    migrationJournalTruncated: snapshot.migration_journal_truncated,
+    physicalSchema,
+    physicalSchemaTruncated: snapshot.physical_schema_truncated,
+  };
 }
 
 export { sha256Hex } from './digest';
@@ -265,4 +324,7 @@ export type {
   TransportObservation,
   TransportObservationSnapshot,
   TransportOperationClass,
+  MigrationCheckpoint,
+  MigrationJournalInspection,
+  PhysicalSchemaColumnInspection,
 } from './types';
