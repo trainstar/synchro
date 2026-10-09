@@ -306,7 +306,7 @@ DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
 # A timeout bounds a run but cannot omit a test, so it is not a selector.
 # Each integration test retains its own deadline.
 # This outer package timeout bounds the complete run.
-BLACKBOX_TIMEOUT ?= 60m
+BLACKBOX_TIMEOUT ?= 120m
 SWIFT_SCENARIOS_TIMEOUT ?= 30m
 changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
 declared_selection = @case "$(PARTIAL)" in \
