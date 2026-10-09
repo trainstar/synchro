@@ -16,8 +16,8 @@
     "schema_version": { "const": 1 },
     "cell_id": { "enum": [
       "SUP-PG-LINUX-X64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001",
-      "SUP-RN-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001",
-      "SUP-RN-ANDROID-CURRENT-001"
+      "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001",
+      "SUP-RN-ANDROID-MIN-001", "SUP-RN-ANDROID-CURRENT-001"
     ] },
     "environment": { "type": "object" },
     "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
@@ -109,9 +109,11 @@
     { "properties": { "cell_id": { "const": "SUP-PG-LINUX-X64-001" }, "environment": { "$ref": "#/$defs/postgresqlEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-IOS-MIN-001" }, "environment": { "$ref": "#/$defs/iosMinimumEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-IOS-CURRENT-001" }, "environment": { "$ref": "#/$defs/iosEnvironment" } } },
+    { "properties": { "cell_id": { "const": "SUP-RN-IOS-MIN-001" }, "environment": { "$ref": "#/$defs/reactNativeIosMinimumEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-RN-IOS-CURRENT-001" }, "environment": { "$ref": "#/$defs/reactNativeIosEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-ANDROID-MIN-001" }, "environment": { "$ref": "#/$defs/androidMinimumEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-ANDROID-CURRENT-001" }, "environment": { "$ref": "#/$defs/androidEnvironment" } } },
+    { "properties": { "cell_id": { "const": "SUP-RN-ANDROID-MIN-001" }, "environment": { "$ref": "#/$defs/reactNativeAndroidMinimumEnvironment" } } },
     { "properties": { "cell_id": { "const": "SUP-RN-ANDROID-CURRENT-001" }, "environment": { "$ref": "#/$defs/reactNativeAndroidEnvironment" } } }
   ],
   "$defs": {
@@ -142,7 +144,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["ios", "xcode"],
       "properties": {
-        "ios": { "type": "string", "pattern": "^16\\.(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*))?(?![\\s\\S])" },
+        "ios": { "type": "string", "pattern": "^17\\.(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*))?(?![\\s\\S])" },
         "xcode": { "$ref": "#/$defs/appleVersion" }
       }
     },
@@ -152,6 +154,15 @@
       "properties": {
         "ios": { "$ref": "#/$defs/appleVersion" },
         "xcode": { "$ref": "#/$defs/appleVersion" }
+      }
+    },
+    "reactNativeIosMinimumEnvironment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ios", "xcode", "react_native"],
+      "properties": {
+        "ios": { "$ref": "#/$defs/appleVersion" },
+        "xcode": { "$ref": "#/$defs/appleVersion" },
+        "react_native": { "const": "0.82.1" }
       }
     },
     "reactNativeIosEnvironment": {
@@ -185,6 +196,19 @@
         "system_image_revision": { "$ref": "#/$defs/positiveInteger" },
         "emulator_version": { "$ref": "#/$defs/emulatorVersion" },
         "emulator_build": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "reactNativeAndroidMinimumEnvironment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["android_api", "os", "system_image", "system_image_revision", "emulator_version", "emulator_build", "react_native"],
+      "properties": {
+        "android_api": { "$ref": "#/$defs/positiveInteger" },
+        "os": { "const": "ubuntu-24.04" },
+        "system_image": { "$ref": "#/$defs/systemImage" },
+        "system_image_revision": { "$ref": "#/$defs/positiveInteger" },
+        "emulator_version": { "$ref": "#/$defs/emulatorVersion" },
+        "emulator_build": { "$ref": "#/$defs/positiveInteger" },
+        "react_native": { "const": "0.82.1" }
       }
     },
     "reactNativeAndroidEnvironment": {

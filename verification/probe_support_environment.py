@@ -23,13 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support_environments
 
 
-IOS_CELLS = frozenset({"SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001"})
 RN_IOS_CELL = "SUP-RN-IOS-CURRENT-001"
+RN_IOS_CELLS = frozenset({"SUP-RN-IOS-MIN-001", RN_IOS_CELL})
+IOS_CELLS = frozenset({"SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001"}) | RN_IOS_CELLS
 UDID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 COMMAND_TIMEOUT_SECONDS = 30
 PG_CELL = "SUP-PG-LINUX-X64-001"
-ANDROID_CELLS = frozenset({"SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"})
 RN_ANDROID_CELL = "SUP-RN-ANDROID-CURRENT-001"
+RN_ANDROID_CELLS = frozenset({"SUP-RN-ANDROID-MIN-001", RN_ANDROID_CELL})
+ANDROID_CELLS = frozenset({"SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001"}) | RN_ANDROID_CELLS
 PROC_ROOT = Path("/proc")
 PG_VERSION_QUERY = """SELECT pg_catalog.json_build_object(
     'version', pg_catalog.current_setting('server_version'),
@@ -140,7 +142,7 @@ def probe_ios(cell_id: str, simulator_udid: str, output: Path, react_native_app:
     if cell_id not in IOS_CELLS:
         raise ProbeError("unsupported Apple support cell")
     requested = device_identity(simulator_udid)
-    if (cell_id == RN_IOS_CELL) != (react_native_app is not None):
+    if (cell_id in RN_IOS_CELLS) != (react_native_app is not None):
         raise ProbeError("React Native app is required only for the React Native iOS cell")
     xcode, build_line = xcode_metadata(run_command(["xcodebuild", "-version"], "Xcode version"))
     devices = parse_metadata(run_command(["xcrun", "simctl", "list", "devices", "booted", "-j"], "booted simulator devices"), "booted simulator devices")
@@ -463,7 +465,7 @@ def android_binary_version(text: str) -> tuple[str, str, str]:
 def probe_android(cell_id: str, sdk_root: Path, serial: str, output: Path, identity_output: Path,
                   react_native_app: Path | None = None, initial_identity: Path | None = None,
                   initial_environment: Path | None = None) -> dict[str, object]:
-    if cell_id not in ANDROID_CELLS or (cell_id == RN_ANDROID_CELL) != (react_native_app is not None):
+    if cell_id not in ANDROID_CELLS or (cell_id in RN_ANDROID_CELLS) != (react_native_app is not None):
         raise ProbeError("React Native app is required only for the React Native Android cell")
     if (initial_identity is None) != (initial_environment is None) or output.resolve() == identity_output.resolve():
         raise ProbeError("Android output paths must differ and initial records must be supplied together")

@@ -53,9 +53,10 @@ def measured_environment(cell_id: str) -> dict[str, str]:
     # Independently authored measurement fixtures; never derive these from the manifest.
     return {
         "SUP-PG-LINUX-X64-001": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"},
-        "SUP-IOS-MIN-001": {"ios": "16.4", "xcode": "16.4"},
+        "SUP-IOS-MIN-001": {"ios": "17.0", "xcode": "27.0"},
         "SUP-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0"},
         "SUP-RN-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.10"},
+        "SUP-RN-IOS-MIN-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.82.1"},
         "SUP-ANDROID-MIN-001": {
             "android_api": "24", "os": "ubuntu-24.04",
             "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27",
@@ -70,6 +71,11 @@ def measured_environment(cell_id: str) -> dict[str, str]:
             "android_api": "37", "os": "ubuntu-24.04",
             "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
             "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.83.10",
+        },
+        "SUP-RN-ANDROID-MIN-001": {
+            "android_api": "37", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
+            "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.82.1",
         },
     }[cell_id]
 
@@ -89,7 +95,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def test_changed_initial_resume_or_selected_environment_rejects_completion(self) -> None:
         for cell_id, changes in (
             ("SUP-PG-LINUX-X64-001", {"postgresql": "18.4"}),
-            ("SUP-IOS-MIN-001", {"ios": "16.5"}),
+            ("SUP-IOS-MIN-001", {"ios": "17.1"}),
             ("SUP-IOS-CURRENT-001", {"ios": "27.0.1"}),
             ("SUP-IOS-CURRENT-001", {"xcode": "27.0.1"}),
             ("SUP-ANDROID-CURRENT-001", {"android_api": "38", "system_image": "system-images;android-38;google_apis;x86_64"}),
@@ -171,7 +177,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
                     packaged_smoke.validate_cell(bad, expected, packaged_smoke.source_commit(REPO_ROOT))
 
-    def test_complete_summary_preserves_seven_measurements_and_35_obligations(self) -> None:
+    def test_complete_summary_preserves_nine_measurements_and_45_obligations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, output = self.completed_summary(Path(directory))
             summary = packaged_smoke.load_json(output, "summary")
@@ -180,7 +186,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 {"id": cell_id, "environment": measured_environment(cell_id)}
                 for cell_id in sorted(packaged_smoke.required_cells(REPO_ROOT))
             ])
-            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertEqual(len(summary["obligations"]), 45)
             self.assertNotIn("missing_environment_cells", summary)
             packaged_smoke.verify_summary(REPO_ROOT, output)
 
@@ -233,7 +239,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             self.assertEqual(summary["status"], "failed")
             self.assertEqual(summary["resolved_support_cells"], [{"id": pg_cell, "environment": measured_environment(pg_cell)}])
             self.assertEqual(summary["missing_environment_cells"], sorted(set(packaged_smoke.required_cells(REPO_ROOT)) - {pg_cell}))
-            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertEqual(len(summary["obligations"]), 45)
             self.assertTrue(all(record["status"] == "failed" and record["test_count"] == 0 for record in summary["obligations"]))
             self.assertNotIn("environment", packaged_smoke.load_json(cells_dir / f"{ios_cell}.json", "begin cell"))
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pass"):
@@ -286,7 +292,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
         profiles = {branch["properties"]["cell_id"]["const"]: branch["properties"]["environment"]["$ref"].split("/")[-1]
                     for branch in schema["oneOf"]}
         self.assertEqual(set(profiles), ids)
-        self.assertEqual(len(schema["oneOf"]), 7)
+        self.assertEqual(len(schema["oneOf"]), 9)
         for cell_id, definition in profiles.items():
             profile = schema["$defs"][definition]
             measured = measured_environment(cell_id)
