@@ -2047,6 +2047,11 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 		(changedPhysical != "" && (!validSchemaTransitionColumn(changedPhysical) || changedPhysical == removedPhysical || changedPhysical == addedPhysical)) {
 		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
 	}
+	if added != nil && !added.Writable {
+		if err := c.harness.Operator().PublishStoredGeneratedColumns(ctx); err != nil {
+			return nativeTableBinding{}, err
+		}
+	}
 	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, added, changedPhysical, changedType); err != nil {
 		return nativeTableBinding{}, err
 	}
