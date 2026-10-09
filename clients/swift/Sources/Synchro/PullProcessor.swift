@@ -515,22 +515,11 @@ final class PullProcessor: @unchecked Sendable {
                     sql: """
                         WITH requested(table_name, record_id) AS (VALUES \(values)),
                         protected AS (
-                            SELECT pending.table_name, pending.record_id, pending.operation, pending.local_order
-                            FROM _synchro_pending_changes AS pending
+                            SELECT candidate.table_name, candidate.record_id, candidate.operation, candidate.local_order
+                            FROM (\(Self.protectedApplicationRowsSQL)) AS candidate
                             JOIN requested
-                              ON requested.table_name = pending.table_name
-                             AND requested.record_id = pending.record_id
-                            WHERE pending.lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-                            UNION ALL
-                            SELECT rejected.table_name, rejected.record_id, pending.operation, pending.local_order
-                            FROM _synchro_rejected_mutations AS rejected
-                            JOIN requested
-                              ON requested.table_name = rejected.table_name
-                             AND requested.record_id = rejected.record_id
-                            LEFT JOIN _synchro_pending_changes AS pending ON pending.mutation_id = rejected.mutation_id
-                            WHERE rejected.status = 'rejected_terminal'
-                              AND rejected.server_row_json IS NULL
-                              AND rejected.server_version IS NULL
+                              ON requested.table_name = candidate.table_name
+                             AND requested.record_id = candidate.record_id
                         )
                         SELECT candidate.table_name, candidate.record_id, candidate.operation
                         FROM protected AS candidate
@@ -540,16 +529,6 @@ final class PullProcessor: @unchecked Sendable {
                               AND newer.record_id = candidate.record_id
                               AND newer.local_order IS NOT NULL
                               AND (candidate.local_order IS NULL OR newer.local_order > candidate.local_order)
-                        )
-                          AND NOT EXISTS (
-                            SELECT 1 FROM _synchro_pending_changes AS resolved
-                            LEFT JOIN _synchro_rejected_mutations AS outcome
-                              ON outcome.mutation_id = resolved.mutation_id
-                            WHERE resolved.table_name = candidate.table_name
-                              AND resolved.record_id = candidate.record_id
-                              AND (candidate.local_order IS NULL OR resolved.local_order > candidate.local_order)
-                              AND (resolved.lifecycle_state = 'accepted'
-                                   OR (resolved.lifecycle_state = 'rejected' AND outcome.status = 'conflict'))
                         )
                         """,
                     arguments: StatementArguments(arguments)
@@ -1447,22 +1426,32 @@ final class PullProcessor: @unchecked Sendable {
         return value
     }
 
-    /// Selects each record ID of one table whose application row holds
-    /// unresolved local intent. A rebuild or reset must keep that row.
-    /// Arguments: the table name twice.
-    static let protectedRecordIDsSQL = """
-        SELECT record_id
-        FROM _synchro_pending_changes
-        WHERE table_name = ?
-          AND lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-        UNION
-        SELECT record_id
-        FROM _synchro_rejected_mutations
-        WHERE table_name = ?
-          AND status = 'rejected_terminal'
-          AND server_row_json IS NULL
-          AND server_version IS NULL
+    // A missing original ledger order cannot prove that a replacement came later.
+    private static let protectedApplicationRowsSQL = """
+        SELECT pending.table_name, pending.record_id, pending.operation, pending.local_order
+        FROM _synchro_pending_changes AS pending
+        WHERE pending.lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+        UNION ALL
+        SELECT rejected.table_name, rejected.record_id, pending.operation, pending.local_order
+        FROM _synchro_rejected_mutations AS rejected
+        LEFT JOIN _synchro_pending_changes AS pending ON pending.mutation_id = rejected.mutation_id
+        WHERE rejected.status = 'rejected_terminal'
+          AND rejected.server_row_json IS NULL
+          AND rejected.server_version IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM _synchro_pending_changes AS replacement
+            LEFT JOIN _synchro_rejected_mutations AS outcome ON outcome.mutation_id = replacement.mutation_id
+            WHERE replacement.table_name = rejected.table_name
+              AND replacement.record_id = rejected.record_id
+              AND replacement.local_order > pending.local_order
+              AND (replacement.lifecycle_state = 'accepted'
+                   OR (replacement.lifecycle_state = 'rejected' AND outcome.status = 'conflict'))
+        )
         """
+
+    /// Selects protected record IDs for one table. Argument: the table name.
+    static let protectedRecordIDsSQL =
+        "SELECT DISTINCT record_id FROM (\(protectedApplicationRowsSQL)) WHERE table_name = ?"
 
     private static func hasLocalRow(_ db: GRDB.Database, schema: LocalSchemaTable, recordID: String) throws -> Bool {
         let pkCol = schema.primaryKey.first ?? "id"
@@ -1481,7 +1470,7 @@ final class PullProcessor: @unchecked Sendable {
         try Row.fetchOne(
             db,
             sql: "SELECT 1 FROM (\(protectedRecordIDsSQL)) WHERE record_id = ? LIMIT 1",
-            arguments: [tableName, tableName, recordID]
+            arguments: [tableName, recordID]
         ) != nil
     }
 

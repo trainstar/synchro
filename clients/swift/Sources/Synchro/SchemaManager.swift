@@ -582,7 +582,7 @@ final class SchemaManager: @unchecked Sendable {
                 SELECT \(selected) FROM \(SQLiteHelpers.quoteIdentifier(source.tableName))
                 WHERE \(SQLiteHelpers.quoteIdentifier(primaryKey.name)) IN (\(PullProcessor.protectedRecordIDsSQL))
                 """,
-            arguments: [source.tableName, source.tableName]
+            arguments: [source.tableName]
         )
         return ProtectedRows(
             columns: kept.map(\.target),

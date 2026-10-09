@@ -1367,6 +1367,70 @@ final class PullProcessorTests: XCTestCase {
             )
         }
         try addPendingIntent(db, table: testTable, recordID: "protected", state: "sealed")
+        try addPendingIntent(db, table: testTable, recordID: "protected", state: "accepted")
+        let tracker = ChangeTracker(database: db)
+        let pushProcessor = PushProcessor(database: db, changeTracker: tracker)
+        for resolution in ["accepted", "conflict"] {
+            let recordID = "replaced-\(resolution)"
+            _ = try installCanonicalScopeRow(
+                db, scopeID: scopeID, recordID: recordID, shipAddress: "initial",
+                serverVersion: "2026-01-01T00:00:00.000000Z"
+            )
+            _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["denied-local", recordID])
+            let original = try XCTUnwrap(tracker.pendingChanges().first { $0.recordID == recordID })
+            let rejected = try makeRejectedMutation(
+                mutationID: original.mutationID, schema: testTable,
+                pk: ["id": AnyCodable(recordID)], status: .rejectedTerminal,
+                code: .policyRejected, message: "write denied"
+            )
+            _ = try pushProcessor.applyRejected(
+                rejected: [rejected], syncedTables: [testTable], sentPending: [original.mutationID: original]
+            )
+            _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["replacement-local", recordID])
+            let replacement = try XCTUnwrap(tracker.pendingChanges().first { $0.recordID == recordID })
+            XCTAssertGreaterThan(replacement.localOrder, original.localOrder)
+            let version = "2026-01-02T00:00:00.000000Z"
+            let row = orderRow(recordID: recordID, shipAddress: "replacement-server", updatedAt: version)
+            if resolution == "accepted" {
+                let accepted = try makeAcceptedMutation(
+                    mutationID: replacement.mutationID, schema: testTable,
+                    pk: ["id": AnyCodable(recordID)], status: .applied, serverRow: row, serverVersion: version
+                )
+                _ = try pushProcessor.applyAccepted(
+                    accepted: [accepted], syncedTables: [testTable], sentPending: [replacement.mutationID: replacement]
+                )
+            } else {
+                let conflict = try makeRejectedMutation(
+                    mutationID: replacement.mutationID, schema: testTable,
+                    pk: ["id": AnyCodable(recordID)], status: .conflict, code: .versionConflict,
+                    message: "server version differs", serverRow: row, serverVersion: version
+                )
+                _ = try pushProcessor.applyRejected(
+                    rejected: [conflict], syncedTables: [testTable], sentPending: [replacement.mutationID: replacement]
+                )
+            }
+        }
+        let ledgerBefore = try db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil)
+        let rejectionsBefore = try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil)
+        let changes = try ["accepted", "conflict"].map { resolution in
+            let recordID = "replaced-\(resolution)"
+            let version = "2026-01-03T00:00:00.000000Z"
+            return try makeChangeRecord(
+                scope: scopeID, schema: testTable, op: .upsert,
+                pk: ["id": AnyCodable(recordID)],
+                row: orderRow(recordID: recordID, shipAddress: "pulled-\(resolution)", updatedAt: version),
+                serverVersion: version
+            )
+        }
+        try processor.applyScopeChanges(
+            changes: changes, syncedTables: [testTable], scopeCursors: [:],
+            checksums: nil, schemaHash: protocolTestSchemaHash
+        )
+        for resolution in ["accepted", "conflict"] {
+            XCTAssertEqual(try db.queryOne(
+                "SELECT ship_address FROM orders WHERE id = ?", params: ["replaced-\(resolution)"]
+            )?["ship_address"] as String?, "pulled-\(resolution)")
+        }
 
         let attempt = try processor.beginScopeRebuild(
             scopeID: scopeID,
@@ -1381,6 +1445,11 @@ final class PullProcessorTests: XCTestCase {
         XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["shared"]))
         XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["protected"]))
         XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["local-only"]))
+        for resolution in ["accepted", "conflict"] {
+            XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["replaced-\(resolution)"]))
+        }
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil), ledgerBefore)
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil), rejectionsBefore)
         XCTAssertEqual(
             try db.query(
                 "SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ?",
@@ -1686,6 +1755,7 @@ final class PullProcessorTests: XCTestCase {
         }
         try addPendingIntent(db, table: testTable, recordID: "row-399", state: "sealed")
         try addPendingIntent(db, table: testTable, recordID: "row-401", state: "accepted")
+        try addPendingIntent(db, table: testTable, recordID: "row-400", state: "accepted")
         try db.writeTransaction { connection in
             try SynchroMeta.upsertRejectedMutation(
                 connection,
@@ -1710,6 +1780,7 @@ final class PullProcessorTests: XCTestCase {
                 serverVersion: "server-version"
             )
         }
+        let rejectionsBefore = try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil)
         let request = RebuildRequest(
             clientID: "test-client",
             clientGeneration: attempt.clientGeneration,
@@ -1736,6 +1807,17 @@ final class PullProcessorTests: XCTestCase {
             responseBody: try rebuildResponseBody(response),
             syncedTables: [testTable.localSchema]
         )
+        let unknownOrderEcho = try makeChangeRecord(
+            scope: scopeID, schema: testTable, op: .upsert,
+            pk: ["id": AnyCodable("row-400")],
+            row: orderRow(recordID: "row-400", shipAddress: "echo-server", updatedAt: serverVersion),
+            serverVersion: serverVersion
+        )
+        try processor.applyScopeChanges(
+            changes: [unknownOrderEcho], syncedTables: [testTable], scopeCursors: [:],
+            checksums: nil, schemaHash: protocolTestSchemaHash
+        )
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil), rejectionsBefore)
 
         XCTAssertEqual(continuedAttempt.cursor, "page-2")
         XCTAssertEqual(
