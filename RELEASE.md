@@ -228,7 +228,7 @@ React Native 0.82.1 through 0.83.x supports current iOS and Android.
 Package checks cover RN 0.82.1 and 0.83.10 on both platforms.
 The representative semantic corpus runs on RN 0.83.10.
 RN 0.82.1 iOS checks apply the upstream fmt 12.1.0 podspec backport.
-Apple checks use Xcode 27.0 through the GitHub-hosted `xcode-27` runner.
+React Native iOS and Apple package checks use Xcode 27.0 through the GitHub-hosted `xcode-27` runner.
 The iOS 17 runtime uses an anonymous Apple download when the runner does not contain it.
 
 macOS hosts Apple and Swift validation. It is not a PostgreSQL support cell.
