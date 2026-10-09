@@ -609,6 +609,39 @@ class Issue49CompleteRequirementProofTests {
         val originalHash = database.queryOne(
             "SELECT migration_plan_hash FROM _synchro_migration_journal WHERE singleton = 1",
         )?.get("migration_plan_hash") as String
+        val planJSON = database.queryOne("SELECT migration_plan_json FROM _synchro_migration_journal")!!["migration_plan_json"] as String
+        val journalJSON = Json { encodeDefaults = true }
+        val plan = journalJSON.decodeFromString<MigrationPlan>(planJSON)
+        database.execute("CREATE TABLE drafts (body TEXT)")
+        database.execute("INSERT INTO drafts VALUES ('protected')")
+        val unrelated = target.localTables().single().copy(tableID = "local-drafts", tableName = "drafts")
+        for (operations in listOf(
+            plan.operations + MigrationOperation(MigrationOperationKind.DROP_TABLE, unrelated),
+            plan.operations + plan.operations.first(),
+        )) {
+            val tampered = journalJSON.encodeToString(plan.copy(operations = operations))
+            database.execute(
+                "UPDATE _synchro_migration_journal SET migration_plan_json = ?, migration_plan_hash = ?",
+                arrayOf(tampered, migrationPlanHash(tampered)),
+            )
+            val before = durableSnapshot(database)
+            assertThrows(SynchroError.InvalidResponse::class.java) { manager.recoverPendingMigration() }
+            assertNoDurableProgress(before, database)
+            assertEquals("protected", database.queryOne("SELECT body FROM drafts")?.get("body"))
+        }
+        database.execute(
+            "UPDATE _synchro_migration_journal SET migration_plan_json = ?, migration_plan_hash = ?",
+            arrayOf(planJSON, originalHash),
+        )
+        val storedSource = database.readTransaction { SynchroMeta.get(it, MetaKey.LOCAL_SCHEMA)!! }
+        val changedSource = journalJSON.decodeFromString<List<LocalSchemaTable>>(storedSource).map { table ->
+            table.copy(columns = table.columns.filterNot { it.name == "user_id" })
+        }
+        database.writeTransaction { SynchroMeta.set(it, MetaKey.LOCAL_SCHEMA, journalJSON.encodeToString(changedSource)) }
+        val beforeSourceRecovery = durableSnapshot(database)
+        assertThrows(SynchroError.InvalidResponse::class.java) { manager.recoverPendingMigration() }
+        assertNoDurableProgress(beforeSourceRecovery, database)
+        database.writeTransaction { SynchroMeta.set(it, MetaKey.LOCAL_SCHEMA, storedSource) }
         database.close()
 
         val reopened = databases.open(context, environment.databaseName)
@@ -638,6 +671,14 @@ class Issue49CompleteRequirementProofTests {
         assertEquals(target.schemaHash, reopened.readTransaction { SynchroMeta.get(it, MetaKey.SCHEMA_HASH) })
         assertEquals("schema-new-cursor", reopened.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
         assertTrue(reopened.query("PRAGMA table_info(orders)").any { it["name"] == "notes" })
+        val tamperedApplied = journalJSON.encodeToString(plan.copy(operations = emptyList()))
+        reopened.execute(
+            "UPDATE _synchro_migration_journal SET migration_plan_json = ?, migration_plan_hash = ?",
+            arrayOf(tamperedApplied, migrationPlanHash(tamperedApplied)),
+        )
+        val beforeAppliedRecovery = durableSnapshot(reopened)
+        assertThrows(SynchroError.InvalidResponse::class.java) { SchemaManager(reopened).recoverPendingMigration() }
+        assertNoDurableProgress(beforeAppliedRecovery, reopened)
     }
 
     @Test
