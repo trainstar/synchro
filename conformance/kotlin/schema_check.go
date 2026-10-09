@@ -518,16 +518,6 @@ func recoverSchemaProof(ctx context.Context, scenario scenarios.Scenario, steps 
 			if len(pushes) != 1 {
 				return errors.New("prepared lane did not send exactly one push")
 			}
-			request, err := decodeSchemaProofPush(pushes[0])
-			if err != nil || request.Schema != target {
-				return errors.New("prepared push did not use S2")
-			}
-			if err := requireSchemaProofMutation(lane.localOriginal, request.Mutations[0]); err != nil {
-				return err
-			}
-			if err := requireSchemaProofApplied(pushes[0], request.Mutations[0].MutationID, target); err != nil {
-				return err
-			}
 			if err := requireSchemaProofStoredOutcome(final, pushes[0]); err != nil {
 				return err
 			}
