@@ -352,7 +352,7 @@ class Runner:
                 "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
                 "--retry", "3", "--retry-all-errors",
                 "--connect-timeout", "30", "--max-time", "180", "--output", str(archive), ARCHIVE_URL,
-            ])
+            ], timeout=750)
             if archive.stat().st_size != ARCHIVE_SIZE or digest(archive) != ARCHIVE_SHA256:
                 raise RunnerError("The emulator archive size or SHA-256 does not match the pin")
             members = extract_archive(archive, work)
