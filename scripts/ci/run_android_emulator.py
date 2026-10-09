@@ -413,6 +413,9 @@ class Runner:
         if self.selected.memory:
             options.extend(("-memory", self.selected.memory))
         options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        if self.selected.api == "37":
+            # The API 37 GoldfishMapper DMA path requires both SDK capabilities.
+            options.extend(("-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"))
         with (self.selected.log_dir / "emulator.log").open("ab") as emulator_log:
             self.emulator = subprocess.Popen([
                 str(self.selected.sdk_root / "emulator/emulator"), "-port", "5554",

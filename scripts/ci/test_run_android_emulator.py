@@ -388,6 +388,12 @@ class EmulatorRunnerTests(unittest.TestCase):
                 self.assertEqual([command for command, _ in self.commands("sdkmanager")], [[
                     str(self.manager), f"--sdk_root={self.sdk}", platform_package, image_package,
                 ]])
+                self.assertEqual(self.commands("emulator")[1][0], [
+                    str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", selected.avd_name,
+                    "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
+                    "-no-boot-anim", "-camera-back", "none",
+                    *(["-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"] if api == "37" else []),
+                ])
                 self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])
                 command_boundary.assert_any_call(mock.ANY, self.commands("curl")[0][0], timeout=750)
                 self.assertTrue(all(call.kwargs.get("timeout", 180) <= 180 for call in command_boundary.call_args_list if Path(call.args[1][0]).name not in {"sdkmanager", "curl"}))
