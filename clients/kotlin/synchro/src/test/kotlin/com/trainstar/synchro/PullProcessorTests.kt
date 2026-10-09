@@ -1129,7 +1129,7 @@ class PullProcessorTests {
             checksum = protocolEmptyScopeChecksum(scopeID),
         )
 
-        assertThrows(RebuildChecksumMismatchException::class.java) {
+        assertThrows(ScopeChecksumMismatchException::class.java) {
             processor.applyScopeRebuildPage(
                 attempt,
                 request,
@@ -1584,6 +1584,89 @@ class PullProcessorTests {
     }
 
     @Test
+    fun testRebuildPreservesHardDeleteAbsenceUnlessLaterProtectedIntentReplacesIt() {
+        val hardDeleteSchema = testTable.copy(deletedAtColumn = "")
+        val hardDeleteTable = hardDeleteSchema.localSchema
+        for (state in listOf("captured", "rejected_terminal", "later_insert")) {
+            val (db, processor) = makeTestEnv(hardDeleteSchema)
+            val scopeID = "orders:hard-delete-$state"
+            val recordID = "hard-deleted"
+            val pk = buildJsonObject { put("id", recordID) }
+            val canonical = makeChangeRecord(
+                scopeID, hardDeleteTable, Operation.UPSERT, pk, orderRow(recordID, "canonical"), "server-v1",
+            )
+            val initialChecksum = Integrity.scopeDigest(
+                PROTOCOL_TEST_SCHEMA_HASH, scopeID,
+                listOf(Integrity.rowIdentity(hardDeleteTable, pk) to canonical.rowChecksum!!),
+            )
+            db.writeTransaction { SynchroMeta.upsertScope(it, scopeID, null, null) }
+            processor.applyScopeChanges(
+                listOf(canonical), listOf(hardDeleteTable), mapOf(scopeID to "initial-cursor"),
+                mapOf(scopeID to initialChecksum), PROTOCOL_TEST_SCHEMA_HASH,
+            )
+            db.execute("DELETE FROM orders WHERE id = ?", arrayOf(recordID))
+            assertNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf(recordID)))
+            val tracker = ChangeTracker(db)
+            val deletion = tracker.pendingChanges().single()
+            assertEquals("delete", deletion.operation)
+            if (state != "captured") {
+                PushProcessor(db, tracker).applyRejected(
+                    listOf(makeRejectedMutation(
+                        deletion.mutationID, hardDeleteTable, pk, MutationStatus.REJECTED_TERMINAL,
+                        MutationRejectionCode.POLICY_REJECTED, "write denied",
+                    )),
+                    listOf(hardDeleteTable),
+                )
+                assertNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf(recordID)))
+                assertEquals("server-v1", db.readTransaction { SynchroMeta.getRowVersion(it, "orders", recordID) })
+            }
+            if (state == "later_insert") {
+                db.execute(
+                    "INSERT INTO orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
+                    arrayOf(recordID, "later authored insert", "2026-01-05T00:00:00.000000Z"),
+                )
+                val intents = db.query("SELECT operation, local_order FROM _synchro_pending_changes ORDER BY local_order")
+                assertEquals(listOf("delete", "insert"), intents.map { it["operation"] })
+                assertTrue((intents[1]["local_order"] as Long) > (intents[0]["local_order"] as Long))
+                // A reset can drop an incompatible projection while its later authored intent remains durable.
+                db.writeSyncLockedTransaction { it.execSQL("DELETE FROM orders WHERE id = ?", arrayOf(recordID)) }
+            }
+            val ledger = db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+            val values = db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id")
+            val rejections = db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id")
+            val attempt = processor.beginScopeRebuild(scopeID, 1, 1, PROTOCOL_TEST_SCHEMA_HASH, 100)
+            val request = RebuildRequest(
+                "test-client", attempt.clientGeneration, SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH),
+                scopeID, attempt.rebuildID, attempt.cursor, attempt.pageLimit,
+            )
+            val serverRow = orderRow(recordID, "rebuild server value")
+            val digest = Integrity.rowDigest(PROTOCOL_TEST_SCHEMA_HASH, hardDeleteTable, pk, serverRow, "server-v2")
+            val checksum = Integrity.scopeDigest(PROTOCOL_TEST_SCHEMA_HASH, scopeID, listOf(digest.identity to digest.checksum))
+            val response = RebuildResponse(
+                scope = scopeID,
+                records = listOf(RebuildRecord(hardDeleteTable.tableID, pk, serverRow, digest.checksum, "server-v2")),
+                hasMore = false, finalScopeCursor = "verified-final", checksum = checksum,
+            )
+            processor.applyScopeRebuildPage(
+                attempt, request, rebuildRequestJSON(request), response, rebuildResponseJSON(response), listOf(hardDeleteTable),
+            )
+            if (state == "later_insert") {
+                assertEquals("rebuild server value", db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(recordID))?.get("ship_address"))
+            } else {
+                assertNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf(recordID)))
+            }
+            assertEquals(ledger, db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+            assertEquals(values, db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+            assertEquals(rejections, db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id"))
+            assertEquals("server-v2", db.readTransaction { SynchroMeta.getRowVersion(it, "orders", recordID) })
+            val finalScope = db.readTransaction { SynchroMeta.getScope(it, scopeID) }!!
+            assertEquals("verified-final", finalScope.cursor)
+            assertEquals(checksum, Json.decodeFromString<ChecksumObject>(finalScope.checksum!!))
+            assertEquals(checksum, Json.decodeFromString<ChecksumObject>(finalScope.localChecksum))
+        }
+    }
+
+    @Test
     fun testIntermediateRebuildReceiptSurvivesRestartAndSkipsExactReplay() {
         val (db, processor) = makeTestEnv()
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -1733,6 +1816,18 @@ class PullProcessorTests {
         val scope = db.queryOne("SELECT cursor, checksum FROM _synchro_scopes WHERE scope_id = ?", arrayOf(scopeID))
         assertEquals("20", scope?.get("cursor"))
         assertTrue((scope?.get("checksum") as String).contains(checksum.digest))
+
+        processor.applyScopeChanges(
+            changes = emptyList(), syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf(scopeID to "must-not-accept"),
+            checksums = mapOf(scopeID to protocolEmptyScopeChecksum(scopeID)),
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+        )
+        val mismatched = db.readTransaction { SynchroMeta.getScope(it, scopeID) }!!
+        assertNull(mismatched.cursor)
+        assertNull(mismatched.checksum)
+        assertEquals(checksum, Json.decodeFromString<ChecksumObject>(mismatched.localChecksum))
+        assertEquals("local", db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(recordID))?.get("ship_address"))
     }
 
     @Test
@@ -1833,6 +1928,96 @@ class PullProcessorTests {
             scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!)),
             computeScopeChecksum(db, pullProcessor, scopeID),
         )
+
+        val healthyScopeID = "orders:independent"
+        val healthy = installCanonicalScopeRow(db, pullProcessor, healthyScopeID, "healthy-row", "healthy value", "healthy-v1")
+        db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", arrayOf("historical local value", recordID))
+        val historical = makeAcceptedMutation(
+            mutationID = tracker.pendingChanges().single().mutationID,
+            schema = localTestTable,
+            pk = accepted.pk,
+            status = MutationStatus.APPLIED,
+            serverRow = orderRow(recordID, "historical server value"),
+            serverVersion = "historical-v3",
+        )
+        val targetHash = "1".repeat(64)
+        installTestSchema(
+            db, 2, targetHash, listOf(localTestTable),
+            scopeCursorUpdates = mapOf(scopeID to "target-cursor", healthyScopeID to "healthy-target-cursor"),
+        )
+        PushProcessor(db, tracker).applyAccepted(listOf(historical), listOf(localTestTable))
+        val ledger = db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+        val values = db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id")
+        val storedOutcome = ledger.single { it["mutation_id"] == historical.mutationID }["accepted_outcome_json"] as String
+        assertEquals(historical, Json.decodeFromString<AcceptedMutation>(storedOutcome))
+        assertFalse(tracker.hasPendingChanges())
+        assertEquals("historical server value", db.queryOne("SELECT ship_address FROM orders WHERE id = ?", arrayOf(recordID))?.get("ship_address"))
+        val provenanceQuery = "SELECT * FROM _synchro_scope_rows WHERE scope_id = ? ORDER BY table_name, record_id"
+        val provenance = db.query(provenanceQuery, arrayOf(scopeID))
+        val generation = db.readTransaction { SynchroMeta.getScope(it, scopeID)!!.generation }
+        val storageVersion = db.query("PRAGMA user_version")
+        assertEquals("", db.readTransaction { SynchroMeta.getScope(it, scopeID)!!.localChecksum })
+        val staleServerChecksum = Json.encodeToString(scopeChecksum(scopeID, listOf(recordID to previous.rowChecksum!!)))
+        db.writeTransaction {
+            SynchroMeta.upsertScope(it, scopeID, "target-cursor", staleServerChecksum, localChecksum = "")
+        }
+        assertEquals(staleServerChecksum, db.readTransaction { SynchroMeta.getScope(it, scopeID)?.checksum })
+
+        val partialRow = orderRow("healthy-row", "healthy partial value")
+        val partialDigest = Integrity.rowDigest(targetHash, localTestTable, healthy.pk, partialRow, "healthy-v2")
+        val healthyPartial = healthy.copy(row = partialRow, rowChecksum = partialDigest.checksum, serverVersion = "healthy-v2")
+        pullProcessor.applyScopeChanges(
+            changes = listOf(healthyPartial), syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf(scopeID to "target-partial", healthyScopeID to "healthy-partial"),
+            checksums = null, schemaHash = targetHash,
+        )
+        assertEquals("target-partial", db.readTransaction { SynchroMeta.getScope(it, scopeID)?.cursor })
+        assertEquals("", db.readTransaction { SynchroMeta.getScope(it, scopeID)?.localChecksum })
+        assertNull(db.readTransaction { SynchroMeta.getScope(it, scopeID)?.checksum })
+        assertEquals(provenance, db.query(provenanceQuery, arrayOf(scopeID)))
+        assertEquals("healthy partial value", db.queryOne("SELECT ship_address FROM orders WHERE id = 'healthy-row'")?.get("ship_address"))
+
+        val targetDigest = Integrity.rowDigest(targetHash, localTestTable, historical.pk, historical.serverRow!!, historical.serverVersion)
+        val targetChecksum = Integrity.scopeDigest(targetHash, scopeID, listOf(targetDigest.identity to targetDigest.checksum))
+        val healthyChecksum = Integrity.scopeDigest(targetHash, healthyScopeID, listOf(partialDigest.identity to partialDigest.checksum))
+        pullProcessor.applyScopeChanges(
+            changes = emptyList(), syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf(scopeID to "unverified-terminal", healthyScopeID to "healthy-terminal"),
+            checksums = mapOf(scopeID to targetChecksum, healthyScopeID to healthyChecksum), schemaHash = targetHash,
+        )
+        val invalidated = db.readTransaction { SynchroMeta.getScope(it, scopeID) }!!
+        assertNull(invalidated.cursor)
+        assertNull(invalidated.checksum)
+        assertEquals("", invalidated.localChecksum)
+        assertEquals(generation, invalidated.generation)
+        assertEquals(historical.serverVersion, db.readTransaction { SynchroMeta.getRowVersion(it, "orders", recordID) })
+        val independentlyVerified = db.readTransaction { SynchroMeta.getScope(it, healthyScopeID) }!!
+        assertEquals("healthy-terminal", independentlyVerified.cursor)
+        assertEquals(healthyChecksum, Json.decodeFromString<ChecksumObject>(independentlyVerified.checksum!!))
+        assertEquals(healthyChecksum, Json.decodeFromString<ChecksumObject>(independentlyVerified.localChecksum))
+        assertEquals(ledger, db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(values, db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+        assertEquals(provenance, db.query(provenanceQuery, arrayOf(scopeID)))
+
+        val attempt = pullProcessor.beginScopeRebuild(scopeID, 1, 2, targetHash, 100)
+        val request = RebuildRequest("test-client", attempt.clientGeneration, SchemaRef(2, targetHash), scopeID, attempt.rebuildID, attempt.cursor, attempt.pageLimit)
+        val response = RebuildResponse(
+            scope = scopeID,
+            records = listOf(RebuildRecord(localTestTable.tableID, historical.pk, historical.serverRow!!, targetDigest.checksum, historical.serverVersion)),
+            cursor = null, hasMore = false, finalScopeCursor = "verified-target-final", checksum = targetChecksum,
+        )
+        pullProcessor.applyScopeRebuildPage(attempt, request, rebuildRequestJSON(request), response, rebuildResponseJSON(response), listOf(localTestTable))
+        val rebuilt = db.readTransaction { SynchroMeta.getScope(it, scopeID) }!!
+        assertEquals("verified-target-final", rebuilt.cursor)
+        assertEquals(targetChecksum, Json.decodeFromString<ChecksumObject>(rebuilt.checksum!!))
+        assertEquals(targetChecksum, Json.decodeFromString<ChecksumObject>(rebuilt.localChecksum))
+        assertEquals(independentlyVerified, db.readTransaction { SynchroMeta.getScope(it, healthyScopeID) })
+        assertEquals(ledger, db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(values, db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+        assertEquals(2L, db.readTransaction { SynchroMeta.getInt64(it, MetaKey.SCHEMA_VERSION) })
+        assertEquals(targetHash, db.readTransaction { SynchroMeta.get(it, MetaKey.SCHEMA_HASH) })
+        assertEquals(storageVersion, db.query("PRAGMA user_version"))
+        assertEquals(historical.serverVersion, db.readTransaction { SynchroMeta.getRowVersion(it, "orders", recordID) })
     }
 
     @Test
@@ -1930,7 +2115,7 @@ class PullProcessorTests {
         val (db, processor) = makeTestEnv()
         val scopeID = "orders:user1"
         val recordID = "corrupt-local-row"
-        installCanonicalScopeRow(
+        val canonical = installCanonicalScopeRow(
             db,
             processor,
             scopeID,
@@ -1939,15 +2124,53 @@ class PullProcessorTests {
             serverVersion = "server-v1",
         )
         db.writeSyncLockedTransaction { conn ->
+            val verified = scopeChecksum(scopeID, listOf(recordID to canonical.rowChecksum!!))
+            SynchroMeta.upsertScope(conn, scopeID, "verified-cursor", Json.encodeToString(verified), 7, Json.encodeToString(verified))
+            SynchroMeta.upsertScopeRow(conn, scopeID, "orders", recordID, canonical.rowChecksum!!.digest, 7)
             conn.execSQL(
                 "UPDATE orders SET ship_address = ? WHERE id = ?",
                 arrayOf("corrupt value", recordID),
             )
         }
 
-        assertThrows(SynchroError.InvalidResponse::class.java) {
+        val mismatch = assertThrows(ScopeChecksumMismatchException::class.java) {
             computeScopeChecksum(db, processor, scopeID)
         }
+        assertEquals(scopeID, mismatch.scopeID)
+        val stateQueries = listOf(
+            "SELECT * FROM orders ORDER BY id",
+            "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
+            "SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id",
+            "SELECT * FROM _synchro_row_versions ORDER BY table_name, record_id",
+            "SELECT * FROM _synchro_scope_rows ORDER BY scope_id, table_name, record_id",
+        )
+        val before = stateQueries.map { db.query(it) }
+        // Client contract 766-783 requires scoped rebuild, not acceptance or fatal failure, for local digest mismatch.
+        processor.applyScopeChanges(
+            changes = emptyList(), syncedTables = listOf(localTestTable),
+            scopeCursors = mapOf(scopeID to "unverified-cursor"),
+            checksums = mapOf(scopeID to scopeChecksum(scopeID, listOf(recordID to canonical.rowChecksum!!))),
+            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+        )
+        val invalidated = db.readTransaction { SynchroMeta.getScope(it, scopeID) }!!
+        assertNull(invalidated.cursor)
+        assertNull(invalidated.checksum)
+        assertEquals("", invalidated.localChecksum)
+        assertEquals(7L, invalidated.generation)
+        assertEquals(before, stateQueries.map { db.query(it) })
+
+        db.execute("UPDATE _synchro_scope_rows SET checksum = 'malformed' WHERE scope_id = ?", arrayOf(scopeID))
+        val malformedState = stateQueries.map { db.query(it) }
+        assertThrows(SynchroError.InvalidResponse::class.java) {
+            processor.applyScopeChanges(
+                changes = emptyList(), syncedTables = listOf(localTestTable),
+                scopeCursors = mapOf(scopeID to "must-not-advance"),
+                checksums = mapOf(scopeID to scopeChecksum(scopeID, listOf(recordID to canonical.rowChecksum!!))),
+                schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
+            )
+        }
+        assertEquals(malformedState, stateQueries.map { db.query(it) })
+        assertEquals(invalidated, db.readTransaction { SynchroMeta.getScope(it, scopeID) })
     }
 
     @Test

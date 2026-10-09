@@ -1070,7 +1070,7 @@ internal class SyncEngine(
                     ),
                 )
                 return
-            } catch (_: RebuildChecksumMismatchException) {
+            } catch (_: ScopeChecksumMismatchException) {
                 attempt = restartScopeRebuild(scopeId)
                 nextReplayRequestJSON = null
             } catch (e: RebuildRestartRequiredException) {

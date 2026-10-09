@@ -216,7 +216,7 @@ class Issue49CompleteRequirementProofTests {
             checksum = ChecksumObject("sha256", 1, "hex", "f".repeat(64)),
         )
         val beforeWrongFinal = durableSnapshot(reopened)
-        assertThrows(RebuildChecksumMismatchException::class.java) {
+        assertThrows(ScopeChecksumMismatchException::class.java) {
             restarted.applyScopeRebuildPage(
                 attempt,
                 request,
