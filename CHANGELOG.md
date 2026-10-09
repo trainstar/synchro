@@ -20,7 +20,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 ### Changed
 
-- Swift Package Manager and CocoaPods integrations require GRDB 7.8 or later consistently for native inspection APIs.
+- Swift Package Manager and CocoaPods integrations require GRDB 7.8 or later consistently for native inspection APIs. ([#303](https://github.com/trainstar/synchro/issues/303))
 - React Native applications can use RN 0.82.1 through 0.83.x. RN 0.82.1 iOS applications require the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27. ([#303](https://github.com/trainstar/synchro/issues/303))
 - Breaking: Apple clients require iOS 17 or later. Increase the application deployment target before upgrading. See [client requirements](https://trainstar.github.io/synchro/clients/consumption/). ([#303](https://github.com/trainstar/synchro/issues/303))
 
