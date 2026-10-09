@@ -406,7 +406,20 @@ def android_process(sdk_root: Path, serial: str, avd_name: str) -> tuple[dict[st
         try:
             if process.stat().st_uid != os.getuid():
                 continue
-            for fd in (process / "fd").iterdir():
+            fd_directory = process / "fd"
+            try:
+                descriptors = list(fd_directory.iterdir())
+            except PermissionError:
+                text = run_command(["sudo", "--non-interactive", "ls", "-1", "--", str(fd_directory)], "Android descriptor directory", raw_output=True)
+                names = []
+                if text:
+                    if not text.endswith("\n"):
+                        raise ProbeError("Android descriptor directory is malformed")
+                    names = text[:-1].split("\n")
+                    if any(not re.fullmatch(r"0|[1-9][0-9]*", name) for name in names) or len(names) != len(set(names)):
+                        raise ProbeError("Android descriptor directory is malformed")
+                descriptors = [fd_directory / name for name in names]
+            for fd in descriptors:
                 try:
                     link = os.readlink(fd)
                 except PermissionError:

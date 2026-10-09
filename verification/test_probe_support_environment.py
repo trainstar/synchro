@@ -804,14 +804,94 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             return original(path)
         with mock.patch.object(Path, "iterdir", disappearing):
             self.measure()
-        self.output.unlink()
-        self.identity.unlink()
+        command = ["sudo", "--non-interactive", "ls", "-1", "--", str(self.proc / "321/fd")]
+        def denied(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+            if arguments == command:
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                raise subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error")
+            return self.execute(arguments, **options)
+        self.command.side_effect = denied
         def unreadable(path: Path):
             if path == self.proc / "321/fd":
                 raise PermissionError()
             return original(path)
         with mock.patch.object(Path, "iterdir", unreadable):
             self.rejected()
+        self.assertTrue(any(call.args[0] == command for call in self.command.call_args_list))
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_directories_are_inspected_empty_valid_and_duplicate_owner_rejects(self) -> None:
+        directory = self.proc / "321/fd"
+        unrelated = self.proc / "999/fd"
+        unrelated.mkdir(parents=True)
+        descriptor = unrelated / "0"
+        descriptor.symlink_to("/dev/null")
+        restricted = {directory, unrelated}
+        original = Path.iterdir
+
+        def unreadable(path: Path):
+            if path in restricted:
+                raise PermissionError("private directory details")
+            return original(path)
+
+        def execute(command: list[str], **options: object) -> subprocess.CompletedProcess:
+            if command[:5] == ["sudo", "--non-interactive", "ls", "-1", "--"]:
+                self.assertEqual(len(command), 6)
+                self.assertIn(Path(command[5]), restricted)
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                names = [fd.name for fd in original(Path(command[5]))]
+                text = "".join(name + "\n" for name in names).encode("utf-8")
+                return subprocess.CompletedProcess(command, 0, text, b"private tool diagnostics")
+            return self.execute(command, **options)
+
+        self.command.side_effect = execute
+        with mock.patch.object(Path, "iterdir", unreadable):
+            self.measure()
+            command = ["sudo", "--non-interactive", "ls", "-1", "--", str(directory)]
+            self.assertEqual(sum(call.args[0] == command for call in self.command.call_args_list), 2)
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            descriptor.unlink()
+            self.measure()
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            duplicate = self.process(322)
+            (duplicate / "fd/1").unlink()
+            restricted.add(duplicate / "fd")
+            self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_directory_denial_timeout_and_malformed_names_reject(self) -> None:
+        directory = self.proc / "321/fd"
+        command = ["sudo", "--non-interactive", "ls", "-1", "--", str(directory)]
+        original = Path.iterdir
+        self.output.write_text("previous environment", encoding="utf-8")
+        self.identity.write_text("previous identity", encoding="utf-8")
+
+        def unreadable(path: Path):
+            if path == directory:
+                raise PermissionError("private directory details")
+            return original(path)
+
+        failures = [
+            subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error"),
+            subprocess.TimeoutExpired(command, 30, output=b"private output", stderr=b"private error"),
+            b"\n", b"0", b"0\n\n", b"0\r\n", b"0\r", b"0\n1", b"00\n", b"01\n", b"-1\n", b"+1\n",
+            b" 0\n", b"0 \n", b"0\t\n", b"0\x00\n", b"\xff\n", "١\n".encode("utf-8"),
+            b"../0\n", b"/0\n", b"0/1\n", b"0\\1\n", b"0\n0\n", b"0\n1\n0\n",
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def execute(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+                    if arguments == command:
+                        self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return subprocess.CompletedProcess(arguments, 0, failure, b"private tool diagnostics")
+                    return self.execute(arguments, **options)
+                self.command.side_effect = execute
+                with mock.patch.object(Path, "iterdir", unreadable), mock.patch.object(probe.os, "readlink") as readlink:
+                    self.rejected()
+                    readlink.assert_not_called()
+        self.assertNotIn("private", self.diagnostics.getvalue())
 
     def test_restricted_descriptors_are_inspected_and_duplicate_owner_rejects(self) -> None:
         descriptor = self.proc / "999/fd/0"
