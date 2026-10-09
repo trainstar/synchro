@@ -1174,7 +1174,8 @@ ci-candidate-server:
 		trap 'exit 130' INT; \
 		trap 'exit 143' TERM; \
 		$(MAKE) --no-print-directory local-postgres-start "$$@"; \
-		ADAPTER_TEST_URL="$$(cat "$$state/postgres.url")" $(MAKE) --no-print-directory test-adapter
+		adapter_url="$$(cat "$$state/postgres.url")"; \
+		$(MAKE) --no-print-directory test-adapter ADAPTER_TEST_URL="$$adapter_url"
 	rm -rf "$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)" "$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"
 	$(MAKE) conformance-update-baseline-extension-artifact
 	$(MAKE) test-blackbox
@@ -2536,23 +2537,26 @@ local-postgres-start: build-local-postgres
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
 		exit 1
 
-# Each provisioner cleanup stage has its own deadline, so the stop waits for
-# exit. A forced kill would skip cluster removal and extension restoration.
-# The start time distinguishes the provisioner from a process that reuses its PID.
+# The owned lifecycle command verifies destruction after cluster removal and
+# extension restoration. Retain metadata and logs if cleanup cannot be verified.
 local-postgres-stop:
 	@set -eu; \
-		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
-			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
-			if kill -0 "$$pid" 2>/dev/null; then \
-				started="$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)"; \
-				kill "$$pid"; \
-				while [ -n "$$started" ] && [ "$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)" = "$$started" ]; do sleep 1; done; \
-				 echo "local PostgreSQL provisioner stopped"; \
-			else \
-				echo "local PostgreSQL provisioner is not running"; \
-			fi; \
+		state="$(LOCAL_POSTGRES_STATE_DIR)/lifecycle-state.json"; \
+		if [ -e "$$state" ] || [ -L "$$state" ]; then \
+			run_id="$$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["run_id"])' "$$state")" || { \
+				status=$$?; echo "local PostgreSQL lifecycle state read failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
+			"$(LOCAL_POSTGRES_BINARY)" lifecycle --state-dir "$(LOCAL_POSTGRES_STATE_DIR)" destroy "$$run_id" >/dev/null || { \
+				status=$$?; echo "local PostgreSQL destruction failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
 			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; \
+			echo "local PostgreSQL provisioner stopped"; \
 		else \
+			for metadata in "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; do \
+				if [ -e "$$metadata" ] || [ -L "$$metadata" ]; then \
+					echo "local PostgreSQL lifecycle state is missing. Cannot verify cleanup. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit 1; \
+				fi; \
+			done; \
 			echo "local PostgreSQL provisioner is not running"; \
 		fi
 
