@@ -60,6 +60,8 @@ type transportObservation struct {
 	Sequence                   uint64          `json:"sequence"`
 	OperationClass             string          `json:"operationClass"`
 	StatusCode                 int             `json:"statusCode"`
+	ErrorCode                  *string         `json:"errorCode,omitempty"`
+	Retryable                  *bool           `json:"retryable,omitempty"`
 	DurationNanoseconds        uint64          `json:"durationNanoseconds"`
 	CursorFingerprints         []string        `json:"cursorFingerprints"`
 	CursorFingerprintsComplete *bool           `json:"cursorFingerprintsComplete"`
@@ -778,6 +780,7 @@ func validateWarmConnectConnectRequest(observation transportObservation, fresh b
 func transportObservationsEqual(left, right transportObservation) bool {
 	if left.Sequence != right.Sequence || left.OperationClass != right.OperationClass ||
 		left.StatusCode != right.StatusCode || left.DurationNanoseconds != right.DurationNanoseconds ||
+		!reflect.DeepEqual(left.ErrorCode, right.ErrorCode) || !reflect.DeepEqual(left.Retryable, right.Retryable) ||
 		!reflect.DeepEqual(left.CursorFingerprints, right.CursorFingerprints) ||
 		!reflect.DeepEqual(left.CursorFingerprintsComplete, right.CursorFingerprintsComplete) {
 		return false

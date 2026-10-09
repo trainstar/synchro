@@ -1121,6 +1121,47 @@ describe('SynchroClient', () => {
     );
 
     it.each([
+      { native: { error_code: 'capture_pending', retryable: true }, expected: { errorCode: 'capture_pending', retryable: true } },
+      { native: { error_code: 'future_code' }, expected: { errorCode: 'future_code' } },
+      { native: { retryable: false }, expected: { retryable: false } },
+      { native: {}, expected: {} },
+    ])('preserves optional transport error facts %p', async ({ native, expected }) => {
+      mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+        observations: [{ sequence: 1, operation_class: 'pull', status_code: 503, duration_nanoseconds: 1, ...native }],
+        overflowed: false,
+        sequence_checkpoint: 1,
+      }));
+
+      const { client, inspection } = await makeInspection();
+      await expect(inspection.transportObservations()).resolves.toEqual({
+        observations: [{ sequence: 1, operationClass: 'pull', statusCode: 503, durationNanoseconds: 1, ...expected }],
+        overflowed: false,
+        sequenceCheckpoint: 1,
+      });
+      await client.close();
+    });
+
+    it.each([
+      { error_code: 503 },
+      { error_code: false },
+      { error_code: null },
+      { error_code: {} },
+      { retryable: 'true' },
+      { retryable: 1 },
+      { retryable: null },
+    ])('rejects malformed transport error facts %p', async (facts) => {
+      mockNativeModule.inspectTransportObservations.mockResolvedValueOnce(JSON.stringify({
+        observations: [{ sequence: 1, operation_class: 'pull', status_code: 503, duration_nanoseconds: 1, ...facts }],
+        overflowed: false,
+        sequence_checkpoint: 1,
+      }));
+
+      const { client, inspection } = await makeInspection();
+      await expect(inspection.transportObservations()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+      await client.close();
+    });
+
+    it.each([
       Number.MAX_SAFE_INTEGER + 1,
       -1,
       1.5,

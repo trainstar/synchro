@@ -691,6 +691,14 @@ function parseTransportObservation(value: unknown, index: number): TransportObse
   if (!isRecord(value) || !TRANSPORT_OPERATION_CLASSES.includes(value.operation_class as TransportOperationClass)) {
     throw new InvalidResponseError(`Native bridge returned an invalid ${name}`);
   }
+  const errorCode = value.error_code;
+  if (errorCode !== undefined && typeof errorCode !== 'string') {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name} error code`);
+  }
+  const retryable = value.retryable;
+  if (retryable !== undefined && typeof retryable !== 'boolean') {
+    throw new InvalidResponseError(`Native bridge returned invalid ${name} retryability`);
+  }
   const cursorFingerprints = value.cursor_fingerprints;
   if (cursorFingerprints !== undefined && (!Array.isArray(cursorFingerprints) || !cursorFingerprints.every((item) => typeof item === 'string'))) {
     throw new InvalidResponseError(`Native bridge returned invalid ${name} cursor fingerprints`);
@@ -724,6 +732,8 @@ function parseTransportObservation(value: unknown, index: number): TransportObse
     sequence: requiredSafeInteger(value.sequence, `${name} sequence`),
     operationClass: value.operation_class as TransportOperationClass,
     statusCode: requiredSafeInteger(value.status_code, `${name} status code`),
+    ...(errorCode === undefined ? {} : { errorCode }),
+    ...(retryable === undefined ? {} : { retryable }),
     durationNanoseconds: requiredSafeInteger(value.duration_nanoseconds, `${name} duration`),
     ...(cursorFingerprints === undefined ? {} : { cursorFingerprints: [...cursorFingerprints] as string[] }),
     ...(cursorFingerprintsComplete === undefined ? {} : { cursorFingerprintsComplete }),

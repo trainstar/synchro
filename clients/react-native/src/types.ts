@@ -360,6 +360,8 @@ export interface TransportObservation {
   sequence: number;
   operationClass: TransportOperationClass;
   statusCode: number;
+  errorCode?: string;
+  retryable?: boolean;
   durationNanoseconds: number;
   cursorFingerprints?: string[];
   cursorFingerprintsComplete?: boolean;

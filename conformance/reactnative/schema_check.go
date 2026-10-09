@@ -2424,8 +2424,8 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			return errors.New("M2 original intent is not an unsealed later S2 record")
 		}
 		var proof durableProof
-		if json.Unmarshal(capture.DurableProof, &proof) != nil || proof.RowMetadata == nil || later.BaseVersion == nil || *later.BaseVersion != proof.RowMetadata.ServerVersion {
-			return errors.New("M2 did not retain its actual local base")
+		if json.Unmarshal(capture.DurableProof, &proof) != nil || proof.RowMetadata == nil || later.BaseVersion != nil {
+			return errors.New("dependent M2 has missing row metadata or a fabricated base before M1 reconciliation")
 		}
 	} else if name == "COMMITTED-M1-PAUSED-001" {
 		if c.proofPaused[call.clientKey] != "push" || len(pushes) != 2 {
@@ -2573,7 +2573,7 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			if mutation.AuthoredSchema != expectedSchema {
 				continue
 			}
-			if mutation.Operation != "update" || mutation.TableName != c.tableName || mutation.RecordID != selectors[0]["primary_key"] || mutation.BaseVersion == nil || mutation.Status != "pending" || mutation.SourceKind == "normalized" || mutation.NormalizedMutationID != nil || mutation.SealedBatchID != nil || mutation.SealedOrdinal != nil {
+			if mutation.Operation != "update" || mutation.TableName != c.tableName || mutation.RecordID != selectors[0]["primary_key"] || mutation.BaseVersion == nil && name != "COMMITTED-M2-INTENT-001" || mutation.Status != "pending" || mutation.SourceKind == "normalized" || mutation.NormalizedMutationID != nil || mutation.SealedBatchID != nil || mutation.SealedOrdinal != nil {
 				return errors.New("authored local mutation has the wrong row or base binding")
 			}
 			wantFields := 1
@@ -2966,11 +2966,11 @@ func (c *SchemaCheckCoordinator) validateProofLaterIntent(before, after finalCap
 	if err != nil {
 		return err
 	}
-	if len(prior) != 2 || prior[0].MutationID != predecessorID || prior[0].Status != "sealed" {
+	if len(prior) != 2 || prior[0].MutationID != predecessorID || prior[0].Status != "sealed" || prior[0].BaseVersion == nil {
 		return errors.New("M2 has no captured sealed M1 predecessor")
 	}
 	original := prior[1]
-	if original.SourceKind == "normalized" || original.NormalizedMutationID != nil || original.Status != "pending" || original.SealedBatchID != nil || original.SealedOrdinal != nil || original.BaseVersion == nil || original.DependsOnMutationID == nil || *original.DependsOnMutationID != predecessorID {
+	if original.SourceKind == "normalized" || original.NormalizedMutationID != nil || original.Status != "pending" || original.SealedBatchID != nil || original.SealedOrdinal != nil || original.BaseVersion != nil || original.DependsOnMutationID == nil || *original.DependsOnMutationID != predecessorID {
 		return errors.New("original M2 is not an unsealed singleton with its actual M1 dependency")
 	}
 	if reconciled {
@@ -3012,12 +3012,24 @@ func (c *SchemaCheckCoordinator) validateProofFinalTraffic(trace traceSnapshot, 
 		}
 		version, versionErr := requestInteger(observation, "schema_version")
 		hash, hashErr := requestString(observation, "schema_hash")
-		if validateTraceOperation(observation, "pull") != nil || versionErr != nil || hashErr != nil || version != target.Version || hash != target.Hash || !slices.Equal(observation.CursorFingerprints, []string{installed}) {
-			return errors.New("first target pull did not use the previously installed S2 replacement cursor")
+		if versionErr != nil || hashErr != nil || version != target.Version || hash != target.Hash || observation.CursorFingerprintsComplete == nil || !*observation.CursorFingerprintsComplete || !slices.Equal(observation.CursorFingerprints, []string{installed}) {
+			return errors.New("recovery pull did not use the complete installed S2 replacement binding")
 		}
-		return nil
+		switch observation.StatusCode {
+		case http.StatusOK:
+			if err := validateTraceOperation(observation, "pull"); err != nil {
+				return err
+			}
+			return nil
+		case http.StatusServiceUnavailable:
+			if observation.ErrorCode == nil || *observation.ErrorCode != "capture_pending" || observation.Retryable == nil || !*observation.Retryable || observation.DurationNanoseconds == 0 || observation.DurationNanoseconds > warmConnectMaximumSafeInteger || validateBoundedJSON(observation.RequestFacts, maximumExchangeBytes) != nil || validatePortableRequestIntegers(observation.RequestFacts) != nil {
+				return errors.New("recovery pull did not return a captured retryable capture_pending response")
+			}
+		default:
+			return errors.New("recovery pull failed before its first successful target pull")
+		}
 	}
-	return errors.New("schema proof omitted its first target pull")
+	return errors.New("schema proof omitted its first successful target pull")
 }
 
 func schemaCheckTraceWindow(before, after traceSnapshot) (traceSnapshot, error) {

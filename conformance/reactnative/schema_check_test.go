@@ -325,6 +325,14 @@ func TestSchemaCheckDispatchRejectsWrongActionAndOldCursor(t *testing.T) {
 			trace.Observations[1].Sequence = 2
 			trace.SequenceCheckpoint = 2
 		}},
+		{"prior error code changed", func(trace *traceSnapshot) {
+			code := "capture_pending"
+			trace.Observations[0].ErrorCode = &code
+		}},
+		{"prior retryability changed", func(trace *traceSnapshot) {
+			retryable := true
+			trace.Observations[0].Retryable = &retryable
+		}},
 		{"overflow", func(trace *traceSnapshot) { trace.Overflowed = true }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -722,10 +730,11 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 func TestSchemaProofM2PermitsOnlyValidatedSingletonBaseTransition(t *testing.T) {
 	old, accepted, predecessor, batch, m1Batch := "local-base", "accepted-M1-base", "m1", "m2-batch", "m1-batch"
 	ordinal := uint64(0)
-	original := schemaProofMutation{MutationID: "m2-local", LocalOrder: 2, TableID: "items", TableName: "items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", AuthoredSchema: clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}, BaseVersion: &old, ClientVersion: "client-version", Status: "pending", SourceKind: "application", DependsOnMutationID: &predecessor}
+	original := schemaProofMutation{MutationID: "m2-local", LocalOrder: 2, TableID: "items", TableName: "items", RecordID: "row", PrimaryKeyFieldID: "id", PrimaryKeyLogicalType: "string", Operation: "update", AuthoredSchema: clientSchema{Version: 2, Hash: strings.Repeat("b", 64)}, ClientVersion: "client-version", Status: "pending", SourceKind: "application", DependsOnMutationID: &predecessor}
 	_ = json.Unmarshal([]byte(`[{"fieldID":"note","logicalType":"string","value":"later-note"},{"fieldID":"value","logicalType":"string","value":"42"}]`), &original.AuthoredFields)
 	m1 := original
 	m1.AuthoredFields = nil
+	m1.BaseVersion = &old
 	m1.MutationID, m1.LocalOrder, m1.AuthoredSchema.Version, m1.AuthoredSchema.Hash = predecessor, 1, 1, strings.Repeat("a", 64)
 	m1.DependsOnMutationID, m1.Status, m1.SealedBatchID, m1.SealedOrdinal = nil, "sealed", &m1Batch, &ordinal
 	_ = json.Unmarshal([]byte(`[{"fieldID":"value","logicalType":"string","value":"41"}]`), &m1.AuthoredFields)
@@ -749,13 +758,15 @@ func TestSchemaProofM2PermitsOnlyValidatedSingletonBaseTransition(t *testing.T) 
 	if err := coordinator.validateProofLaterIntent(before, capture([]schemaProofMutation{sealed}), true, accepted, predecessor); err != nil {
 		t.Fatalf("documented singleton reconciliation rejected: %v", err)
 	}
-	for _, name := range []string{"base unchanged", "status changed", "normalization link added", "source changed", "dependency retained", "local order changed", "identity changed", "original record removed", "authored fields changed", "authored field type changed", "authored schema changed", "operation changed", "timestamp changed", "table changed", "physical table changed", "primary key field changed", "primary key type changed", "row changed", "seal absent", "ordinal absent", "ordinal changed", "extra retained record", "predecessor still retained"} {
+	for _, name := range []string{"base unchanged", "predecessor baseline substituted", "status changed", "normalization link added", "source changed", "dependency retained", "local order changed", "identity changed", "original record removed", "authored fields changed", "authored field type changed", "authored schema changed", "operation changed", "timestamp changed", "table changed", "physical table changed", "primary key field changed", "primary key type changed", "row changed", "seal absent", "ordinal absent", "ordinal changed", "extra retained record", "predecessor still retained"} {
 		t.Run(name, func(t *testing.T) {
 			current := sealed
 			current.AuthoredFields = append(sealed.AuthoredFields[:0:0], sealed.AuthoredFields...)
 			records := []schemaProofMutation{current}
 			switch name {
 			case "base unchanged":
+				records[0].BaseVersion = nil
+			case "predecessor baseline substituted":
 				records[0].BaseVersion = &old
 			case "status changed":
 				records[0].Status = "cancelled_before_send"
@@ -808,6 +819,19 @@ func TestSchemaProofM2PermitsOnlyValidatedSingletonBaseTransition(t *testing.T) 
 			}
 			if err := coordinator.validateProofLaterIntent(before, capture(records), true, accepted, predecessor); err == nil {
 				t.Fatal("invalid M2 transition passed")
+			}
+		})
+	}
+	for _, base := range []string{old, accepted} {
+		t.Run("fabricated pending base/"+base, func(t *testing.T) {
+			fabricated := original
+			fabricated.BaseVersion = &base
+			invalid := capture([]schemaProofMutation{m1, fabricated})
+			if err := coordinator.validateProofLaterIntent(invalid, invalid, false, "", predecessor); err == nil {
+				t.Fatal("pending dependent M2 fabricated a base before acknowledgement")
+			}
+			if err := coordinator.validateProofLaterIntent(invalid, capture([]schemaProofMutation{sealed}), true, accepted, predecessor); err == nil {
+				t.Fatal("fabricated pending M2 base passed accepted predecessor reconciliation")
 			}
 		})
 	}
@@ -1008,6 +1032,7 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 					replay.Request = encode(replayRequest)
 					m2 := original
 					m2.AuthoredFields = nil
+					m2.BaseVersion = nil
 					m2.MutationID, m2.LocalOrder, m2.AuthoredSchema, m2.ClientVersion, m2.DependsOnMutationID = "m2", 2, s2, "m2-time", &original.MutationID
 					_ = json.Unmarshal([]byte(`[{"fieldID":"value","logicalType":"string","value":"42"},{"fieldID":"note","logicalType":"string","value":"later-note"}]`), &m2.AuthoredFields)
 					m2Sealed := m2
@@ -1126,6 +1151,70 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 			coordinator, call, capture := newEvidence()
 			if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err != nil {
 				t.Fatalf("valid singleton final rejected: %v", err)
+			}
+			for _, name := range []string{"valid capture_pending retries", "retry cursor changed", "second retry cursor changed", "retry schema version changed", "retry schema hash changed", "retry completeness missing", "retry completeness false", "retry error code missing", "retry error code changed", "retryability missing", "nonretryable response", "unexpected retry status", "retry duration missing", "successful cursor changed", "successful schema changed", "successful completeness missing", "missing successful pull"} {
+				t.Run("recovery traffic/"+name, func(t *testing.T) {
+					coordinator, call, capture := newEvidence()
+					trace, err := captureTraceFromRaw(capture.Trace)
+					if err != nil {
+						t.Fatal(err)
+					}
+					successful := trace.Observations[1]
+					successful.Sequence = 4
+					code, retryable := "capture_pending", true
+					retry := trace.Observations[1]
+					retry.StatusCode, retry.ErrorCode, retry.Retryable, retry.PullResponseFacts = http.StatusServiceUnavailable, &code, &retryable, nil
+					second := retry
+					second.Sequence = 3
+					trace.Observations = []transportObservation{trace.Observations[0], retry, second, successful}
+					switch name {
+					case "retry cursor changed":
+						trace.Observations[1].CursorFingerprints = []string{hashFingerprint("other-cursor")}
+					case "second retry cursor changed":
+						trace.Observations[2].CursorFingerprints = []string{hashFingerprint("other-cursor")}
+					case "retry schema version changed":
+						trace.Observations[1].RequestFacts = encode(map[string]any{"schema_version": 1, "schema_hash": strings.Repeat("b", 64)})
+					case "retry schema hash changed":
+						trace.Observations[1].RequestFacts = encode(map[string]any{"schema_version": 2, "schema_hash": strings.Repeat("a", 64)})
+					case "retry completeness missing":
+						trace.Observations[1].CursorFingerprintsComplete = nil
+					case "retry completeness false":
+						incomplete := false
+						trace.Observations[1].CursorFingerprintsComplete = &incomplete
+					case "retry error code missing":
+						trace.Observations[1].ErrorCode = nil
+					case "retry error code changed":
+						other := "server_busy"
+						trace.Observations[1].ErrorCode = &other
+					case "retryability missing":
+						trace.Observations[1].Retryable = nil
+					case "nonretryable response":
+						terminal := false
+						trace.Observations[1].Retryable = &terminal
+					case "unexpected retry status":
+						trace.Observations[1].StatusCode = http.StatusInternalServerError
+					case "retry duration missing":
+						trace.Observations[1].DurationNanoseconds = 0
+					case "successful cursor changed":
+						trace.Observations[3].CursorFingerprints = []string{hashFingerprint("other-cursor")}
+					case "successful schema changed":
+						trace.Observations[3].RequestFacts = encode(map[string]any{"schema_version": 1, "schema_hash": strings.Repeat("a", 64)})
+					case "successful completeness missing":
+						trace.Observations[3].CursorFingerprintsComplete = nil
+					case "missing successful pull":
+						trace.Observations = trace.Observations[:3]
+					}
+					trace.SequenceCheckpoint = uint64(len(trace.Observations))
+					capture.Trace = encode(trace)
+					err = coordinator.validateProofCapture(call, lane+"-FINAL-001", capture)
+					if name == "valid capture_pending retries" {
+						if err != nil {
+							t.Fatalf("bound capture_pending retries rejected: %v", err)
+						}
+					} else if err == nil {
+						t.Fatal("invalid recovery pull binding passed")
+					}
+				})
 			}
 			for _, name := range []string{"retained accepted record", "extra retained record", "extra accepted outcome", "missing accepted outcome", "substituted accepted identity", "changed stored outcome", "wrong ledger count", "wrong outcome count", "extra push", "latest row metadata changed"} {
 				t.Run("final/"+name, func(t *testing.T) {
