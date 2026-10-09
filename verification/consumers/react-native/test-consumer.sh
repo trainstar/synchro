@@ -224,7 +224,7 @@ abort "consumer Podfile platform was not found" unless content.sub!(/^platform :
 pods = <<~PODS
   target 'SynchroConsumer' do
     pod 'Synchro', :git => '#{synchro_git_url}', :tag => 'v#{version}'
-    pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+    pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
 PODS
 File.write(podfile, content.sub(target, pods))
 RUBY

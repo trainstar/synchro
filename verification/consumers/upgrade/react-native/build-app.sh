@@ -128,7 +128,7 @@ content = File.read(template)
 target = "target 'SynchroUpgrade' do\n"
 abort "application Podfile target was not found" unless content.include?(target)
 abort "application Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '17.0'")
-pods = "#{target}  #{synchro_pod}\n  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'\n"
+pods = "#{target}  #{synchro_pod}\n  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'\n"
 File.write(output, content.sub(target, pods))
 RUBY
     (cd ios && pod install)

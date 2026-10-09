@@ -5,9 +5,9 @@ PODS:
   - FBLazyVector (0.83.10)
   - fmt (12.1.0)
   - glog (0.3.5)
-  - GRDB.swift (7.0.0):
-    - GRDB.swift/standard (= 7.0.0)
-  - GRDB.swift/standard (7.0.0)
+  - GRDB.swift (7.8.0):
+    - GRDB.swift/standard (= 7.8.0)
+  - GRDB.swift/standard (7.8.0)
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
   - hermes-engine/Pre-built (0.14.1)
@@ -2506,7 +2506,7 @@ PODS:
     - SocketRocket
   - SocketRocket (0.7.1)
   - Synchro (0.4.0-rc.2):
-    - GRDB.swift (~> 7.0)
+    - GRDB.swift (~> 7.8)
   - SynchroReactNative (0.4.0-rc.2):
     - boost
     - DoubleConversion
@@ -2604,7 +2604,7 @@ DEPENDENCIES:
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - fmt (from `../node_modules/react-native/third-party-podspecs/fmt.podspec`)
   - glog (from `../node_modules/react-native/third-party-podspecs/glog.podspec`)
-  - GRDB.swift (from `https://github.com/groue/GRDB.swift.git`, tag `v7.0.0`)
+  - GRDB.swift (from `https://github.com/groue/GRDB.swift.git`, tag `v7.8.0`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - RCT-Folly (from `../node_modules/react-native/third-party-podspecs/RCT-Folly.podspec`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
@@ -2702,7 +2702,7 @@ EXTERNAL SOURCES:
     :podspec: "../node_modules/react-native/third-party-podspecs/glog.podspec"
   GRDB.swift:
     :git: https://github.com/groue/GRDB.swift.git
-    :tag: v7.0.0
+    :tag: v7.8.0
   hermes-engine:
     :podspec: "../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec"
     :tag: hermes-v0.14.1
@@ -2856,7 +2856,7 @@ EXTERNAL SOURCES:
 CHECKOUT OPTIONS:
   GRDB.swift:
     :git: https://github.com/groue/GRDB.swift.git
-    :tag: v7.0.0
+    :tag: v7.8.0
 
 SPEC CHECKSUMS:
   boost: 7e761d76ca2ce687f7cc98e698152abd03a18f90
@@ -2865,7 +2865,7 @@ SPEC CHECKSUMS:
   FBLazyVector: 07433c4ab85da44d0b5ceac374ff4e1d57c7aa23
   fmt: 530618a01105dae0fa3a2f27c81ae11fa8f67eac
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
-  GRDB.swift: a0ccf69e5d6dd631d9ae40d933eb624e790f5245
+  GRDB.swift: 682e07f771a9100f0bdf40fd0bed57b83ca08e29
   hermes-engine: f37e1d6f1eb198649a60b3f17b6f685a6ac12470
   RCT-Folly: 121436bcc4611f6bde5c09bf35f0a7a82cef1969
   RCTDeprecation: f05668eea7b0e209e77e8ab1dc6a5e3b342f6f65
@@ -2938,10 +2938,10 @@ SPEC CHECKSUMS:
   ReactCodegen: d90f4973af8a40c3bd7c17a5f1ba9267ef27d744
   ReactCommon: ddccb5fdac38485ab6cf9e2a5099b31d96a42328
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
-  Synchro: a5aaf49b068ab3b2e8ce89a092338677c36d4cf5
+  Synchro: 2bb0ba2de780d09680e24a06e61c218b3a825129
   SynchroReactNative: 3d56f5beb7d0ff597c2f93526cc290d5a467c0d2
   Yoga: d2ed98551adb569fc38be0148666854e1ff60692
 
-PODFILE CHECKSUM: 9d6f3b55725e3006e911cd5b820c5c819b6b1076
+PODFILE CHECKSUM: 0a7cbffdccfcaaa255c32fb1a9dff014dadff003
 
 COCOAPODS: 1.16.2

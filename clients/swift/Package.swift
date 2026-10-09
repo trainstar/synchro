@@ -13,7 +13,7 @@ let package = Package(
         .executable(name: "synchro-native-runner", targets: ["SynchroNativeRunner"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.8.0"),
     ],
     targets: [
         .target(

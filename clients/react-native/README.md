@@ -28,7 +28,7 @@ application `ios/Podfile`:
 
 ```ruby
 pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.2'
-pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
 ```
 
 Then install the pods:
