@@ -5,6 +5,63 @@ import GRDB
 final class InspectionTests: XCTestCase {
     private struct RollbackError: Error {}
 
+    func testAcceptedOutcomeCapturePreservesStoredIdentityRawJSONAndBounds() async throws {
+        let config = try prepareClientConfig()
+        let client = try SynchroClient(config: config)
+        for id in ["o1", "o2"] {
+            _ = try client.execute("INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                params: [id, "authored", "2026-01-01T00:00:00.000000Z"])
+        }
+        let ids = try client.inspectRetainedMutations().map(\.mutationID)
+        XCTAssertEqual(ids.count, 2)
+        let first = " { \"mutation_id\": \"\(ids[0])\", \"marker\": \"é\" }\n"
+        let second = "{\"marker\":\"second\", \"mutation_id\":\"\(ids[1])\"}"
+        try client.database.writeTransaction { db in
+            for (id, outcome) in zip(ids, [first, second]) {
+                try db.execute(sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', accepted_json = ? WHERE mutation_id = ?",
+                    arguments: [outcome, id])
+            }
+        }
+        let before = try client.database.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil)
+        var rows: [String] = []
+        let inspection = SynchroInspection(client: client)
+        let snapshot = try inspection.captureSnapshot(maximumRecords: 8) { _, transaction in
+            rows = try transaction.query("SELECT id FROM orders ORDER BY id").map { $0["id"] }
+            XCTAssertThrowsError(try transaction.execute("UPDATE orders SET title = 'not read only'"))
+        }
+        XCTAssertEqual(rows, ["o1", "o2"])
+        XCTAssertEqual(snapshot.capture.acceptedMutationOutcomes, [ids[0]: first, ids[1]: second])
+        XCTAssertFalse(snapshot.capture.acceptedMutationOutcomesTruncated)
+        XCTAssertEqual(snapshot.capture.mutationLedgerCount, 2)
+        XCTAssertEqual(snapshot.pendingChangeCount, 0)
+        XCTAssertEqual(snapshot.retainedMutations, [])
+        XCTAssertEqual(try client.inspectRetainedMutations(), [])
+        XCTAssertEqual(try client.database.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order", params: nil), before)
+        let countBound = try inspection.captureState(maximumRecords: 1)
+        XCTAssertTrue(countBound.acceptedMutationOutcomesTruncated)
+        XCTAssertEqual(countBound.acceptedMutationOutcomes, [:])
+        let padding = 65_536 - ids.reduce(0) { $0 + $1.utf8.count } - first.utf8.count - second.utf8.count
+        let exact = first + String(repeating: " ", count: padding)
+        try client.database.writeTransaction { try $0.execute(sql: "UPDATE _synchro_pending_changes SET accepted_json = ? WHERE mutation_id = ?", arguments: [exact, ids[0]]) }
+        XCTAssertFalse(try inspection.captureState(maximumRecords: 8).acceptedMutationOutcomesTruncated)
+        XCTAssertEqual(try inspection.captureState(maximumRecords: 8).acceptedMutationOutcomes[ids[0]], exact)
+        for oversized in [exact + " ", String(repeating: "x", count: 4_194_304)] {
+            try client.database.writeTransaction { try $0.execute(sql: "UPDATE _synchro_pending_changes SET accepted_json = ? WHERE mutation_id = ?", arguments: [oversized, ids[0]]) }
+            let capture = try inspection.captureState(maximumRecords: 8)
+            XCTAssertTrue(capture.acceptedMutationOutcomesTruncated)
+            XCTAssertTrue(capture.overflowed)
+            XCTAssertEqual(capture.acceptedMutationOutcomes, [:])
+        }
+        for invalid in [DatabaseValue.null, Data("{}".utf8).databaseValue] {
+            try client.database.writeTransaction { try $0.execute(sql: "UPDATE _synchro_pending_changes SET accepted_json = ? WHERE mutation_id = ?", arguments: [invalid, ids[0]]) }
+            XCTAssertThrowsError(try inspection.captureState(maximumRecords: 8)) { error in
+                guard case SynchroError.invalidResponse = error else { return XCTFail("Expected invalid response") }
+            }
+        }
+        try await client.close()
+        removeDatabase(at: config.dbPath)
+    }
+
     func testRecoveredStartupPauseStopAndCloseDrainWithoutTransport() async throws {
         for closing in [false, true] {
             let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("startup_pause_\(UUID().uuidString).sqlite")
@@ -733,9 +790,14 @@ final class InspectionTests: XCTestCase {
             "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
             params: ["o1", "before", "2026-01-01T00:00:00.000000Z"]
         )
+        let acceptedID = try XCTUnwrap(client.inspectRetainedMutations().first?.mutationID)
+        _ = try client.execute("UPDATE orders SET title = 'updated-before' WHERE id = 'o1'")
+        let beforeOutcome = " { \"mutation_id\": \"\(acceptedID)\", \"marker\": \"before\" }\n"
+        let afterOutcome = beforeOutcome + " \n"
+        try client.database.writeTransaction { try $0.execute(sql: "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', accepted_json = ? WHERE mutation_id = ?", arguments: [beforeOutcome, acceptedID]) }
         let inspection = SynchroInspection(client: client)
         let transition = expectation(description: "transition committed")
-        let trigger = TransitionAfterCommit(pool: client.database.dbPool, committed: transition)
+        let trigger = TransitionAfterCommit(pool: client.database.dbPool, committed: transition, acceptedOutcomeAfter: afterOutcome)
         client.database.dbPool.add(transactionObserver: trigger, extent: .nextTransaction)
 
         var rows: [String] = []
@@ -748,6 +810,7 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(snapshot.capture.applicationRowCount, 1)
         XCTAssertEqual(snapshot.capture.scopeStateCount, 0)
         XCTAssertEqual(snapshot.capture.scopeStates, [])
+        XCTAssertEqual(snapshot.capture.acceptedMutationOutcomes, [acceptedID: beforeOutcome])
         XCTAssertEqual(try XCTUnwrap(snapshot.retainedMutations).map(\.recordID), ["o1"])
 
         var laterRows: [String] = []
@@ -757,6 +820,7 @@ final class InspectionTests: XCTestCase {
         XCTAssertEqual(laterRows, ["o1", "o2"])
         XCTAssertEqual(later.capture.applicationRowCount, 2)
         XCTAssertEqual(later.capture.scopeStates.map(\.scopeID), ["probe-scope"])
+        XCTAssertEqual(later.capture.acceptedMutationOutcomes, [acceptedID: afterOutcome])
 
         try await client.close()
         removeDatabase(at: config.dbPath)
@@ -1243,10 +1307,12 @@ final class InspectionTests: XCTestCase {
 private final class TransitionAfterCommit: TransactionObserver, @unchecked Sendable {
     private let pool: DatabasePool
     private let committed: XCTestExpectation
+    private let acceptedOutcomeAfter: String
 
-    init(pool: DatabasePool, committed: XCTestExpectation) {
+    init(pool: DatabasePool, committed: XCTestExpectation, acceptedOutcomeAfter: String) {
         self.pool = pool
         self.committed = committed
+        self.acceptedOutcomeAfter = acceptedOutcomeAfter
     }
 
     func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool { false }
@@ -1256,6 +1322,7 @@ private final class TransitionAfterCommit: TransactionObserver, @unchecked Senda
     func databaseDidCommit(_ db: Database) {
         pool.asyncWrite({ db in
             try SynchroMeta.setSyncLock(db, locked: true)
+            try db.execute(sql: "UPDATE _synchro_pending_changes SET accepted_json = ? WHERE lifecycle_state = 'accepted'", arguments: [self.acceptedOutcomeAfter])
             try db.execute(sql: "INSERT INTO orders (id, title, updated_at) VALUES ('o2', 'after', '2026-01-02T00:00:00.000000Z')")
             try SynchroMeta.upsertScope(db, scopeID: "probe-scope", cursor: nil, checksum: nil, generation: 1, localChecksum: "")
             try SynchroMeta.setSyncLock(db, locked: false)

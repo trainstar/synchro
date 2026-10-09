@@ -392,6 +392,8 @@ private struct RunnerResult: Encodable {
     var migrationJournalTruncated: Bool? = nil
     var physicalSchema: [PhysicalSchemaColumnInspection]? = nil
     var physicalSchemaTruncated: Bool? = nil
+    var acceptedMutationOutcomes: [String: String]? = nil
+    var acceptedMutationOutcomesTruncated: Bool? = nil
     var scopeStatesTruncated: Bool? = nil
     var scopeRowsTruncated: Bool? = nil
     var rebuildAttemptsTruncated: Bool? = nil
@@ -440,6 +442,8 @@ private struct RunnerResult: Encodable {
         case migrationJournalTruncated = "migration_journal_truncated"
         case physicalSchema = "physical_schema"
         case physicalSchemaTruncated = "physical_schema_truncated"
+        case acceptedMutationOutcomes = "accepted_mutation_outcomes"
+        case acceptedMutationOutcomesTruncated = "accepted_mutation_outcomes_truncated"
         case scopeStatesTruncated = "scope_states_truncated"
         case scopeRowsTruncated = "scope_rows_truncated"
         case rebuildAttemptsTruncated = "rebuild_attempts_truncated"
@@ -1316,6 +1320,8 @@ private final class Runner: @unchecked Sendable {
                 migrationJournalTruncated: counts.migrationJournalTruncated,
                 physicalSchema: counts.physicalSchema,
                 physicalSchemaTruncated: counts.physicalSchemaTruncated,
+                acceptedMutationOutcomes: counts.acceptedMutationOutcomes,
+                acceptedMutationOutcomesTruncated: counts.acceptedMutationOutcomesTruncated,
                 scopeStatesTruncated: counts.scopeStatesTruncated,
                 scopeRowsTruncated: counts.scopeRowsTruncated,
                 rebuildAttemptsTruncated: counts.rebuildAttemptsTruncated,

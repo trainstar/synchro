@@ -70,6 +70,8 @@ export interface ClientStateSnapshotInspection {
   migrationJournalTruncated: boolean;
   physicalSchema: PhysicalSchemaColumnInspection[];
   physicalSchemaTruncated: boolean;
+  acceptedMutationOutcomes: Record<string, string>;
+  acceptedMutationOutcomesTruncated: boolean;
 }
 
 export interface SynchroInspectionOptions {
@@ -97,13 +99,13 @@ export class SynchroInspection {
       }));
       const result = await nativeForInspection(this.client).inspectClientStateSnapshot(statements);
       const snapshot = requireRecord(parseJSON(result.inspection), 'client state snapshot');
-      const migration = parseMigrationCapture(snapshot);
+      const extensions = parseCaptureExtensions(snapshot);
       const clientState = requireRecord(snapshot.client_state, 'client state');
       if (typeof clientState.capture_overflowed !== 'boolean') {
         throw new InvalidResponseError('Native bridge returned invalid capture bound');
       }
       return {
-        ...migration,
+        ...extensions,
         clientState: parseClientStateInspection(clientState),
         captureOverflowed: clientState.capture_overflowed,
         retainedMutations:
@@ -270,8 +272,9 @@ function requirePauseTarget(value: TransportOperationClass | MigrationCheckpoint
   }
 }
 
-function parseMigrationCapture(snapshot: Record<string, unknown>): Pick<ClientStateSnapshotInspection,
-  'migrationJournal' | 'migrationJournalTruncated' | 'physicalSchema' | 'physicalSchemaTruncated'> {
+function parseCaptureExtensions(snapshot: Record<string, unknown>): Pick<ClientStateSnapshotInspection,
+  'migrationJournal' | 'migrationJournalTruncated' | 'physicalSchema' | 'physicalSchemaTruncated' |
+  'acceptedMutationOutcomes' | 'acceptedMutationOutcomesTruncated'> {
   if (typeof snapshot.migration_journal_truncated !== 'boolean' ||
       typeof snapshot.physical_schema_truncated !== 'boolean' || !Array.isArray(snapshot.physical_schema) ||
       snapshot.physical_schema.length > 512) {
@@ -305,11 +308,33 @@ function parseMigrationCapture(snapshot: Record<string, unknown>): Pick<ClientSt
   if (snapshot.migration_journal_truncated && journal !== null) {
     throw new InvalidResponseError('Native bridge returned truncated migration details');
   }
+  const accepted = requireRecord(snapshot.accepted_mutation_outcomes, 'accepted mutation outcomes');
+  const entries = Object.entries(accepted);
+  if (typeof snapshot.accepted_mutation_outcomes_truncated !== 'boolean' || entries.length > 512 ||
+      (snapshot.accepted_mutation_outcomes_truncated && entries.length !== 0)) {
+    throw new InvalidResponseError('Native bridge returned invalid accepted outcome capture');
+  }
+  let acceptedBytes = 0;
+  for (const [id, outcome] of entries) {
+    if (typeof outcome !== 'string') throw new InvalidResponseError('Native bridge returned invalid accepted outcome');
+    for (const text of [id, outcome]) {
+      for (const character of text) {
+        const first = character.charCodeAt(0);
+        if (character.length === 1 && first >= 0xd800 && first <= 0xdfff) {
+          throw new InvalidResponseError('Native bridge returned invalid accepted outcome encoding');
+        }
+        acceptedBytes += character.length === 2 ? 4 : first <= 0x7f ? 1 : first <= 0x7ff ? 2 : 3;
+        if (acceptedBytes > 65_536) throw new InvalidResponseError('Native bridge returned oversized accepted outcomes');
+      }
+    }
+  }
   return {
     migrationJournal: journal as MigrationJournalInspection | null,
     migrationJournalTruncated: snapshot.migration_journal_truncated,
     physicalSchema,
     physicalSchemaTruncated: snapshot.physical_schema_truncated,
+    acceptedMutationOutcomes: accepted as Record<string, string>,
+    acceptedMutationOutcomesTruncated: snapshot.accepted_mutation_outcomes_truncated,
   };
 }
 

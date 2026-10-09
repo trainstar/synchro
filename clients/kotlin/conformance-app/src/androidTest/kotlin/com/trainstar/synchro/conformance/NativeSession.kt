@@ -627,6 +627,10 @@ private class ClientSession(private val context: Context) : Closeable {
                 }
             })
             put("physical_schema_truncated", capture.physicalSchemaTruncated)
+            put("accepted_mutation_outcomes", buildJsonObject {
+                capture.acceptedMutationOutcomes.forEach { (id, outcome) -> put(id, outcome) }
+            })
+            put("accepted_mutation_outcomes_truncated", capture.acceptedMutationOutcomesTruncated)
             scopeStates?.let { put("scope_states", normalizeScopes(it)) }
             scopeRows?.let { put("scope_rows", normalizeScopeRows(it)) }
             metadata?.let { put("row_metadata", normalizeRowMetadata(it)) }

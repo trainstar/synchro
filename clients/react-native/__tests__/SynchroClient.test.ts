@@ -32,6 +32,8 @@ function snapshotResult(clientState: Record<string, unknown>, details: Record<st
       migration_journal_truncated: false,
       physical_schema: [],
       physical_schema_truncated: false,
+      accepted_mutation_outcomes: {},
+      accepted_mutation_outcomes_truncated: false,
       ...details,
     }),
     applicationRows: [],
@@ -830,6 +832,8 @@ describe('SynchroClient', () => {
     );
 
     it('reads client state, retained details, and application rows from one native snapshot', async () => {
+      const acceptedID = '00000000-0000-4000-8000-000000000011';
+      const acceptedRaw = ` { "mutation_id": "${acceptedID}", "marker": "é" }\n`;
       const migrationJournal = {
         source: { version: 1, hash: 'a'.repeat(64) },
         target: { version: 2, hash: 'b'.repeat(64) },
@@ -869,6 +873,7 @@ describe('SynchroClient', () => {
           rejected_mutations: null,
           migration_journal: migrationJournal,
           physical_schema: physicalSchema,
+          accepted_mutation_outcomes: { [acceptedID]: acceptedRaw },
         }),
         applicationRows: [{ id: 'r1', name: 'first' }],
       });
@@ -909,6 +914,8 @@ describe('SynchroClient', () => {
         migrationJournalTruncated: false,
         physicalSchema,
         physicalSchemaTruncated: false,
+        acceptedMutationOutcomes: { [acceptedID]: acceptedRaw },
+        acceptedMutationOutcomesTruncated: false,
       });
       await client.close();
     });
@@ -922,6 +929,13 @@ describe('SynchroClient', () => {
       ['migration_journal_truncated', undefined],
       ['physical_schema', [{ table_name: 'orders', name: 'note', type: 'TEXT', not_null: 'false', primary_key_position: 0 }]],
       ['physical_schema_truncated', undefined],
+      ['accepted_mutation_outcomes', undefined],
+      ['accepted_mutation_outcomes', []],
+      ['accepted_mutation_outcomes', { mutation: 1 }],
+      ['accepted_mutation_outcomes', Object.fromEntries(Array.from({ length: 513 }, (_, index) => [String(index), '{}']))],
+      ['accepted_mutation_outcomes', { mutation: 'é'.repeat(32_768) }],
+      ['accepted_mutation_outcomes_truncated', undefined],
+      ['accepted_mutation_outcomes_truncated', 'false'],
     ])('rejects an invalid snapshot %s member', async (member, value) => {
       mockNativeModule.inspectClientStateSnapshot.mockResolvedValueOnce(snapshotResult({
         schema: null,

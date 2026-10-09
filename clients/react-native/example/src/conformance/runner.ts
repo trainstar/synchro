@@ -144,6 +144,8 @@ export interface ConformanceCapture {
     migration_journal_truncated: boolean;
     physical_schema: PhysicalSchemaColumnInspection[];
     physical_schema_truncated: boolean;
+    accepted_mutation_outcomes: Record<string, string>;
+    accepted_mutation_outcomes_truncated: boolean;
   };
   durable_proof?: RawDurableProof;
   provenance?: ScopeRowInspection[];
@@ -680,6 +682,8 @@ export class PublicConformanceRunner {
             migration_journal_truncated: captured.migrationJournalTruncated,
             physical_schema: captured.physicalSchema,
             physical_schema_truncated: captured.physicalSchemaTruncated,
+            accepted_mutation_outcomes: captured.acceptedMutationOutcomes,
+            accepted_mutation_outcomes_truncated: captured.acceptedMutationOutcomesTruncated,
           };
           break;
         }

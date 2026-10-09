@@ -177,7 +177,9 @@
         { "name": "migrationJournal", "type": { "name": "MigrationJournalInspection", "nullable": true } },
         { "name": "migrationJournalTruncated", "type": { "name": "bool", "nullable": false } },
         { "name": "physicalSchema", "type": { "name": "array", "nullable": false, "element": { "name": "PhysicalSchemaColumnInspection", "nullable": false } } },
-        { "name": "physicalSchemaTruncated", "type": { "name": "bool", "nullable": false } }
+        { "name": "physicalSchemaTruncated", "type": { "name": "bool", "nullable": false } },
+        { "name": "acceptedMutationOutcomes", "type": { "name": "string-map", "nullable": false, "element": { "name": "string", "nullable": false } } },
+        { "name": "acceptedMutationOutcomesTruncated", "type": { "name": "bool", "nullable": false } }
       ]
     },
     {

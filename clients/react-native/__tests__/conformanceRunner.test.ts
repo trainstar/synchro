@@ -60,6 +60,8 @@ function snapshotResult(clientState: Record<string, unknown>, details: Record<st
       migration_journal_truncated: false,
       physical_schema: [],
       physical_schema_truncated: false,
+      accepted_mutation_outcomes: {},
+      accepted_mutation_outcomes_truncated: false,
       ...details,
     }),
     applicationRows: [],
@@ -660,6 +662,8 @@ describe('PublicConformanceRunner call lifecycle', () => {
   });
 
   it('reads every inspection source from one normalized snapshot', async () => {
+    const acceptedID = '00000000-0000-4000-8000-000000000012';
+    const acceptedRaw = ` { "mutation_id": "${acceptedID}", "marker": "stored" }\n`;
     const runner = new PublicConformanceRunner({
       serverURL: 'http://localhost:8091',
       authToken: 'test-token',
@@ -695,9 +699,9 @@ describe('PublicConformanceRunner call lifecycle', () => {
           scope_rows: [],
           rebuild_attempts: [],
           ...CLIENT_STATE_COUNTS,
-          mutation_ledger_count: 1,
+          mutation_ledger_count: 2,
           provenance_maintenance_work_cursor: '0',
-        }, { retained_mutations: [current] }),
+        }, { retained_mutations: [current], accepted_mutation_outcomes: { [acceptedID]: acceptedRaw } }),
         applicationRows: [{ id: 'row-a', name: 'first' }],
       });
 
@@ -716,12 +720,14 @@ describe('PublicConformanceRunner call lifecycle', () => {
           pending_mutations: [wireMutation],
           rejected_mutations: [],
           client_state: {
-            mutationLedgerCount: 1,
+            mutationLedgerCount: 2,
             capture_overflowed: false,
             migration_journal: null,
             migration_journal_truncated: false,
             physical_schema: [],
             physical_schema_truncated: false,
+            accepted_mutation_outcomes: { [acceptedID]: acceptedRaw },
+            accepted_mutation_outcomes_truncated: false,
           },
           provenance: [],
         },

@@ -390,6 +390,7 @@ public final class SynchroClient: @unchecked Sendable {
         let rowMetadataTruncated = rowMetadataCount > maximumRecords
         let migration = try Self.inspectMigrationJournal(db, maximumRecords: maximumRecords)
         let physicalSchema = try Self.inspectPhysicalSchema(db, maximumRecords: maximumRecords, migration: migration)
+        let accepted = try Self.inspectAcceptedMutationOutcomes(db, maximumRecords: maximumRecords)
         return ClientStateCaptureInspection(
             schema: try Self.inspectSchema(db),
             scopeStates: Array(scopeStates.prefix(maximumRecords)),
@@ -408,7 +409,8 @@ public final class SynchroClient: @unchecked Sendable {
                 || rebuildReceiptsTruncated
                 || rowMetadataTruncated
                 || migration.truncated
-                || physicalSchema.truncated,
+                || physicalSchema.truncated
+                || accepted.truncated,
             applicationRowCount: try Self.inspectApplicationRowCount(db),
             mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
             mutationOutcomeCount: try Self.inspectCount(
@@ -427,8 +429,44 @@ public final class SynchroClient: @unchecked Sendable {
             migrationJournal: migration.journal,
             migrationJournalTruncated: migration.truncated,
             physicalSchema: physicalSchema.columns,
-            physicalSchemaTruncated: physicalSchema.truncated
+            physicalSchemaTruncated: physicalSchema.truncated,
+            acceptedMutationOutcomes: accepted.outcomes,
+            acceptedMutationOutcomesTruncated: accepted.truncated
         )
+    }
+
+    private static func inspectAcceptedMutationOutcomes(
+        _ db: GRDB.Database,
+        maximumRecords: Int
+    ) throws -> (outcomes: [String: String], truncated: Bool) {
+        guard let preflight = try Row.fetchOne(db, sql: """
+            SELECT COUNT(*) AS record_count,
+                coalesce(SUM(coalesce(length(CAST(mutation_id AS BLOB)), 0) +
+                             coalesce(length(CAST(accepted_json AS BLOB)), 0)), 0) AS byte_count,
+                coalesce(MIN(typeof(mutation_id) = 'text' AND typeof(accepted_json) = 'text'), 1) AS storage_valid
+            FROM _synchro_pending_changes WHERE lifecycle_state = 'accepted'
+            """) else {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection preflight is missing")
+        }
+        let count = try preflight.decode(Int64.self, forColumn: "record_count")
+        let bytes = try preflight.decode(Int64.self, forColumn: "byte_count")
+        guard try preflight.decode(Bool.self, forColumn: "storage_valid"), count >= 0, bytes >= 0 else {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection storage is invalid")
+        }
+        if count > maximumRecords || bytes > 65_536 { return ([:], true) }
+        var outcomes: [String: String] = [:]
+        do {
+            for row in try Row.fetchAll(db, sql: """
+                SELECT mutation_id, accepted_json FROM _synchro_pending_changes
+                WHERE lifecycle_state = 'accepted' ORDER BY mutation_id
+                """) {
+                let id = try row.decode(String.self, forColumn: "mutation_id")
+                outcomes[id] = try row.decode(String.self, forColumn: "accepted_json")
+            }
+        } catch {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection values are invalid")
+        }
+        return (outcomes, false)
     }
 
     private static func inspectMigrationJournal(

@@ -411,6 +411,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
         val rowMetadataTruncated = rowMetadataCount > maximumRecords
         val migration = inspectMigrationJournal(db, maximumRecords)
         val physicalSchema = inspectPhysicalSchema(db, maximumRecords, migration)
+        val accepted = inspectAcceptedMutationOutcomes(db, maximumRecords)
         val provenanceCount = inspectionCount(
             db,
             "SELECT COUNT(*) FROM (SELECT table_name, record_id FROM _synchro_scope_rows GROUP BY table_name, record_id)",
@@ -431,7 +432,7 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
                 scopeRowsTruncated ||
                 rebuildAttemptsTruncated ||
                 rebuildReceiptsTruncated ||
-                rowMetadataTruncated || migration.second || physicalSchema.second,
+                rowMetadataTruncated || migration.second || physicalSchema.second || accepted.second,
             applicationRowCount = inspectApplicationRowCount(db),
             mutationLedgerCount = inspectionCount(db, "SELECT COUNT(*) FROM _synchro_pending_changes"),
             mutationOutcomeCount = inspectionCount(
@@ -451,7 +452,39 @@ class SynchroClient(private val config: SynchroConfig, context: Context) {
             migrationJournalTruncated = migration.second,
             physicalSchema = physicalSchema.first,
             physicalSchemaTruncated = physicalSchema.second,
+            acceptedMutationOutcomes = accepted.first,
+            acceptedMutationOutcomesTruncated = accepted.second,
         )
+    }
+
+    private fun inspectAcceptedMutationOutcomes(db: SQLiteDatabase, maximumRecords: Int): Pair<Map<String, String>, Boolean> {
+        val preflight = db.rawQuery("""
+            SELECT COUNT(*),
+                coalesce(SUM(coalesce(length(CAST(mutation_id AS BLOB)), 0) +
+                             coalesce(length(CAST(accepted_outcome_json AS BLOB)), 0)), 0),
+                coalesce(MIN(typeof(mutation_id) = 'text' AND typeof(accepted_outcome_json) = 'text'), 1)
+            FROM _synchro_pending_changes WHERE lifecycle_state = 'accepted'
+            """.trimIndent(), null).use { cursor ->
+            if (!cursor.moveToFirst() || cursor.getInt(2) != 1) {
+                throw SynchroError.InvalidResponse("accepted outcome inspection storage is invalid")
+            }
+            cursor.getLong(0) to cursor.getLong(1)
+        }
+        if (preflight.first < 0 || preflight.second < 0) throw SynchroError.InvalidResponse("accepted outcome inspection bounds are invalid")
+        if (preflight.first > maximumRecords || preflight.second > 65_536) return emptyMap<String, String>() to true
+        val outcomes = linkedMapOf<String, String>()
+        db.rawQuery("""
+            SELECT mutation_id, accepted_outcome_json FROM _synchro_pending_changes
+            WHERE lifecycle_state = 'accepted' ORDER BY mutation_id
+            """.trimIndent(), null).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (cursor.getType(0) != android.database.Cursor.FIELD_TYPE_STRING ||
+                    cursor.getType(1) != android.database.Cursor.FIELD_TYPE_STRING
+                ) throw SynchroError.InvalidResponse("accepted outcome inspection values are invalid")
+                outcomes[cursor.getString(0)] = cursor.getString(1)
+            }
+        }
+        return outcomes to false
     }
 
     private fun inspectMigrationJournal(db: SQLiteDatabase, maximumRecords: Int): Pair<MigrationJournalInspection?, Boolean> {

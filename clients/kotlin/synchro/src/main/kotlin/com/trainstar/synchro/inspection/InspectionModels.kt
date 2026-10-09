@@ -87,6 +87,8 @@ data class ClientStateCaptureInspection(
     val migrationJournalTruncated: Boolean = false,
     val physicalSchema: List<PhysicalSchemaColumnInspection> = emptyList(),
     val physicalSchemaTruncated: Boolean = false,
+    val acceptedMutationOutcomes: Map<String, String> = emptyMap(),
+    val acceptedMutationOutcomesTruncated: Boolean = false,
 )
 
 /**

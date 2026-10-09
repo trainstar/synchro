@@ -1641,6 +1641,8 @@ public class SynchroModuleImpl: NSObject {
                 "migration_journal_truncated": snapshot.capture.migrationJournalTruncated,
                 "physical_schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot.capture.physicalSchema)),
                 "physical_schema_truncated": snapshot.capture.physicalSchemaTruncated,
+                "accepted_mutation_outcomes": snapshot.capture.acceptedMutationOutcomes,
+                "accepted_mutation_outcomes_truncated": snapshot.capture.acceptedMutationOutcomesTruncated,
                 "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
                 "rejected_mutations": snapshot.rejectedMutations.map { $0.map(retainedRejectionPayload) } ?? NSNull(),
             ]

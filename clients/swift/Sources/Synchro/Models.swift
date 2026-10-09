@@ -324,6 +324,8 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
     public let migrationJournalTruncated: Bool
     public let physicalSchema: [PhysicalSchemaColumnInspection]
     public let physicalSchemaTruncated: Bool
+    public let acceptedMutationOutcomes: [String: String]
+    public let acceptedMutationOutcomesTruncated: Bool
 
     public init(
         schema: SchemaRef?,
@@ -353,7 +355,9 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
         migrationJournal: MigrationJournalInspection? = nil,
         migrationJournalTruncated: Bool = false,
         physicalSchema: [PhysicalSchemaColumnInspection] = [],
-        physicalSchemaTruncated: Bool = false
+        physicalSchemaTruncated: Bool = false,
+        acceptedMutationOutcomes: [String: String] = [:],
+        acceptedMutationOutcomesTruncated: Bool = false
     ) {
         self.schema = schema
         self.scopeStates = scopeStates
@@ -383,6 +387,8 @@ public struct ClientStateCaptureInspection: Sendable, Equatable {
         self.migrationJournalTruncated = migrationJournalTruncated
         self.physicalSchema = physicalSchema
         self.physicalSchemaTruncated = physicalSchemaTruncated
+        self.acceptedMutationOutcomes = acceptedMutationOutcomes
+        self.acceptedMutationOutcomesTruncated = acceptedMutationOutcomesTruncated
     }
 }
 

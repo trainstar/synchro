@@ -1138,6 +1138,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                     JSONObject(Json.encodeToString(PhysicalSchemaColumnInspection.serializer(), it))
                 }))
                 put("physical_schema_truncated", snapshot.capture.physicalSchemaTruncated)
+                put("accepted_mutation_outcomes", JSONObject(snapshot.capture.acceptedMutationOutcomes))
+                put("accepted_mutation_outcomes_truncated", snapshot.capture.acceptedMutationOutcomesTruncated)
                 put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
                 put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::retainedRejectionJson)) } ?: JSONObject.NULL)
             }
