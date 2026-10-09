@@ -829,8 +829,8 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             if command[:4] == ["sudo", "--non-interactive", "readlink", "--"]:
                 self.assertEqual(len(command), 5)
                 self.assertIn(Path(command[4]), restricted)
-                self.assertEqual(options, {"capture_output": True, "text": True, "check": True, "timeout": 30})
-                return subprocess.CompletedProcess(command, 0, original(command[4]) + "\n", "private tool diagnostics")
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                return subprocess.CompletedProcess(command, 0, original(command[4]).encode("utf-8") + b"\n", b"private tool diagnostics")
             return self.execute(command, **options)
 
         self.command.side_effect = execute
@@ -858,19 +858,19 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             return original(path, *args, **options)
 
         failures = [
-            subprocess.CalledProcessError(1, command, output="private output", stderr="private error"),
-            subprocess.TimeoutExpired(command, 30, output="private output", stderr="private error"),
-            "", "\n", "/dev/null", "/dev/null\n\n", "/dev/null\nother\n", "/dev/null\r\n",
-            "/dev/\x00null\n", "/dev/\tnull\n", "/dev/\x7fnull\n", "/dev/\x85null\n",
+            subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error"),
+            subprocess.TimeoutExpired(command, 30, output=b"private output", stderr=b"private error"),
+            b"", b"\n", b"/dev/null", b"/dev/null\n\n", b"/dev/null\nother\n", b"/dev/null\r\n", b"/dev/null\r",
+            b"/dev/\x00null\n", b"/dev/\tnull\n", b"/dev/\x7fnull\n", b"/dev/\xc2\x85null\n", b"/dev/\xffnull\n",
         ]
         for failure in failures:
             with self.subTest(failure=failure):
                 def execute(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
                     if arguments == command:
-                        self.assertEqual(options, {"capture_output": True, "text": True, "check": True, "timeout": 30})
+                        self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
                         if isinstance(failure, Exception):
                             raise failure
-                        return subprocess.CompletedProcess(arguments, 0, failure, "private tool diagnostics")
+                        return subprocess.CompletedProcess(arguments, 0, failure, b"private tool diagnostics")
                     return self.execute(arguments, **options)
                 self.command.side_effect = execute
                 with mock.patch.object(probe.os, "readlink", unreadable):

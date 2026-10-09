@@ -49,17 +49,18 @@ def device_identity(value: object) -> UUID:
     return UUID(value)
 
 
-def run_command(command: list[str], label: str, *, env: dict[str, str] | None = None) -> str:
+def run_command(command: list[str], label: str, *, env: dict[str, str] | None = None, raw_output: bool = False) -> str:
     try:
         options = {} if env is None else {"env": env}
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=COMMAND_TIMEOUT_SECONDS, **options)
+        result = subprocess.run(command, capture_output=True, text=not raw_output, check=True, timeout=COMMAND_TIMEOUT_SECONDS, **options)
+        stdout = result.stdout.decode("utf-8") if raw_output else result.stdout
     except subprocess.TimeoutExpired:
         raise ProbeError(f"{label} timed out after 30 seconds") from None
     except (subprocess.CalledProcessError, OSError, UnicodeError):
         raise ProbeError(f"{label} command failed") from None
-    if not isinstance(result.stdout, str):
+    if not isinstance(stdout, str):
         raise ProbeError(f"{label} returned invalid text")
-    return result.stdout
+    return stdout
 
 
 def parse_metadata(text: str, label: str) -> Any:
@@ -409,7 +410,7 @@ def android_process(sdk_root: Path, serial: str, avd_name: str) -> tuple[dict[st
                 try:
                     link = os.readlink(fd)
                 except PermissionError:
-                    text = run_command(["sudo", "--non-interactive", "readlink", "--", str(fd)], "Android descriptor link")
+                    text = run_command(["sudo", "--non-interactive", "readlink", "--", str(fd)], "Android descriptor link", raw_output=True)
                     if not text.endswith("\n"):
                         raise ProbeError("Android descriptor link is malformed")
                     link = text[:-1]
