@@ -3772,7 +3772,7 @@ func (p *Platform) clientFor(client Client) (*platformClient, error) {
 }
 
 func (c *platformClient) available(operation string) error {
-	if c.terminated || c.session == nil || c.pendingLoss != nil || c.activeCall != nil {
+	if c.terminated || c.session == nil || c.pendingLoss != nil || c.activeCall != nil && (operation != "apply" || !c.activeCall.paused) {
 		return fmt.Errorf("Kotlin Android client is unavailable for %s", operation)
 	}
 	return nil
