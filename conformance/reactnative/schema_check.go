@@ -2382,8 +2382,8 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if !semanticRawJSONEqual(before.Pending, capture.Pending) {
 			return errors.New("migration recovery changed queued intent")
 		}
-		if journal != nil && journal.Phase == "prepared" {
-			return errors.New("migration recovery left a prepared journal")
+		if journal != nil && ((journal.Phase != "applied" && journal.Phase != "ddl_applied") || journal.Source != priorJournal.Source || journal.Target != priorJournal.Target || journal.Action != priorJournal.Action || !reflect.DeepEqual(journal.Stored, priorJournal.Stored)) {
+			return errors.New("migration recovery changed its validated journal or left it incomplete")
 		}
 	} else if name == "COMMITTED-M1-SEALED-001" {
 		if len(pushes) != 1 {

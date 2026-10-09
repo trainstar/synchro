@@ -1141,8 +1141,8 @@ func recoverSchemaProof(ctx context.Context, scenario scenarios.Scenario, steps 
 			return err
 		}
 		recoveryJournal, err := decodeMigrationJournal(recovered.MigrationJournal)
-		if err != nil || recoveryJournal == nil || recoveryJournal.Phase != "applied" || recoveryJournal.Source != journal.Source || recoveryJournal.Target != journal.Target || !reflect.DeepEqual(recoveryJournal.Stored, journal.Stored) {
-			return errors.New("recovery changed the validated migration journal")
+		if err != nil || recoveryJournal != nil {
+			return errors.New("compatible recovery did not clear its completed migration journal")
 		}
 		if err := requireSchemaProofPhysical(controller, scenario, recovered); err != nil {
 			return err
