@@ -2522,62 +2522,24 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 		if json.Unmarshal(capture.DurableProof, &proof) != nil || proof.RowMetadata == nil || proof.RowMetadata.ServerVersion != version {
 			return errors.New("schema proof final row metadata did not install its own accepted outcome version")
 		}
-		originalNames := []string{"COMMITTED-M1-LOCAL-001", "COMMITTED-M2-INTENT-001"}
 		sealedNames := []string{"COMMITTED-M1-SEALED-001", "COMMITTED-M2-PAUSED-001"}
-		acceptedPushes := []schemaCheckPush{pushes[0]}
+		acceptedPushes := pushes
 		if prepared {
-			originalNames = []string{"PREPARED-INTENT-001"}
 			sealedNames = []string{"PREPARED-PUSH-PAUSED-001"}
-			if c.validateProofPush(pushes[0], s2, s1, nil) != nil {
-				return errors.New("prepared recovered push did not succeed under S2")
-			}
 		} else {
-			if err := c.validateProofReplay(pushes[0], pushes[1], s1, s2); err != nil {
-				return err
-			}
-			acceptedPushes = append(acceptedPushes, pushes[2])
+			acceptedPushes = []schemaCheckPush{pushes[1], pushes[2]}
 		}
 		acceptedIDs := make(map[string]bool, wantOutcomes)
 		for index, push := range acceptedPushes {
-			originals, err := schemaProofMutations(c.proofCaptures[originalNames[index]])
-			if err != nil || len(originals) != index+1 {
-				return errors.New("schema proof original singleton intent capture is incomplete")
+			// Earlier captures validate singleton identity and wire content before storage.
+			sealed, err := schemaProofMutations(c.proofCaptures[sealedNames[index]])
+			if err != nil || len(sealed) != 1 || acceptedIDs[sealed[0].MutationID] {
+				return errors.New("schema proof validated singleton identity capture is incomplete or duplicated")
 			}
-			original := originals[len(originals)-1]
-			if index == 1 {
-				predecessor, err := schemaProofPushMutation(pushes[0])
-				if err != nil {
-					return err
-				}
-				base, err := schemaProofAcceptedVersion(pushes[0].Response)
-				if err != nil {
-					return err
-				}
-				if err := c.validateProofPush(push, s2, s2, &base); err != nil {
-					return err
-				}
-				paused := c.proofCaptures["COMMITTED-M1-PAUSED-001"]
-				if err := c.validateProofLaterIntent(c.proofCaptures[originalNames[index]], paused, false, "", predecessor.MutationID); err != nil {
-					return err
-				}
-				if err := c.validateProofLaterIntent(paused, c.proofCaptures[sealedNames[index]], true, base, predecessor.MutationID); err != nil {
-					return err
-				}
-				original.BaseVersion = &base
-				original.DependsOnMutationID = nil
-			}
-			sealedCapture := c.proofCaptures[sealedNames[index]]
-			sealed, err := schemaProofMutations(sealedCapture)
-			if err != nil || len(sealed) != 1 || !schemaProofSameOriginal(original, sealed[0]) || acceptedIDs[original.MutationID] {
-				return errors.New("schema proof final accepted identity differs from its original singleton intent")
-			}
-			if err := schemaProofWireIntent(push, sealedCapture); err != nil {
+			if err := schemaProofStoredOutcome(state, sealed[0].MutationID, push.Response); err != nil {
 				return err
 			}
-			if err := schemaProofStoredOutcome(state, original.MutationID, push.Response); err != nil {
-				return err
-			}
-			acceptedIDs[original.MutationID] = true
+			acceptedIDs[sealed[0].MutationID] = true
 		}
 		if err := c.validateProofFinalTraffic(trace, s2, lane); err != nil {
 			return err

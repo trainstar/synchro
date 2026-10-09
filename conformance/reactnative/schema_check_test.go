@@ -712,8 +712,7 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 		})
 	}
 	for _, binding := range []struct{ table, primary string }{{"items", "id"}, {"cf_items", "physical_id"}} {
-		changed := *coordinator
-		changed.tableName, changed.primaryKey = binding.table, binding.primary
+		changed := &SchemaCheckCoordinator{tableName: binding.table, primaryKey: binding.primary, proofPhysicalSchemas: coordinator.proofPhysicalSchemas}
 		if err := changed.bindProofPhysicalSchema("schema-v2"); err == nil {
 			t.Fatal("wrong proof subject binding passed")
 		}
@@ -952,7 +951,7 @@ func TestSchemaProofAcceptedOutcomesRequireCompleteNamedStoredEvidence(t *testin
 	}
 }
 
-func TestSchemaProofFinalRequiresOnlyOriginalSingletonAcceptedOutcomes(t *testing.T) {
+func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 	encode := func(value any) json.RawMessage {
 		t.Helper()
 		raw, err := json.Marshal(value)
@@ -1015,10 +1014,7 @@ func TestSchemaProofFinalRequiresOnlyOriginalSingletonAcceptedOutcomes(t *testin
 					m2Sealed.BaseVersion, m2Sealed.DependsOnMutationID, m2Sealed.Status, m2Sealed.SealedBatchID, m2Sealed.SealedOrdinal = &m1Version, nil, "sealed", &m2Batch, &ordinal
 					pushes = []schemaCheckPush{initial, replay, push(m2Sealed, s2, m2Version)}
 					captures["COMMITTED-M1-LOCAL-001"], captures["COMMITTED-M1-SEALED-001"] = pending(original), pending(sealed)
-					captures["COMMITTED-M2-INTENT-001"] = pending(sealed, m2)
-					renewed := sealed
-					renewed.SealedBatchID = &replayRequest.BatchID
-					captures["COMMITTED-M1-PAUSED-001"], captures["COMMITTED-M2-PAUSED-001"] = pending(renewed, m2), pending(m2Sealed)
+					captures["COMMITTED-M2-PAUSED-001"] = pending(m2Sealed)
 					version = m2Version
 				}
 				for _, actual := range pushes {
@@ -1054,29 +1050,94 @@ func TestSchemaProofFinalRequiresOnlyOriginalSingletonAcceptedOutcomes(t *testin
 				if prepared {
 					capture.Rows = []byte(`[{"id":"row","value":"42","note":null},{"id":"sentinel","value":"preserve-local"}]`)
 				}
-				coordinator := &SchemaCheckCoordinator{tableName: "cf_items", primaryKey: "id", runtimeIDs: map[string]json.RawMessage{"schema-v1": encode(s1), "schema-v2": encode(s2), "proof-prepared-row": encode("row"), "proof-committed-row": encode("row")}, proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{s2: columns}, proofCaptures: captures, proxyPushes: map[string][]schemaCheckPush{clientID: pushes}}
+				coordinator := &SchemaCheckCoordinator{tableName: "cf_items", primaryKey: "id", runtimeIDs: map[string]json.RawMessage{"schema-v1": encode(s1), "schema-v2": encode(s2), "proof-prepared-row": encode("row"), "proof-committed-row": encode("row")}, proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{s1: append(append([]physicalSchemaColumn(nil), columns[:2]...), columns[3:]...), s2: columns}, proofCaptures: captures, proxyPushes: map[string][]schemaCheckPush{clientID: pushes}}
 				call := schemaCheckCall{serverSchemaAlias: "schema-v2", step: scenarios.Step{NativeBinding: &scenarios.NativeStepBinding{ClientID: clientID}}}
 				return coordinator, call, capture
 			}
-			coordinator, call, capture := newEvidence()
-			if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err != nil {
-				t.Fatalf("valid singleton final rejected: %v", err)
-			}
-			for _, name := range []string{"retained accepted record", "extra retained record", "extra accepted outcome", "missing accepted outcome", "substituted accepted identity", "changed stored outcome", "wrong ledger count", "wrong outcome count", "extra push", "failed actual push", "original identity changed", "original base changed", "original operation changed", "original timestamp changed", "original normalized link added", "sealed payload changed", "wire operation changed", "wire identity changed"} {
-				t.Run(name, func(t *testing.T) {
+			for _, name := range []string{"valid sealing", "original identity changed", "original base changed", "original operation changed", "original timestamp changed", "original normalized link added", "sealed payload changed", "wire operation changed", "wire identity changed", "failed actual push"} {
+				t.Run("sealing/"+name, func(t *testing.T) {
 					coordinator, call, capture := newEvidence()
-					var state inspectedClientState
-					_ = json.Unmarshal(capture.ClientState, &state)
 					originalName, sealedName := "COMMITTED-M1-LOCAL-001", "COMMITTED-M1-SEALED-001"
 					if prepared {
 						originalName, sealedName = "PREPARED-INTENT-001", "PREPARED-PUSH-PAUSED-001"
 					}
 					originals, _ := schemaProofMutations(coordinator.proofCaptures[originalName])
 					sealed, _ := schemaProofMutations(coordinator.proofCaptures[sealedName])
-					pushes := coordinator.proxyPushes[clientID]
+					var state inspectedClientState
+					_ = json.Unmarshal(capture.ClientState, &state)
+					state.AcceptedMutationOutcomes = map[string]string{}
+					state.MutationLedgerCount, state.MutationOutcomeCount, state.SealedBatchCount = 1, 0, 1
+					if !prepared {
+						_ = json.Unmarshal(coordinator.runtimeIDs["schema-v1"], &state.Schema)
+						state.PhysicalSchema = encode(coordinator.proofPhysicalSchemas[*state.Schema])
+						capture.Rows = []byte(`[{"id":"row","value":"41"},{"id":"sentinel","value":"preserve-local"}]`)
+					}
+					capture.Trace = encode(traceSnapshot{Observations: []transportObservation{}})
+					coordinator.proofPaused = map[string]string{call.clientKey: "push"}
+					pushes := coordinator.proxyPushes[clientID][:1]
 					var wireRequest schemaProofPushRequest
 					_ = json.Unmarshal(pushes[0].Request, &wireRequest)
 					wire, _ := schemaProofPushMutation(pushes[0])
+					switch name {
+					case "original identity changed":
+						originals[0].MutationID = "other-original"
+					case "original base changed":
+						changed := "other-base"
+						originals[0].BaseVersion = &changed
+					case "original operation changed":
+						originals[0].Operation = "delete"
+					case "original timestamp changed":
+						originals[0].ClientVersion = "other-time"
+					case "original normalized link added":
+						changed := "invented-normalized"
+						originals[0].NormalizedMutationID = &changed
+					case "sealed payload changed":
+						sealed[0].AuthoredFields[0].Value = []byte(`"other-value"`)
+					case "wire operation changed":
+						wire.Operation = "delete"
+						wireRequest.Mutations[0] = encode(wire)
+						pushes[0].Request = encode(wireRequest)
+					case "wire identity changed":
+						wire.MutationID = "other-wire"
+						wireRequest.Mutations[0] = encode(wire)
+						pushes[0].Request = encode(wireRequest)
+					case "failed actual push":
+						pushes[0].Status = http.StatusConflict
+					}
+					capture.ClientState = encode(struct {
+						inspectedClientState
+						AcceptedMutationOutcomes map[string]string `json:"accepted_mutation_outcomes"`
+					}{inspectedClientState: state, AcceptedMutationOutcomes: state.AcceptedMutationOutcomes})
+					capture.Pending = encode(sealed)
+					originalCapture := coordinator.proofCaptures[originalName]
+					originalCapture.Pending = encode(originals)
+					coordinator.proofCaptures[originalName] = originalCapture
+					coordinator.proxyPushes[clientID] = pushes
+					err := coordinator.validateProofCapture(call, sealedName, capture)
+					if name == "valid sealing" {
+						if err != nil {
+							t.Fatalf("valid singleton sealing rejected: %v", err)
+						}
+					} else if err == nil {
+						t.Fatal("invalid singleton sealing passed")
+					}
+				})
+			}
+			coordinator, call, capture := newEvidence()
+			if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err != nil {
+				t.Fatalf("valid singleton final rejected: %v", err)
+			}
+			for _, name := range []string{"retained accepted record", "extra retained record", "extra accepted outcome", "missing accepted outcome", "substituted accepted identity", "changed stored outcome", "wrong ledger count", "wrong outcome count", "extra push", "latest row metadata changed"} {
+				t.Run("final/"+name, func(t *testing.T) {
+					coordinator, call, capture := newEvidence()
+					var state inspectedClientState
+					_ = json.Unmarshal(capture.ClientState, &state)
+					sealedName := "COMMITTED-M1-SEALED-001"
+					if prepared {
+						sealedName = "PREPARED-PUSH-PAUSED-001"
+					}
+					sealed, _ := schemaProofMutations(coordinator.proofCaptures[sealedName])
+					pushes := coordinator.proxyPushes[clientID]
 					switch name {
 					case "retained accepted record", "extra retained record":
 						record := sealed[0]
@@ -1106,38 +1167,13 @@ func TestSchemaProofFinalRequiresOnlyOriginalSingletonAcceptedOutcomes(t *testin
 						state.MutationOutcomeCount++
 					case "extra push":
 						pushes = append(pushes, pushes[0])
-					case "failed actual push":
-						pushes[len(pushes)-1].Status = http.StatusConflict
-					case "original identity changed":
-						originals[0].MutationID = "other-original"
-					case "original base changed":
-						changed := "other-base"
-						originals[0].BaseVersion = &changed
-					case "original operation changed":
-						originals[0].Operation = "delete"
-					case "original timestamp changed":
-						originals[0].ClientVersion = "other-time"
-					case "original normalized link added":
-						changed := "invented-normalized"
-						originals[0].NormalizedMutationID = &changed
-					case "sealed payload changed":
-						sealed[0].AuthoredFields[0].Value = []byte(`"other-value"`)
-					case "wire operation changed":
-						wire.Operation = "delete"
-						wireRequest.Mutations[0] = encode(wire)
-						pushes[0].Request = encode(wireRequest)
-					case "wire identity changed":
-						wire.MutationID = "other-wire"
-						wireRequest.Mutations[0] = encode(wire)
-						pushes[0].Request = encode(wireRequest)
+					case "latest row metadata changed":
+						var proof durableProof
+						_ = json.Unmarshal(capture.DurableProof, &proof)
+						proof.RowMetadata.ServerVersion = "other-version"
+						capture.DurableProof = encode(proof)
 					}
 					capture.ClientState = encode(state)
-					originalCapture := coordinator.proofCaptures[originalName]
-					originalCapture.Pending = encode(originals)
-					coordinator.proofCaptures[originalName] = originalCapture
-					sealedCapture := coordinator.proofCaptures[sealedName]
-					sealedCapture.Pending = encode(sealed)
-					coordinator.proofCaptures[sealedName] = sealedCapture
 					coordinator.proxyPushes[clientID] = pushes
 					if err := coordinator.validateProofCapture(call, lane+"-FINAL-001", capture); err == nil {
 						t.Fatal("invalid singleton final passed")
