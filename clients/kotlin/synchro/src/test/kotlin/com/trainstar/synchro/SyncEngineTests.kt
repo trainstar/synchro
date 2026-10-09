@@ -3100,6 +3100,10 @@ class SyncEngineTests {
         var connectCallCount = 0
         var pushCallCount = 0
         val pushBodies = mutableListOf<JsonObject>()
+        val firstTiming = BlockingRetryTiming(1_000L)
+        val restartTiming = BlockingRetryTiming(1_000L)
+        lateinit var persistedBackoff: DurableBackoffRecord
+        lateinit var firstPushBody: JsonObject
 
         val handler: (RecordedRequest) -> MockResponse = { request ->
             val path = request.path ?: ""
@@ -3145,6 +3149,7 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = firstTiming,
             handler = handler,
         )
         try {
@@ -3159,6 +3164,9 @@ class SyncEngineTests {
                 db1.queryOne("SELECT state FROM _synchro_push_batches")?.get("state"),
             )
             assertEquals(1, pushBodies.size)
+            firstPushBody = pushBodies.single()
+            persistedBackoff = requireNotNull(DurableBackoffStore.load(db1))
+            assertEquals(RetryOperation.CONNECTING, persistedBackoff.resumeState)
         } finally {
             engine1.stop()
             db1.close()
@@ -3168,12 +3176,23 @@ class SyncEngineTests {
             dbName = dbName,
             clientID = clientID,
             maxRetryAttempts = 0,
+            retryTiming = restartTiming,
             handler = handler,
         )
         try {
-            val initialSyncCompleted = CountDownLatch(1)
-            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.countDown() }))
-            assertTrue(initialSyncCompleted.await(2, TimeUnit.SECONDS))
+            val initialSyncCompleted = CompletableDeferred<Unit>()
+            engine2.start(SyncOptions(initialSyncCompleted = { initialSyncCompleted.complete(Unit) }))
+            assertEquals(persistedBackoff.nextRetryAtMs, restartTiming.awaitNextSleep(2, TimeUnit.SECONDS))
+            assertEquals(persistedBackoff, DurableBackoffStore.load(db2))
+            assertEquals(1, pushCallCount)
+            assertEquals(listOf(firstPushBody), pushBodies)
+            val batchesBeforeRelease = db2.query("SELECT batch_id, state FROM _synchro_push_batches")
+            assertEquals(1, batchesBeforeRelease.size)
+            assertEquals(firstPushBody.getValue("batch_id").jsonPrimitive.content, batchesBeforeRelease.single()["batch_id"])
+            assertEquals("renewal_required", batchesBeforeRelease.single()["state"])
+            assertFalse(initialSyncCompleted.isCompleted)
+            restartTiming.releaseAt(persistedBackoff.nextRetryAtMs)
+            initialSyncCompleted.await()
 
             assertEquals(2, pushBodies.size)
             assertNotEquals(pushBodies[0]["batch_id"], pushBodies[1]["batch_id"])
