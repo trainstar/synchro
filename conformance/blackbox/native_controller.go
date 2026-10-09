@@ -308,13 +308,7 @@ type nativeAuthoredTable struct {
 	Fields            []nativeAuthoredField `json:"fields"`
 }
 
-type nativeAuthoredField struct {
-	FieldID    string `json:"field_id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	PrimaryKey bool   `json:"primary_key"`
-	Writable   bool   `json:"writable"`
-}
+type nativeAuthoredField = scenarios.QueueReplaySchemaField
 
 type nativeAuthoredRelation struct {
 	Relation               string   `json:"relation"`
@@ -2014,6 +2008,7 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 		nextFields[field.FieldID] = field
 	}
 	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored string
+	var added *nativeAuthoredField
 	for authoredField, physicalField := range current.FieldNames {
 		if _, retained := nextFields[authoredField]; !retained {
 			if removedPhysical != "" {
@@ -2023,13 +2018,14 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 			removedAuthored = authoredField
 		}
 	}
-	for _, field := range payload.Tables[0].Fields {
+	for index, field := range payload.Tables[0].Fields {
 		runtimeFieldID, retained := current.Fields[field.FieldID]
 		if !retained {
-			if addedPhysical != "" {
+			if added != nil {
 				return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
 			}
 			addedPhysical = field.Name
+			added = &payload.Tables[0].Fields[index]
 			continue
 		}
 		runtimeField, found := runtimeFields[runtimeFieldID]
@@ -2047,11 +2043,11 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 	if (removedPhysical == "" && addedPhysical == "" && changedPhysical == "") ||
 		(removedPhysical != "" && removedPhysical == addedPhysical) ||
 		(removedPhysical != "" && !validSchemaTransitionColumn(removedPhysical)) ||
-		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) ||
+		(added != nil && !validSchemaTransitionColumn(addedPhysical)) ||
 		(changedPhysical != "" && (!validSchemaTransitionColumn(changedPhysical) || changedPhysical == removedPhysical || changedPhysical == addedPhysical)) {
 		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
 	}
-	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical, changedPhysical, changedType); err != nil {
+	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, added, changedPhysical, changedType); err != nil {
 		return nativeTableBinding{}, err
 	}
 	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])
