@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
@@ -149,22 +150,189 @@ type rebuildAttempt struct {
 }
 
 type inspectedClientState struct {
-	Schema                          *clientSchema      `json:"schema"`
-	ScopeStates                     []clientScopeState `json:"scopeStates"`
-	ScopeRows                       []clientScopeRow   `json:"scopeRows"`
-	RebuildAttempts                 []rebuildAttempt   `json:"rebuildAttempts"`
-	ApplicationRowCount             uint64             `json:"applicationRowCount"`
-	MutationLedgerCount             uint64             `json:"mutationLedgerCount"`
-	MutationOutcomeCount            uint64             `json:"mutationOutcomeCount"`
-	SealedBatchCount                uint64             `json:"sealedBatchCount"`
-	RejectedMutationCount           uint64             `json:"rejectedMutationCount"`
-	ScopeStateCount                 uint64             `json:"scopeStateCount"`
-	ScopeRowCount                   uint64             `json:"scopeRowCount"`
-	ProvenanceCount                 uint64             `json:"provenanceCount"`
-	RowMetadataCount                uint64             `json:"rowMetadataCount"`
-	RebuildAttemptCount             uint64             `json:"rebuildAttemptCount"`
-	RebuildReceiptCount             uint64             `json:"rebuildReceiptCount"`
-	ProvenanceMaintenanceWorkCursor string             `json:"provenanceMaintenanceWorkCursor"`
+	Schema                            *clientSchema      `json:"schema"`
+	ScopeStates                       []clientScopeState `json:"scopeStates"`
+	ScopeRows                         []clientScopeRow   `json:"scopeRows"`
+	RebuildAttempts                   []rebuildAttempt   `json:"rebuildAttempts"`
+	ApplicationRowCount               uint64             `json:"applicationRowCount"`
+	MutationLedgerCount               uint64             `json:"mutationLedgerCount"`
+	MutationOutcomeCount              uint64             `json:"mutationOutcomeCount"`
+	SealedBatchCount                  uint64             `json:"sealedBatchCount"`
+	RejectedMutationCount             uint64             `json:"rejectedMutationCount"`
+	ScopeStateCount                   uint64             `json:"scopeStateCount"`
+	ScopeRowCount                     uint64             `json:"scopeRowCount"`
+	ProvenanceCount                   uint64             `json:"provenanceCount"`
+	RowMetadataCount                  uint64             `json:"rowMetadataCount"`
+	RebuildAttemptCount               uint64             `json:"rebuildAttemptCount"`
+	RebuildReceiptCount               uint64             `json:"rebuildReceiptCount"`
+	ProvenanceMaintenanceWorkCursor   string             `json:"provenanceMaintenanceWorkCursor"`
+	MigrationJournal                  json.RawMessage    `json:"migration_journal,omitempty"`
+	MigrationJournalTruncated         *bool              `json:"migration_journal_truncated,omitempty"`
+	PhysicalSchema                    json.RawMessage    `json:"physical_schema,omitempty"`
+	PhysicalSchemaTruncated           *bool              `json:"physical_schema_truncated,omitempty"`
+	CaptureOverflowed                 *bool              `json:"capture_overflowed,omitempty"`
+	ScopeStatesTruncated              *bool              `json:"scope_states_truncated,omitempty"`
+	ScopeRowsTruncated                *bool              `json:"scope_rows_truncated,omitempty"`
+	RebuildAttemptsTruncated          *bool              `json:"rebuild_attempts_truncated,omitempty"`
+	RebuildReceiptsTruncated          *bool              `json:"rebuild_receipts_truncated,omitempty"`
+	RowMetadataTruncated              *bool              `json:"row_metadata_truncated,omitempty"`
+	AcceptedMutationOutcomes          map[string]string  `json:"accepted_mutation_outcomes,omitempty"`
+	AcceptedMutationOutcomesTruncated *bool              `json:"accepted_mutation_outcomes_truncated,omitempty"`
+}
+
+func (state inspectedClientState) requireCompleteAcceptedOutcomes() error {
+	if state.AcceptedMutationOutcomes == nil || state.AcceptedMutationOutcomesTruncated == nil || *state.AcceptedMutationOutcomesTruncated || len(state.AcceptedMutationOutcomes) > 512 {
+		return errors.New("accepted mutation outcome capture is missing or truncated")
+	}
+	size := 0
+	for id, raw := range state.AcceptedMutationOutcomes {
+		size += len(id) + len(raw)
+		if id == "" || len(id) > 256 || size > 65_536 {
+			return errors.New("accepted mutation outcome capture is out of bounds")
+		}
+		var outcome struct {
+			MutationID    string        `json:"mutation_id"`
+			Status        string        `json:"status"`
+			OutcomeSchema *clientSchema `json:"outcome_schema"`
+			ServerVersion string        `json:"server_version"`
+		}
+		if jsonstrict.Decode([]byte(raw), &outcome) != nil || outcome.MutationID != id || outcome.Status != "applied" || outcome.OutcomeSchema == nil || outcome.OutcomeSchema.Version == 0 || !validLowerHexDigest(outcome.OutcomeSchema.Hash) || outcome.ServerVersion == "" {
+			return errors.New("accepted mutation outcome has an invalid exact mutation identity")
+		}
+	}
+	return nil
+}
+
+type migrationJournalCapture struct {
+	Source clientSchema      `json:"source"`
+	Target clientSchema      `json:"target"`
+	Action string            `json:"action"`
+	Phase  string            `json:"phase"`
+	Stored map[string]string `json:"stored"`
+}
+
+func decodeMigrationJournal(raw json.RawMessage) (*migrationJournalCapture, error) {
+	if isJSONNull(raw) {
+		return nil, nil
+	}
+	var value struct {
+		Source *struct {
+			Version *uint64 `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"source"`
+		Target *struct {
+			Version *uint64 `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"target"`
+		Action *string             `json:"action"`
+		Phase  *string             `json:"phase"`
+		Stored *map[string]*string `json:"stored"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(raw) != nil || decoder.Decode(&value) != nil || value.Source == nil || value.Target == nil || value.Source.Version == nil || value.Source.Hash == nil || value.Target.Version == nil || value.Target.Hash == nil || value.Action == nil || value.Phase == nil || value.Stored == nil {
+		return nil, errors.New("migration journal capture is incomplete or invalid")
+	}
+	if *value.Source.Version > warmConnectMaximumSafeInteger || (*value.Source.Version == 0) != (*value.Source.Hash == "") || *value.Source.Version > 0 && !validLowerHexDigest(*value.Source.Hash) || *value.Target.Version == 0 || *value.Target.Version > warmConnectMaximumSafeInteger || !validLowerHexDigest(*value.Target.Hash) || (*value.Action != "replace" && *value.Action != "rebuild_local") {
+		return nil, errors.New("migration journal capture header is invalid")
+	}
+	keys := []string{"journal_version", "target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json", "migration_plan_version", "migration_plan_json", "migration_plan_hash"}
+	switch len(*value.Stored) {
+	case 8:
+		keys = append(keys, "is_schema_reset")
+		if *value.Phase != "prepared" && *value.Phase != "applied" {
+			return nil, errors.New("Swift migration journal phase is invalid")
+		}
+	case 9:
+		keys = append(keys, "target_tables_json", "reset_materialization")
+		if *value.Phase != "prepared" && *value.Phase != "ddl_applied" && *value.Phase != "awaiting_rebuild" {
+			return nil, errors.New("Kotlin migration journal phase is invalid")
+		}
+	default:
+		return nil, errors.New("migration journal stored fields are invalid")
+	}
+	stored := make(map[string]string, len(keys))
+	size := len(*value.Action) + len(*value.Phase) + len(*value.Source.Hash) + len(*value.Target.Hash)
+	for _, key := range keys {
+		text, found := (*value.Stored)[key]
+		if !found || text == nil {
+			return nil, errors.New("migration journal stored field is absent or invalid")
+		}
+		size += len(*text)
+		stored[key] = *text
+	}
+	if size > 65_536 {
+		return nil, errors.New("migration journal capture is out of bounds")
+	}
+	return &migrationJournalCapture{Source: clientSchema{Version: *value.Source.Version, Hash: *value.Source.Hash}, Target: clientSchema{Version: *value.Target.Version, Hash: *value.Target.Hash}, Action: *value.Action, Phase: *value.Phase, Stored: stored}, nil
+}
+
+type physicalSchemaColumn struct {
+	TableName          string `json:"table_name"`
+	Name               string `json:"name"`
+	Type               string `json:"type"`
+	NotNull            bool   `json:"not_null"`
+	PrimaryKeyPosition uint64 `json:"primary_key_position"`
+}
+
+func decodePhysicalSchema(raw json.RawMessage) ([]physicalSchemaColumn, error) {
+	var values []struct {
+		TableName          *string `json:"table_name"`
+		Name               *string `json:"name"`
+		Type               *string `json:"type"`
+		NotNull            *bool   `json:"not_null"`
+		PrimaryKeyPosition *uint64 `json:"primary_key_position"`
+	}
+	wrapped := append(append([]byte(`{"columns":`), raw...), '}')
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(wrapped) != nil || decoder.Decode(&values) != nil || values == nil || len(values) > 512 {
+		return nil, errors.New("physical schema capture is absent or out of bounds")
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return nil, errors.New("physical schema capture contains trailing JSON")
+	}
+	columns := make([]physicalSchemaColumn, 0, len(values))
+	seen := make(map[[2]string]bool, len(values))
+	size := 0
+	for _, value := range values {
+		if value.TableName == nil || value.Name == nil || value.Type == nil || value.NotNull == nil || value.PrimaryKeyPosition == nil || *value.TableName == "" || *value.Name == "" || *value.PrimaryKeyPosition > 512 {
+			return nil, errors.New("physical schema column is incomplete or invalid")
+		}
+		key := [2]string{*value.TableName, *value.Name}
+		if seen[key] {
+			return nil, errors.New("physical schema column is duplicated")
+		}
+		seen[key] = true
+		size += len(*value.TableName) + len(*value.Name) + len(*value.Type)
+		columns = append(columns, physicalSchemaColumn{TableName: *value.TableName, Name: *value.Name, Type: *value.Type, NotNull: *value.NotNull, PrimaryKeyPosition: *value.PrimaryKeyPosition})
+	}
+	if size > 65_536 {
+		return nil, errors.New("physical schema capture is out of bounds")
+	}
+	return columns, nil
+}
+
+func (state inspectedClientState) validateMigrationCapture() error {
+	if len(state.MigrationJournal) == 0 && state.MigrationJournalTruncated == nil && len(state.PhysicalSchema) == 0 && state.PhysicalSchemaTruncated == nil {
+		return nil
+	}
+	if len(state.MigrationJournal) == 0 || state.MigrationJournalTruncated == nil || len(state.PhysicalSchema) == 0 || state.PhysicalSchemaTruncated == nil {
+		return errors.New("migration capture fields are incomplete")
+	}
+	if _, err := decodeMigrationJournal(state.MigrationJournal); err != nil {
+		return err
+	}
+	_, err := decodePhysicalSchema(state.PhysicalSchema)
+	return err
+}
+
+func (state inspectedClientState) requireCompleteMigrationCapture() error {
+	if state.CaptureOverflowed == nil || *state.CaptureOverflowed || len(state.MigrationJournal) == 0 || state.MigrationJournalTruncated == nil || *state.MigrationJournalTruncated || len(state.PhysicalSchema) == 0 || state.PhysicalSchemaTruncated == nil || *state.PhysicalSchemaTruncated {
+		return errors.New("migration capture is missing or truncated")
+	}
+	return state.validateMigrationCapture()
 }
 
 type durableMetadata struct {
@@ -729,7 +897,9 @@ func decodeConnectResponseFacts(data json.RawMessage) (connectResponseFacts, err
 		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
 		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
 	}
-	if validateBoundedJSON(data, maximumExchangeBytes) != nil || jsonstrict.Decode(data, &raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if validateBoundedJSON(data, maximumExchangeBytes) != nil || decoder.Decode(&raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
 		return connectResponseFacts{}, errors.New("React Native connect response facts are incomplete or invalid")
 	}
 	switch *raw.Action {
@@ -858,6 +1028,9 @@ func decodeClientState(raw json.RawMessage) (inspectedClientState, error) {
 	var state inspectedClientState
 	if err := jsonstrict.Decode(raw, &state); err != nil || state.Schema == nil {
 		return inspectedClientState{}, errors.New("React Native client state is invalid")
+	}
+	if err := state.validateMigrationCapture(); err != nil {
+		return inspectedClientState{}, err
 	}
 	if state.Schema.Version == 0 || state.Schema.Version > warmConnectMaximumSafeInteger || len(state.Schema.Hash) != 64 ||
 		state.ProvenanceMaintenanceWorkCursor == "" {
