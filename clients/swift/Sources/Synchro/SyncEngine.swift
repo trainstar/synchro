@@ -1267,7 +1267,7 @@ final class SyncEngine: @unchecked Sendable {
                     rebuildID: attempt.rebuildID
                 )))
                 return
-            } catch is RebuildChecksumMismatchError {
+            } catch is ScopeChecksumMismatchError {
                 attempt = try restartScopeRebuild(scopeID: scopeID)
                 replayRequestBody = nil
             } catch let error as RebuildRestartRequiredError {

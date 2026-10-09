@@ -1,7 +1,7 @@
 import Foundation
 @preconcurrency import GRDB
 
-struct RebuildChecksumMismatchError: Error, Sendable, Equatable {
+struct ScopeChecksumMismatchError: Error, Sendable, Equatable {
     let scopeID: String
 }
 
@@ -218,14 +218,39 @@ final class PullProcessor: @unchecked Sendable {
                     continue
                 }
                 let nextCursor = scopeCursors[scopeID] ?? existingScope.cursor
-                let localChecksum = try computeScopeChecksum(
-                    db: db,
-                    scopeID: scopeID,
-                    schemaHash: schemaHash,
-                    tablesByName: tablesByName
-                )
-                if let serverChecksum = checksumMap[scopeID] {
-                    try serverChecksum.validate()
+                let serverChecksum = checksumMap[scopeID]
+                try serverChecksum?.validate()
+                if serverChecksum == nil && existingScope.localChecksum.isEmpty {
+                    try SynchroMeta.upsertScope(
+                        db,
+                        scopeID: scopeID,
+                        cursor: nextCursor,
+                        checksum: nil,
+                        generation: existingScope.generation,
+                        localChecksum: ""
+                    )
+                    continue
+                }
+                let localChecksum: ChecksumObject
+                do {
+                    localChecksum = try computeScopeChecksum(
+                        db: db,
+                        scopeID: scopeID,
+                        schemaHash: schemaHash,
+                        tablesByName: tablesByName
+                    )
+                } catch let mismatch as ScopeChecksumMismatchError where mismatch.scopeID == scopeID {
+                    try SynchroMeta.upsertScope(
+                        db,
+                        scopeID: scopeID,
+                        cursor: nil,
+                        checksum: nil,
+                        generation: existingScope.generation,
+                        localChecksum: ""
+                    )
+                    continue
+                }
+                if let serverChecksum {
                     let localChecksumJSON = try checksumJSON(localChecksum)
                     let serverChecksumJSON = try checksumJSON(serverChecksum)
                     if localChecksum == serverChecksum {
@@ -465,6 +490,7 @@ final class PullProcessor: @unchecked Sendable {
             }
 
             var protectedRecordIDsByTable: [String: Set<String>] = [:]
+            var protectedDeletesByTable: [String: Set<String>] = [:]
             var requestedRecordIDsByTable: [String: Set<String>] = [:]
             var protectionKeys: [(tableName: String, recordID: String)] = []
             protectionKeys.reserveCapacity(pageRecords.count)
@@ -487,22 +513,44 @@ final class PullProcessor: @unchecked Sendable {
                 let protectedRows = try Row.fetchAll(
                     db,
                     sql: """
-                        WITH requested(table_name, record_id) AS (VALUES \(values))
-                        SELECT pending.table_name, pending.record_id
-                        FROM _synchro_pending_changes AS pending
-                        JOIN requested
-                          ON requested.table_name = pending.table_name
-                         AND requested.record_id = pending.record_id
-                        WHERE pending.lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
-                        UNION
-                        SELECT rejected.table_name, rejected.record_id
-                        FROM _synchro_rejected_mutations AS rejected
-                        JOIN requested
-                          ON requested.table_name = rejected.table_name
-                         AND requested.record_id = rejected.record_id
-                        WHERE rejected.status = 'rejected_terminal'
-                          AND rejected.server_row_json IS NULL
-                          AND rejected.server_version IS NULL
+                        WITH requested(table_name, record_id) AS (VALUES \(values)),
+                        protected AS (
+                            SELECT pending.table_name, pending.record_id, pending.operation, pending.local_order
+                            FROM _synchro_pending_changes AS pending
+                            JOIN requested
+                              ON requested.table_name = pending.table_name
+                             AND requested.record_id = pending.record_id
+                            WHERE pending.lifecycle_state IN ('unsealed', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
+                            UNION ALL
+                            SELECT rejected.table_name, rejected.record_id, pending.operation, pending.local_order
+                            FROM _synchro_rejected_mutations AS rejected
+                            JOIN requested
+                              ON requested.table_name = rejected.table_name
+                             AND requested.record_id = rejected.record_id
+                            LEFT JOIN _synchro_pending_changes AS pending ON pending.mutation_id = rejected.mutation_id
+                            WHERE rejected.status = 'rejected_terminal'
+                              AND rejected.server_row_json IS NULL
+                              AND rejected.server_version IS NULL
+                        )
+                        SELECT candidate.table_name, candidate.record_id, candidate.operation
+                        FROM protected AS candidate
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM protected AS newer
+                            WHERE newer.table_name = candidate.table_name
+                              AND newer.record_id = candidate.record_id
+                              AND newer.local_order IS NOT NULL
+                              AND (candidate.local_order IS NULL OR newer.local_order > candidate.local_order)
+                        )
+                          AND NOT EXISTS (
+                            SELECT 1 FROM _synchro_pending_changes AS resolved
+                            LEFT JOIN _synchro_rejected_mutations AS outcome
+                              ON outcome.mutation_id = resolved.mutation_id
+                            WHERE resolved.table_name = candidate.table_name
+                              AND resolved.record_id = candidate.record_id
+                              AND (candidate.local_order IS NULL OR resolved.local_order > candidate.local_order)
+                              AND (resolved.lifecycle_state = 'accepted'
+                                   OR (resolved.lifecycle_state = 'rejected' AND outcome.status = 'conflict'))
+                        )
                         """,
                     arguments: StatementArguments(arguments)
                 )
@@ -510,15 +558,18 @@ final class PullProcessor: @unchecked Sendable {
                     let tableName: String = row["table_name"]
                     let recordID: String = row["record_id"]
                     protectedRecordIDsByTable[tableName, default: []].insert(recordID)
+                    if row["operation"] as String? == "delete" {
+                        protectedDeletesByTable[tableName, default: []].insert(recordID)
+                    }
                 }
             }
 
             var upsertStatements: [String: Statement] = [:]
             for pageRecord in pageRecords {
-                // Protection keeps an existing local row. A protected record without
-                // a local row, such as one a reset could not keep, gets the server row.
+                // A delete protects absence. A reset-dropped write still needs its server row.
                 let protected = try protectedRecordIDsByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
-                    && Self.hasLocalRow(db, schema: pageRecord.schema, recordID: pageRecord.recordID)
+                    && (protectedDeletesByTable[pageRecord.schema.tableName]?.contains(pageRecord.recordID) == true
+                        || Self.hasLocalRow(db, schema: pageRecord.schema, recordID: pageRecord.recordID))
                 if !protected {
                     let statement: Statement
                     if let existing = upsertStatements[pageRecord.schema.tableName] {
@@ -631,7 +682,7 @@ final class PullProcessor: @unchecked Sendable {
         )
         try checksum.validate()
         guard localChecksum == checksum else {
-            throw RebuildChecksumMismatchError(scopeID: attempt.scopeID)
+            throw ScopeChecksumMismatchError(scopeID: attempt.scopeID)
         }
 
         try SynchroMeta.upsertScope(
@@ -838,6 +889,8 @@ final class PullProcessor: @unchecked Sendable {
                 schemaHash: schema.hash,
                 tablesByName: tablesByName
             ) == expectedChecksum
+        } catch is ScopeChecksumMismatchError {
+            return false
         } catch is SynchroError {
             return false
         } catch is IntegrityError {
@@ -1283,15 +1336,19 @@ final class PullProcessor: @unchecked Sendable {
                 entries.append((identity: computed.identity, digest: computed.checksum))
                 continue
             }
-            if Self.checksumObject(metadata.rowChecksum) == computed.checksum {
-                entries.append(try Self.storedScopeDigestEntry(
-                    table: table,
-                    recordID: scopeRow.recordID,
-                    checksum: scopeRow.checksum
-                ))
+            guard let rowChecksum = Self.checksumObject(metadata.rowChecksum) else {
+                throw SynchroError.invalidResponse(message: "scope row has no valid row checksum")
+            }
+            let storedEntry = try Self.storedScopeDigestEntry(
+                table: table,
+                recordID: scopeRow.recordID,
+                checksum: scopeRow.checksum
+            )
+            if rowChecksum == computed.checksum {
+                entries.append(storedEntry)
                 continue
             }
-            throw SynchroError.invalidResponse(message: "scope row checksum does not match local row")
+            throw ScopeChecksumMismatchError(scopeID: scopeID)
         }
         return try Integrity.scopeDigest(schemaHash: schemaHash, scopeID: scopeID, entries: entries)
     }

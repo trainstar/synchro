@@ -25,7 +25,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 ### Fixed
 
-- Native clients reject inconsistent migration journals and retain unfinished scope rebuild work during schema changes. Native clients preserve pending local edits and deletes when compatible schema changes replace cursors. ([#331](https://github.com/trainstar/synchro/issues/331))
+- Native clients reject inconsistent migration journals and retain unfinished scope rebuild work during schema changes. Native clients preserve pending local edits and deletes when compatible schema changes replace cursors. Native clients rebuild only the affected scope after a local checksum mismatch. ([#331](https://github.com/trainstar/synchro/issues/331))
 - Kotlin clients preserve rows when fields become nullable and support required-field additions without invented defaults. ([#331](https://github.com/trainstar/synchro/issues/331))
 
 ## [0.4.0-rc.1] - 2026-10-01

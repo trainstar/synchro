@@ -29,12 +29,12 @@ final class PullProcessorTests: XCTestCase {
         ]
     )
 
-    private func makeTestEnv() throws -> (SynchroDatabase, PullProcessor) {
+    private func makeTestEnv(additionalTables: [LocalSchemaTable] = []) throws -> (SynchroDatabase, PullProcessor) {
         let tmpDir = NSTemporaryDirectory()
         let path = (tmpDir as NSString).appendingPathComponent("synchro_test_\(UUID().uuidString).sqlite")
         let db = try SynchroDatabase(path: path)
         let manager = SchemaManager(database: db)
-        let schema = SchemaResponse(schemaVersion: 1, schemaHash: protocolTestSchemaHash, serverTime: Date(), tables: [testTable])
+        let schema = SchemaResponse(schemaVersion: 1, schemaHash: protocolTestSchemaHash, serverTime: Date(), tables: [testTable] + additionalTables)
         try manager.createSyncedTables(schema: schema)
         return (db, PullProcessor(database: db))
     }
@@ -742,20 +742,21 @@ final class PullProcessorTests: XCTestCase {
             }
             let provenanceBefore = try db.query("SELECT * FROM _synchro_scope_rows", params: nil)
 
-            XCTAssertThrowsError(try processor.applyScopeChanges(
+            // 02-client-contract.mdx:766-783 requires scoped rebuild after local integrity mismatch.
+            try processor.applyScopeChanges(
                 changes: [],
                 syncedTables: [testTable.localSchema],
                 scopeCursors: [scopeID: "unverified-cursor"],
                 checksums: nil,
                 schemaHash: targetSchemaHash
-            )) { error in
-                guard case SynchroError.invalidResponse = error else {
-                    return XCTFail("Expected retained row integrity rejection")
-                }
+            )
+            try db.readTransaction { conn in
+                let invalidated = try XCTUnwrap(SynchroMeta.getScope(conn, scopeID: scopeID))
+                XCTAssertNil(invalidated.cursor)
+                XCTAssertNil(invalidated.checksum)
+                XCTAssertEqual(invalidated.localChecksum, "")
+                XCTAssertEqual(invalidated.generation, before?.generation)
             }
-            XCTAssertEqual(try db.readTransaction { conn in
-                try SynchroMeta.getScope(conn, scopeID: scopeID)
-            }, before)
 
             try processor.applyScopeChanges(
                 changes: [],
@@ -1215,7 +1216,7 @@ final class PullProcessorTests: XCTestCase {
             responseBody: try rebuildResponseBody(response),
             syncedTables: [testTable.localSchema]
         )) { error in
-            XCTAssertTrue(error is RebuildChecksumMismatchError)
+            XCTAssertTrue(error is ScopeChecksumMismatchError)
         }
 
         XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["atomic-row"]))
@@ -1441,7 +1442,12 @@ final class PullProcessorTests: XCTestCase {
     }
 
     func testRebuildPageAndPruningPreserveProtectedProjectionAndCleanStaleRows() throws {
-        let (db, processor) = try makeTestEnv()
+        let hardDeleteTable = SchemaTable(
+            tableName: "hard_orders", updatedAtColumn: "updated_at", deletedAtColumn: "",
+            primaryKey: ["id"], columns: testTable.columns.filter { $0.name != "deleted_at" }
+        )
+        let tables = [testTable, hardDeleteTable]
+        let (db, processor) = try makeTestEnv(additionalTables: [hardDeleteTable])
         let scopeID = "orders:user1"
         try addScopeRow(db, scopeID: scopeID, recordID: "protected", generation: 0)
         try addScopeRow(db, scopeID: scopeID, recordID: "stale", generation: 0)
@@ -1450,10 +1456,58 @@ final class PullProcessorTests: XCTestCase {
         try addPendingIntent(db, table: testTable, recordID: "protected", state: "sealed")
         // A reset can leave a protected record without a local row (#267).
         try addPendingIntent(db, table: testTable, recordID: "missing", state: "blocked_by_predecessor")
+        let initialVersion = "2026-01-01T00:00:00.000000Z"
+        for recordID in ["hard-pending", "hard-rejected", "hard-replaced"] {
+            let row: [String: AnyCodable] = [
+                "id": AnyCodable(recordID), "ship_address": AnyCodable("before"),
+                "updated_at": AnyCodable(initialVersion),
+            ]
+            let checksum = try Integrity.rowDigest(
+                schemaHash: protocolTestSchemaHash, table: hardDeleteTable,
+                pk: ["id": AnyCodable(recordID)], row: row, serverVersion: initialVersion
+            ).checksum
+            try db.writeSyncLockedTransaction { connection in
+                try connection.execute(
+                    sql: "INSERT INTO hard_orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
+                    arguments: [recordID, "before", initialVersion]
+                )
+                try SynchroMeta.upsertRowVersion(
+                    connection, tableName: hardDeleteTable.tableName, recordID: recordID,
+                    serverVersion: initialVersion, rowChecksum: checksum
+                )
+                try SynchroMeta.upsertScopeRow(
+                    connection, scopeID: scopeID, tableName: hardDeleteTable.tableName,
+                    recordID: recordID, checksum: checksum.digest, generation: 0
+                )
+            }
+            _ = try db.execute("DELETE FROM hard_orders WHERE id = ?", params: [recordID])
+            XCTAssertNil(try db.queryOne("SELECT id FROM hard_orders WHERE id = ?", params: [recordID]))
+            let tracker = ChangeTracker(database: db)
+            let sent = try XCTUnwrap(tracker.pendingChanges().first { $0.recordID == recordID })
+            XCTAssertEqual(sent.operation, "delete")
+            if recordID != "hard-pending" {
+                let rejected = try makeRejectedMutation(
+                    mutationID: sent.mutationID, schema: hardDeleteTable,
+                    pk: ["id": AnyCodable(recordID)], status: .rejectedTerminal, code: .policyRejected
+                )
+                _ = try PushProcessor(database: db, changeTracker: tracker).applyRejected(
+                    rejected: [rejected], syncedTables: tables, sentPending: [sent.mutationID: sent]
+                )
+            }
+        }
+        // A later write replaces deletion intent, but a reset can remove its row.
+        _ = try db.execute(
+            "INSERT INTO hard_orders (id, ship_address, updated_at) VALUES (?, ?, ?)",
+            params: ["hard-replaced", "later-local", initialVersion]
+        )
+        try db.writeSyncLockedTransaction { connection in
+            try connection.execute(sql: "DELETE FROM hard_orders WHERE id = ?", arguments: ["hard-replaced"])
+        }
         let ledgerBefore = try db.query(
-            "SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order",
+            "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
             params: nil
         )
+        let rejectionsBefore = try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil)
 
         let attempt = try processor.beginScopeRebuild(
             scopeID: scopeID,
@@ -1461,27 +1515,31 @@ final class PullProcessorTests: XCTestCase {
             schemaVersion: 1,
             schemaHash: protocolTestSchemaHash,
             pageLimit: 100,
-            syncedTables: [testTable.localSchema]
+            syncedTables: tables
         )
         let serverVersion = "2026-01-02T00:00:00.000000Z"
         var records: [RebuildRecord] = []
         var entries: [(identity: Data, digest: ChecksumObject)] = []
-        for id in ["missing", "protected"] {
-            let serverRow: [String: AnyCodable] = [
+        for (schema, id) in [(testTable, "missing"), (testTable, "protected"),
+                             (hardDeleteTable, "hard-pending"), (hardDeleteTable, "hard-rejected"),
+                             (hardDeleteTable, "hard-replaced")] {
+            var serverRow: [String: AnyCodable] = [
                 "id": AnyCodable(id),
                 "ship_address": AnyCodable("server"),
                 "updated_at": AnyCodable(serverVersion),
-                "deleted_at": AnyCodable(NSNull()),
             ]
+            if let deletedAtFieldID = schema.deletedAtFieldID {
+                serverRow[deletedAtFieldID] = AnyCodable(NSNull())
+            }
             let rowDigest = try Integrity.rowDigest(
                 schemaHash: protocolTestSchemaHash,
-                table: testTable,
+                table: schema,
                 pk: ["id": AnyCodable(id)],
                 row: serverRow,
                 serverVersion: serverVersion
             )
             records.append(RebuildRecord(
-                table: testTable.tableID,
+                table: schema.tableID,
                 pk: ["id": AnyCodable(id)],
                 row: serverRow,
                 rowChecksum: rowDigest.checksum,
@@ -1512,7 +1570,7 @@ final class PullProcessorTests: XCTestCase {
             requestBody: try rebuildRequestBody(firstRequest),
             response: firstResponse,
             responseBody: try rebuildResponseBody(firstResponse),
-            syncedTables: [testTable.localSchema]
+            syncedTables: tables
         )
         let checksum = try Integrity.scopeDigest(
             schemaHash: protocolTestSchemaHash,
@@ -1542,25 +1600,41 @@ final class PullProcessorTests: XCTestCase {
             requestBody: try rebuildRequestBody(finalRequest),
             response: finalResponse,
             responseBody: try rebuildResponseBody(finalResponse),
-            syncedTables: [testTable.localSchema]
+            syncedTables: tables
         )
 
         let protected = try db.queryOne("SELECT ship_address FROM orders WHERE id = 'protected'", params: nil)
         XCTAssertEqual(protected?["ship_address"] as String?, "local")
         let missing = try db.queryOne("SELECT ship_address FROM orders WHERE id = 'missing'", params: nil)
         XCTAssertEqual(missing?["ship_address"] as String?, "server")
+        XCTAssertNil(try db.queryOne("SELECT id FROM hard_orders WHERE id = ?", params: ["hard-pending"]))
+        XCTAssertNil(try db.queryOne("SELECT id FROM hard_orders WHERE id = ?", params: ["hard-rejected"]))
+        XCTAssertEqual(try db.queryOne(
+            "SELECT ship_address FROM hard_orders WHERE id = ?", params: ["hard-replaced"]
+        )?["ship_address"] as String?, "server")
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_rejected_mutations ORDER BY mutation_id", params: nil), rejectionsBefore)
         XCTAssertEqual(
             try db.query(
-                "SELECT mutation_id, record_id, lifecycle_state FROM _synchro_pending_changes ORDER BY local_order",
+                "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
                 params: nil
             ),
             ledgerBefore
         )
         XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = 'stale'", params: nil))
         XCTAssertEqual(
-            try db.query("SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ?", params: [scopeID]).map { $0["record_id"] as String? },
-            ["missing", "protected"]
+            try db.query("SELECT record_id FROM _synchro_scope_rows WHERE scope_id = ? ORDER BY record_id", params: [scopeID]).map { $0["record_id"] as String? },
+            ["hard-pending", "hard-rejected", "hard-replaced", "missing", "protected"]
         )
+        try db.readTransaction { connection in
+            let scope = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: scopeID))
+            XCTAssertEqual(scope.cursor, "scope_cursor_20")
+            XCTAssertEqual(try JSONDecoder.synchroDecoder().decode(
+                ChecksumObject.self, from: Data(try XCTUnwrap(scope.checksum).utf8)
+            ), checksum)
+            for recordID in ["hard-pending", "hard-rejected", "hard-replaced"] {
+                XCTAssertEqual(try SynchroMeta.getRowVersion(connection, tableName: hardDeleteTable.tableName, recordID: recordID), serverVersion)
+            }
+        }
     }
 
     func testRebuildPageBatchesMixedProtectionAcrossChunkBoundary() throws {
@@ -1903,6 +1977,125 @@ final class PullProcessorTests: XCTestCase {
         try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
 
         XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), initialScopeChecksum)
+
+        _ = try db.execute("UPDATE orders SET ship_address = ? WHERE id = ?", params: ["later-local", recordID])
+        let historicalSent = try XCTUnwrap(tracker.pendingChanges().first)
+        let targetHash = String(repeating: "f", count: 64)
+        try SchemaManager(database: db).reconcileLocalSchema(
+            schemaVersion: 2, schemaHash: targetHash, tables: [testTable],
+            scopeCursorUpdates: [scopeID: "target-before-replay"]
+        )
+        let replayVersion = "2026-01-03T00:00:00.000000Z"
+        let replayRow = orderRow(recordID: recordID, shipAddress: "replayed-server", updatedAt: replayVersion)
+        let historicalAccepted = try makeAcceptedMutation(
+            mutationID: historicalSent.mutationID, schema: testTable,
+            pk: ["id": AnyCodable(recordID)], status: .applied,
+            serverRow: replayRow, serverVersion: replayVersion
+        )
+        _ = try PushProcessor(database: db, changeTracker: tracker).applyAccepted(
+            accepted: [historicalAccepted], syncedTables: [testTable],
+            sentPending: [historicalSent.mutationID: historicalSent]
+        )
+        XCTAssertTrue(try tracker.pendingChanges().isEmpty)
+        let historicalOutcomeBefore = try db.query(
+            "SELECT accepted_json FROM _synchro_pending_changes WHERE mutation_id = ?",
+            params: [historicalSent.mutationID]
+        )
+        let partialVersion = "2026-01-04T00:00:00.000000Z"
+        let partialRow = orderRow(recordID: "partial-row", shipAddress: "partial-server", updatedAt: partialVersion)
+        let partialDigest = try Integrity.rowDigest(
+            schemaHash: targetHash, table: testTable,
+            pk: ["id": AnyCodable("partial-row")], row: partialRow, serverVersion: partialVersion
+        )
+        var corruptedRow = partialRow
+        corruptedRow["ship_address"] = AnyCodable("corrupted")
+        let corruptChange = ChangeRecord(
+            scope: scopeID, table: testTable.tableID, op: .upsert,
+            pk: ["id": AnyCodable("partial-row")], row: corruptedRow,
+            rowChecksum: partialDigest.checksum, serverVersion: partialVersion
+        )
+        XCTAssertThrowsError(try pullProcessor.applyScopeChanges(
+            changes: [corruptChange], syncedTables: [testTable],
+            scopeCursors: [scopeID: "corrupt-after"], checksums: nil, schemaHash: targetHash
+        )) { error in
+            guard case SynchroError.invalidResponse = error else {
+                return XCTFail("Incoming row corruption must remain a strict error")
+            }
+        }
+        XCTAssertEqual(try db.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor }, "target-before-replay")
+        XCTAssertNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["partial-row"]))
+        let partialChange = ChangeRecord(
+            scope: scopeID, table: testTable.tableID, op: .upsert,
+            pk: ["id": AnyCodable("partial-row")], row: partialRow,
+            rowChecksum: partialDigest.checksum, serverVersion: partialVersion
+        )
+        try pullProcessor.applyScopeChanges(
+            changes: [partialChange], syncedTables: [testTable],
+            scopeCursors: [scopeID: "target-partial"], checksums: nil, schemaHash: targetHash
+        )
+        try db.readTransaction { connection in
+            let scope = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: scopeID))
+            XCTAssertEqual(scope.cursor, "target-partial")
+            XCTAssertNil(scope.checksum)
+            XCTAssertEqual(scope.localChecksum, "")
+            XCTAssertEqual(scope.generation, 0)
+        }
+        let replayDigest = try Integrity.rowDigest(
+            schemaHash: targetHash, table: testTable,
+            pk: ["id": AnyCodable(recordID)], row: replayRow, serverVersion: replayVersion
+        )
+        let targetScopeChecksum = try Integrity.scopeDigest(
+            schemaHash: targetHash, scopeID: scopeID,
+            entries: [(identity: replayDigest.identity, digest: replayDigest.checksum),
+                      (identity: partialDigest.identity, digest: partialDigest.checksum)]
+        )
+        let rowsBeforeTerminal = try db.query("SELECT * FROM orders ORDER BY id", params: nil)
+        let provenanceBeforeTerminal = try db.query("SELECT * FROM _synchro_scope_rows ORDER BY record_id", params: nil)
+        try pullProcessor.applyScopeChanges(
+            changes: [], syncedTables: [testTable],
+            scopeCursors: [scopeID: "unverified-terminal"],
+            checksums: [scopeID: targetScopeChecksum], schemaHash: targetHash
+        )
+        try db.readTransaction { connection in
+            let scope = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: scopeID))
+            XCTAssertNil(scope.cursor)
+            XCTAssertNil(scope.checksum)
+            XCTAssertEqual(scope.localChecksum, "")
+            XCTAssertEqual(scope.generation, 0)
+        }
+        XCTAssertEqual(try db.query("SELECT * FROM orders ORDER BY id", params: nil), rowsBeforeTerminal)
+        XCTAssertEqual(try db.query("SELECT * FROM _synchro_scope_rows ORDER BY record_id", params: nil), provenanceBeforeTerminal)
+
+        let attempt = try pullProcessor.beginScopeRebuild(
+            scopeID: scopeID, clientGeneration: 1, schemaVersion: 2,
+            schemaHash: targetHash, pageLimit: 100, syncedTables: [testTable]
+        )
+        let request = RebuildRequest(
+            clientID: "test-client", clientGeneration: 1,
+            schema: SchemaRef(version: 2, hash: targetHash), scope: scopeID,
+            rebuildID: attempt.rebuildID, cursor: nil, limit: 100
+        )
+        let response = RebuildResponse(
+            scope: scopeID,
+            records: [
+                RebuildRecord(table: testTable.tableID, pk: ["id": AnyCodable(recordID)], row: replayRow,
+                              rowChecksum: replayDigest.checksum, serverVersion: replayVersion),
+                RebuildRecord(table: testTable.tableID, pk: ["id": AnyCodable("partial-row")], row: partialRow,
+                              rowChecksum: partialDigest.checksum, serverVersion: partialVersion),
+            ],
+            cursor: nil, hasMore: false, finalScopeCursor: "rebuilt-target-cursor", checksum: targetScopeChecksum
+        )
+        _ = try pullProcessor.applyScopeRebuildPage(
+            attempt: attempt, request: request, requestBody: try rebuildRequestBody(request),
+            response: response, responseBody: try rebuildResponseBody(response), syncedTables: [testTable]
+        )
+        XCTAssertEqual(try localScopeChecksum(db, scopeID: scopeID), targetScopeChecksum)
+        XCTAssertEqual(try db.readTransaction { try SynchroMeta.getScope($0, scopeID: scopeID)?.cursor }, "rebuilt-target-cursor")
+        XCTAssertEqual(try db.query(
+            "SELECT accepted_json FROM _synchro_pending_changes WHERE mutation_id = ?",
+            params: [historicalSent.mutationID]
+        ), historicalOutcomeBefore)
+        XCTAssertTrue(try tracker.pendingChanges().isEmpty)
     }
 
     func testTerminalChecksumUsesStoredScopeChecksumAfterRowlessConflictBeforeEcho() throws {
@@ -2018,14 +2211,51 @@ final class PullProcessorTests: XCTestCase {
                 arguments: ["mutated", recordID]
             )
         }
-
-        XCTAssertThrowsError(
-            try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)
-        ) { error in
-            guard case SynchroError.invalidResponse(let message) = error else {
-                return XCTFail("expected InvalidResponse")
+        let validScopeID = "orders:valid"
+        let validChecksum = try installCanonicalScopeRow(
+            db, scopeID: validScopeID, recordID: "valid-row", shipAddress: "valid",
+            serverVersion: "2026-01-01T00:00:00.000000Z"
+        )
+        let rowsBefore = try db.query("SELECT * FROM orders ORDER BY id", params: nil)
+        let pendingBefore = try ChangeTracker(database: db).inspectPendingMutations()
+        // 02-client-contract.mdx:766-783 requires scoped rebuild, not unverified checksum acceptance.
+        try pullProcessor.applyScopeChanges(
+            changes: [],
+            syncedTables: [testTable],
+            scopeCursors: [scopeID: "unverified-after", validScopeID: "valid-after"],
+            checksums: [scopeID: initialScopeChecksum, validScopeID: validChecksum],
+            schemaHash: protocolTestSchemaHash
+        )
+        try db.readTransaction { connection in
+            let invalidated = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: scopeID))
+            XCTAssertNil(invalidated.cursor)
+            XCTAssertNil(invalidated.checksum)
+            XCTAssertEqual(invalidated.localChecksum, "")
+            XCTAssertEqual(invalidated.generation, 0)
+            let valid = try XCTUnwrap(SynchroMeta.getScope(connection, scopeID: validScopeID))
+            XCTAssertEqual(valid.cursor, "valid-after")
+            XCTAssertEqual(try JSONDecoder.synchroDecoder().decode(
+                ChecksumObject.self, from: Data(try XCTUnwrap(valid.checksum).utf8)
+            ), validChecksum)
+        }
+        XCTAssertEqual(try db.query("SELECT * FROM orders ORDER BY id", params: nil), rowsBefore)
+        XCTAssertEqual(try ChangeTracker(database: db).inspectPendingMutations(), pendingBefore)
+        XCTAssertThrowsError(try db.readTransaction { connection in
+            try PullProcessor.recomputeScopeChecksum(
+                db: connection, scopeID: scopeID, schemaHash: protocolTestSchemaHash,
+                tablesByName: [testTable.tableName: testTable]
+            )
+        }) { XCTAssertEqual($0 as? ScopeChecksumMismatchError, ScopeChecksumMismatchError(scopeID: scopeID)) }
+        try db.writeTransaction { connection in
+            try connection.execute(
+                sql: "UPDATE _synchro_row_versions SET row_checksum = ? WHERE record_id = ?",
+                arguments: ["invalid-checksum", recordID]
+            )
+        }
+        XCTAssertThrowsError(try applyTerminalScopeChecksum(pullProcessor, scopeID: scopeID, checksum: initialScopeChecksum)) { error in
+            guard case SynchroError.invalidResponse = error else {
+                return XCTFail("Malformed stored metadata must remain a strict error")
             }
-            XCTAssertEqual(message, "scope row checksum does not match local row")
         }
     }
 
