@@ -248,6 +248,7 @@ RUBY
         CODE_SIGNING_ALLOWED=NO \
         DEBUG_INFORMATION_FORMAT=dwarf \
         build
+      rm -rf "$work_dir/device-derived-data"
       set --
       if [ "$mode" = "smoke" ]; then
         set -- -destination "platform=iOS Simulator,id=$simulator_udid"
