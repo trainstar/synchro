@@ -118,7 +118,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         elif name == "avdmanager":
             config = Path(options["env"]["ANDROID_AVD_HOME"]) / f"{command[command.index('-n') + 1]}.avd/config.ini"
             config.parent.mkdir(exist_ok=True)
-            config.write_text("hw.cpu.ncore=8\nhw.ramSize=2048\n")
+            config.write_text("hw.cpu.ncore=8\nhw.ramSize=2048\ndisk.dataPartition.size=800M\n")
         elif name == "adb":
             if command[-2:] == ["server", "nodaemon"]:
                 polls = self.adb_server_polls
@@ -191,7 +191,7 @@ class EmulatorRunnerTests(unittest.TestCase):
             str(self.manager.with_name("avdmanager")), "create", "avd", "--force", "-n", "Synchro_Kotlin_API_34",
             "--package", "system-images;android-34;google_apis;x86_64", "--device", "pixel_2",
         ])
-        self.assertEqual((self.root / "logs/avd/Synchro_Kotlin_API_34.avd/config.ini").read_text(), "hw.ramSize=2048\nhw.cpu.ncore=2\n")
+        self.assertEqual((self.root / "logs/avd/Synchro_Kotlin_API_34.avd/config.ini").read_text(), "hw.ramSize=2048\nhw.cpu.ncore=2\ndisk.dataPartition.size=6G\n")
         launch = self.commands("emulator")[1][0]
         self.assertEqual(launch, [
             str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", "Synchro_Kotlin_API_34",

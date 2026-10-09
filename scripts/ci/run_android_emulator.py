@@ -375,8 +375,8 @@ class Runner:
             "--package", image, "--device", selected.profile,
         ], input="no\n")
         config = avd_home / f"{selected.avd_name}.avd/config.ini"
-        lines = [line for line in config.read_text().splitlines() if not line.startswith("hw.cpu.ncore=")]
-        config.write_text("\n".join([*lines, "hw.cpu.ncore=2"]) + "\n")
+        lines = [line for line in config.read_text().splitlines() if not line.startswith(("hw.cpu.ncore=", "disk.dataPartition.size="))]
+        config.write_text("\n".join([*lines, "hw.cpu.ncore=2", "disk.dataPartition.size=6G"]) + "\n")
 
     def adb(self, command: list[str], timeout: float = 180) -> str:
         return self.command([
