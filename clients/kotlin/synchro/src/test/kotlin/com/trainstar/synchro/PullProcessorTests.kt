@@ -717,30 +717,56 @@ class PullProcessorTests {
 
     @Test
     fun testTerminalPullKeepsServerRebuildScopeWithoutUsableCursor() {
-        val (db, processor) = makeTestEnv()
-        val scopeId = "orders:rebuild"
-        db.writeTransaction { connection ->
-            SynchroMeta.upsertScope(
-                connection,
-                scopeId = scopeId,
-                cursor = "stale-cursor",
-                checksum = "stale-checksum",
+        for (hasTerminalChecksum in listOf(true, false)) {
+            val (db, processor) = makeTestEnv()
+            val scopeId = "orders:rebuild"
+            val targetSchemaHash = "f".repeat(64)
+            val record = rebuildRecord("retained", "retained-address")
+            insertOrder(db, "retained", "retained-address", updatedAt = "2026-01-04T00:00:00.000000Z")
+            db.writeTransaction { connection ->
+                SynchroMeta.upsertRowVersion(connection, "orders", "retained", record.serverVersion, record.rowChecksum)
+                SynchroMeta.upsertScopeRow(connection, scopeId, "orders", "retained", record.rowChecksum.digest, 0)
+                SynchroMeta.upsertScope(
+                    connection,
+                    scopeId = scopeId,
+                    cursor = "stale-cursor",
+                    checksum = "stale-checksum",
+                    generation = 7,
+                    localChecksum = "stale-local-checksum",
+                )
+            }
+            val before = db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) }
+            val provenanceBefore = db.query("SELECT * FROM _synchro_scope_rows")
+
+            assertThrows(SynchroError.InvalidResponse::class.java) {
+                processor.applyScopeChanges(
+                    changes = emptyList(),
+                    syncedTables = listOf(localTestTable),
+                    scopeCursors = mapOf(scopeId to "unverified-cursor"),
+                    checksums = null,
+                    schemaHash = targetSchemaHash,
+                )
+            }
+            assertEquals(before, db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) })
+
+            processor.applyScopeChanges(
+                changes = emptyList(),
+                syncedTables = listOf(localTestTable),
+                scopeCursors = emptyMap(),
+                checksums = if (hasTerminalChecksum) mapOf(scopeId to protocolEmptyScopeChecksum(scopeId)) else null,
+                schemaHash = targetSchemaHash,
+                rebuildScopes = setOf(scopeId),
             )
+
+            val scope = db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) }
+            assertNull(scope?.cursor)
+            assertNull(scope?.checksum)
+            assertEquals("", scope?.localChecksum)
+            assertEquals(before?.generation, scope?.generation)
+            assertEquals(provenanceBefore, db.query("SELECT * FROM _synchro_scope_rows"))
+            assertNotNull(db.queryOne("SELECT id FROM orders WHERE id = ?", arrayOf("retained")))
+            assertEquals(0, pendingChangeCount(db))
         }
-
-        processor.applyScopeChanges(
-            changes = emptyList(),
-            syncedTables = listOf(localTestTable),
-            scopeCursors = emptyMap(),
-            checksums = mapOf(scopeId to protocolEmptyScopeChecksum(scopeId)),
-            schemaHash = PROTOCOL_TEST_SCHEMA_HASH,
-            rebuildScopes = setOf(scopeId),
-        )
-
-        val scope = db.readTransaction { connection -> SynchroMeta.getScope(connection, scopeId) }
-        assertNull(scope?.cursor)
-        assertNull(scope?.checksum)
-        assertNotEquals("", scope?.localChecksum)
     }
 
     @Test

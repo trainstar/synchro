@@ -716,32 +716,67 @@ final class PullProcessorTests: XCTestCase {
     }
 
     func testTerminalPullKeepsServerRebuildScopeWithoutUsableCursor() throws {
-        let (db, processor) = try makeTestEnv()
-        let scopeID = "orders:rebuild"
-        try db.writeTransaction { conn in
-            try SynchroMeta.upsertScope(
-                conn,
+        for hasTerminalChecksum in [true, false] {
+            let (db, processor) = try makeTestEnv()
+            let scopeID = "orders:rebuild"
+            let targetSchemaHash = String(repeating: "f", count: 64)
+            _ = try installCanonicalScopeRow(
+                db,
                 scopeID: scopeID,
-                cursor: "stale-cursor",
-                checksum: "stale-checksum"
+                recordID: "retained",
+                shipAddress: "retained-address",
+                serverVersion: "2026-01-01T12:00:00.000000Z"
             )
-        }
+            try db.writeTransaction { conn in
+                try SynchroMeta.upsertScope(
+                    conn,
+                    scopeID: scopeID,
+                    cursor: "stale-cursor",
+                    checksum: "stale-checksum",
+                    generation: 7,
+                    localChecksum: "stale-local-checksum"
+                )
+            }
+            let before = try db.readTransaction { conn in
+                try SynchroMeta.getScope(conn, scopeID: scopeID)
+            }
+            let provenanceBefore = try db.query("SELECT * FROM _synchro_scope_rows", params: nil)
 
-        try processor.applyScopeChanges(
-            changes: [],
-            syncedTables: [testTable.localSchema],
-            scopeCursors: [:],
-            checksums: [scopeID: protocolEmptyScopeChecksum(scopeID: scopeID)],
-            schemaHash: protocolTestSchemaHash,
-            rebuildScopes: [scopeID]
-        )
+            XCTAssertThrowsError(try processor.applyScopeChanges(
+                changes: [],
+                syncedTables: [testTable.localSchema],
+                scopeCursors: [scopeID: "unverified-cursor"],
+                checksums: nil,
+                schemaHash: targetSchemaHash
+            )) { error in
+                guard case SynchroError.invalidResponse = error else {
+                    return XCTFail("Expected retained row integrity rejection")
+                }
+            }
+            XCTAssertEqual(try db.readTransaction { conn in
+                try SynchroMeta.getScope(conn, scopeID: scopeID)
+            }, before)
 
-        let scope = try db.readTransaction { conn in
-            try SynchroMeta.getScope(conn, scopeID: scopeID)
+            try processor.applyScopeChanges(
+                changes: [],
+                syncedTables: [testTable.localSchema],
+                scopeCursors: [:],
+                checksums: hasTerminalChecksum ? [scopeID: protocolEmptyScopeChecksum(scopeID: scopeID)] : nil,
+                schemaHash: targetSchemaHash,
+                rebuildScopes: [scopeID]
+            )
+
+            let scope = try db.readTransaction { conn in
+                try SynchroMeta.getScope(conn, scopeID: scopeID)
+            }
+            XCTAssertNil(scope?.cursor)
+            XCTAssertNil(scope?.checksum)
+            XCTAssertEqual(scope?.localChecksum, "")
+            XCTAssertEqual(scope?.generation, before?.generation)
+            XCTAssertEqual(try db.query("SELECT * FROM _synchro_scope_rows", params: nil) as NSArray, provenanceBefore as NSArray)
+            XCTAssertNotNil(try db.queryOne("SELECT id FROM orders WHERE id = ?", params: ["retained"]))
+            XCTAssertEqual(try pendingChangeCount(db), 0)
         }
-        XCTAssertNil(scope?.cursor)
-        XCTAssertNil(scope?.checksum)
-        XCTAssertNotEqual(scope?.localChecksum, "")
     }
 
     func testTerminalPullRejectsStructurallyValidWrongChecksum() throws {

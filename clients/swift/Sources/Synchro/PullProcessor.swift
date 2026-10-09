@@ -86,7 +86,7 @@ final class PullProcessor: @unchecked Sendable {
         let checksumMap = checksums ?? [:]
         guard !changes.isEmpty || !scopeCursors.isEmpty || !checksumMap.isEmpty ||
               !scopeUpdates.add.isEmpty || !scopeUpdates.remove.isEmpty || scopeSetVersion != nil ||
-              completedPullRequestJSON != nil else { return }
+              !rebuildScopes.isEmpty || completedPullRequestJSON != nil else { return }
         if let completedPullRequestJSON {
             guard !completedPullRequestJSON.isEmpty else {
                 throw SynchroError.invalidResponse(message: "completed pull request identity is invalid")
@@ -201,9 +201,20 @@ final class PullProcessor: @unchecked Sendable {
                 )
             }
 
-            let scopeIDs = Set(scopeCursors.keys).union(checksumMap.keys)
+            let scopeIDs = Set(scopeCursors.keys).union(checksumMap.keys).union(rebuildScopes)
             for scopeID in scopeIDs {
                 guard let existingScope = try SynchroMeta.getScope(db, scopeID: scopeID) else {
+                    continue
+                }
+                if rebuildScopes.contains(scopeID) {
+                    try SynchroMeta.upsertScope(
+                        db,
+                        scopeID: scopeID,
+                        cursor: nil,
+                        checksum: nil,
+                        generation: existingScope.generation,
+                        localChecksum: ""
+                    )
                     continue
                 }
                 let nextCursor = scopeCursors[scopeID] ?? existingScope.cursor
@@ -213,17 +224,6 @@ final class PullProcessor: @unchecked Sendable {
                     schemaHash: schemaHash,
                     tablesByName: tablesByName
                 )
-                if rebuildScopes.contains(scopeID) {
-                    try SynchroMeta.upsertScope(
-                        db,
-                        scopeID: scopeID,
-                        cursor: nil,
-                        checksum: nil,
-                        generation: existingScope.generation,
-                        localChecksum: try checksumJSON(localChecksum)
-                    )
-                    continue
-                }
                 if let serverChecksum = checksumMap[scopeID] {
                     try serverChecksum.validate()
                     let localChecksumJSON = try checksumJSON(localChecksum)

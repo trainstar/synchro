@@ -116,7 +116,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         val checksumMap = checksums ?: emptyMap()
         if (changes.isEmpty() && scopeCursors.isEmpty() && checksumMap.isEmpty() &&
             scopeUpdates.add.isEmpty() && scopeUpdates.remove.isEmpty() && scopeSetVersion == null &&
-            resolvedRequestJSON == null
+            rebuildScopes.isEmpty() && resolvedRequestJSON == null
         ) return
         val tablesByID = syncedTables.associateBy { it.tableID }
         val tablesByName = syncedTables.associateBy { it.tableName }
@@ -198,11 +198,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                 )
             }
 
-            val scopeIds = (scopeCursors.keys + checksumMap.keys).toSet()
+            val scopeIds = (scopeCursors.keys + checksumMap.keys + rebuildScopes).toSet()
             for (scopeId in scopeIds) {
                 val existingScope = SynchroMeta.getScope(db, scopeId) ?: continue
-                val nextCursor = scopeCursors[scopeId] ?: existingScope.cursor
-                val localChecksum = computeScopeChecksum(db, scopeId, schemaHash, tablesByName)
                 if (scopeId in rebuildScopes) {
                     SynchroMeta.upsertScope(
                         db,
@@ -210,10 +208,12 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                         cursor = null,
                         checksum = null,
                         generation = existingScope.generation,
-                        localChecksum = checksumJSON(localChecksum),
+                        localChecksum = "",
                     )
                     continue
                 }
+                val nextCursor = scopeCursors[scopeId] ?: existingScope.cursor
+                val localChecksum = computeScopeChecksum(db, scopeId, schemaHash, tablesByName)
                 val serverChecksum = checksumMap[scopeId]
                 if (serverChecksum != null) {
                     serverChecksum.validate()
