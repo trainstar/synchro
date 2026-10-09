@@ -326,6 +326,73 @@ func cloneNativeCRUDState(state NativeCRUDState, processID string) NativeCRUDSta
 	return state
 }
 
+func TestRequireLocalWriteRowAcceptsBothColumnFormsAndRejectsInvalidEvidence(t *testing.T) {
+	row := map[string]json.RawMessage{
+		"id": json.RawMessage(`"row"`), "value": json.RawMessage(`"local"`), "note": json.RawMessage(`null`),
+	}
+	for name, columns := range map[string]string{
+		"map":   `{"value":"local","note":null}`,
+		"array": `[{"field_id":"value","value":"local"},{"field_id":"note","value":null}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			write := Operation{ContractOperation: "local", Name: "write", Payload: json.RawMessage(
+				`{"pk":{"id":"row"},"columns":` + columns + `}`,
+			)}
+			for name, evidence := range map[string]struct {
+				rows    []map[string]json.RawMessage
+				wantErr bool
+			}{
+				"valid": {rows: []map[string]json.RawMessage{
+					{"id": json.RawMessage(`"other"`), "value": json.RawMessage(`"other"`)}, row,
+				}},
+				"wrong value": {rows: []map[string]json.RawMessage{
+					{"id": row["id"], "value": json.RawMessage(`"server"`), "note": row["note"]},
+				}, wantErr: true},
+				"missing column": {rows: []map[string]json.RawMessage{
+					{"id": row["id"], "value": row["value"]},
+				}, wantErr: true},
+				"missing row": {rows: []map[string]json.RawMessage{
+					{"id": json.RawMessage(`"other"`), "value": row["value"], "note": row["note"]},
+				}, wantErr: true},
+				"duplicate row": {rows: []map[string]json.RawMessage{row, row}, wantErr: true},
+			} {
+				t.Run(name, func(t *testing.T) {
+					if err := RequireLocalWriteRow(write, evidence.rows); (err != nil) != evidence.wantErr {
+						t.Fatalf("row check error = %v, want error = %t", err, evidence.wantErr)
+					}
+				})
+			}
+		})
+	}
+	for name, columns := range map[string]string{
+		"absent":             "",
+		"null":               `,"columns":null`,
+		"empty map":          `,"columns":{}`,
+		"empty array":        `,"columns":[]`,
+		"scalar":             `,"columns":"local"`,
+		"empty map field":    `,"columns":{"":"local"}`,
+		"empty array field":  `,"columns":[{"field_id":"","value":"local"}]`,
+		"missing field":      `,"columns":[{"value":"local"}]`,
+		"nonstring field":    `,"columns":[{"field_id":1,"value":"local"}]`,
+		"missing value":      `,"columns":[{"field_id":"value"}]`,
+		"wrong value key":    `,"columns":[{"field_id":"value","other":"local"}]`,
+		"malformed value":    `,"columns":{"value":}`,
+		"scalar array entry": `,"columns":["local"]`,
+		"null array entry":   `,"columns":[null]`,
+		"extra array field":  `,"columns":[{"field_id":"value","value":"local","extra":1}]`,
+		"duplicate array ID": `,"columns":[{"field_id":"value","value":"local"},{"field_id":"value","value":"local"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			write := Operation{ContractOperation: "local", Name: "write", Payload: json.RawMessage(
+				`{"pk":{"id":"row"}` + columns + `}`,
+			)}
+			if err := RequireLocalWriteRow(write, []map[string]json.RawMessage{row}); err == nil {
+				t.Fatal("invalid columns passed the row check")
+			}
+		})
+	}
+}
+
 func TestLocalWriteKeptBySchemaRequiresSomeButNotAllColumns(t *testing.T) {
 	publish := Operation{ContractOperation: "model", Name: "publish-schema", Payload: json.RawMessage(
 		`{"tables":[{"table_id":"other","fields":[{"field_id":"note"}]},{"table_id":"items","fields":[{"field_id":"id"},{"field_id":"kept"}]}]}`,
