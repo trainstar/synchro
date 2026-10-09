@@ -70,7 +70,7 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		value any
 		tags  []string
 	}{
-		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "measurement_bindings,omitempty"}},
+		{Scenario{}, []string{"$schema", "schema_version", "id", "title", "description,omitempty", "requirement_ids", "normative_references", "proof_types", "proof_obligations", "ownership", "model", "barrier_plan", "fault_plans", "replay", "negative_controls", "steps", "wire_expectations", "assertions", "native_identity_aliases,omitempty", "native_lifecycle_boundaries,omitempty", "native_local_fixture,omitempty", "measurement_bindings,omitempty"}},
 		{NativeClient{}, []string{"key", "user_id", "client_id", "database_key"}},
 		{NativeClientOpenParameters{}, []string{"client_key", "database_mode", "initialization", "seed_step_id"}},
 		{NativeClientParameters{}, []string{"client_key"}},
@@ -109,7 +109,7 @@ func TestScenarioStructJSONTags(t *testing.T) {
 		{ReplaySpec{}, []string{"mode", "seed_required", "barrier_trace_required"}},
 		{NegativeControl{}, []string{"control_id", "requirement_id", "fault_id", "subject_artifact_inventory_ids", "detected_by"}},
 		{Step{}, []string{"id", "phase", "transport", "description,omitempty", "native_binding,omitempty", "measurement_sample,omitempty", "operation", "expected_outcome"}},
-		{NativeStepBinding{}, []string{"kind", "user_id,omitempty", "client_id,omitempty", "call_id,omitempty", "stage,omitempty", "method,omitempty", "completion,omitempty", "initialization,omitempty", "workload,omitempty"}},
+		{NativeStepBinding{}, []string{"kind", "user_id,omitempty", "client_id,omitempty", "call_id,omitempty", "stage,omitempty", "method,omitempty", "completion,omitempty", "initialization,omitempty", "checkpoint,omitempty", "workload,omitempty"}},
 		{NativeWorkloadParameters{}, []string{"record_count", "batch_size", "seed", "authored_schema", "client_version", "targets", "mutation_kinds", "expectation"}},
 		{NativeWorkloadTarget{}, []string{"scope_id", "table_id", "primary_key_field_id"}},
 		{NativeWorkloadMutationKind{}, []string{"operation", "count", "field_ids"}},

@@ -59,7 +59,7 @@
     {
       "scenario_id": "SCN-PERF-SCHEMA-CHECK-001",
       "path": "conformance/scenarios/performance/schema-check-001.json",
-      "sha256": "da707e5d56f523799da35bc033c2893cae7ce4455222c6948087b2a9f7dbde8a"
+      "sha256": "8e53b04a8b96892d402ac1b26653efb8a02b0ca18a6c276d4953523f0afbfb51"
     },
     {
       "scenario_id": "SCN-PERF-SEEDED-EMPTY-STARTUP-001",

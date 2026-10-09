@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -65,17 +68,118 @@ var nativeIdentityKinds = stringSet([]string{
 })
 
 type nativeCallGroup struct {
-	clientID    string
-	userID      string
-	method      string
-	completion  string
-	phase       string
-	hasHTTP     bool
-	stages      []string
-	stepIndexes []int
+	clientID      string
+	userID        string
+	method        string
+	completion    string
+	phase         string
+	hasHTTP       bool
+	stages        []string
+	stepIndexes   []int
+	checkpoint    string
+	interruptedBy StepID
+}
+
+// SchemaProofBaselineWrite binds a proof row capture to its authored source insert.
+// Swift and Kotlin use the returned operation only for row comparison.
+func SchemaProofBaselineWrite(scenario Scenario, write Operation) (Operation, error) {
+	var payload map[string]json.RawMessage
+	var identity struct {
+		TableID string                     `json:"table_id"`
+		PK      map[string]json.RawMessage `json:"pk"`
+	}
+	if json.Unmarshal(write.Payload, &payload) != nil || json.Unmarshal(write.Payload, &identity) != nil || len(identity.PK) != 1 {
+		return Operation{}, fmt.Errorf("proof baseline write identity is invalid")
+	}
+	var primaryField string
+	var primary json.RawMessage
+	for name, value := range identity.PK {
+		primaryField, primary = name, value
+	}
+	for _, step := range scenario.Steps {
+		if step.ID != "STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001" {
+			continue
+		}
+		var transaction struct {
+			Events []struct {
+				Operation string `json:"operation"`
+				After     struct {
+					Identity struct {
+						Row struct {
+							TableID   string `json:"table_id"`
+							Canonical string `json:"canonical_wire_json"`
+						} `json:"synced_row"`
+					} `json:"identity"`
+					Fields []struct {
+						Field    string          `json:"field"`
+						WireJSON json.RawMessage `json:"wire_json"`
+					} `json:"fields"`
+				} `json:"after"`
+			} `json:"events"`
+		}
+		if json.Unmarshal(step.Operation.Payload, &transaction) != nil {
+			return Operation{}, fmt.Errorf("proof baseline transaction is invalid")
+		}
+		for _, event := range transaction.Events {
+			if event.Operation != "insert" || event.After.Identity.Row.TableID != identity.TableID {
+				continue
+			}
+			var row json.RawMessage
+			if json.Unmarshal([]byte(event.After.Identity.Row.Canonical), &row) != nil {
+				continue
+			}
+			var expected, actual any
+			if json.Unmarshal(primary, &expected) != nil || json.Unmarshal(row, &actual) != nil || !reflect.DeepEqual(expected, actual) {
+				continue
+			}
+			columns := make(map[string]json.RawMessage)
+			for _, field := range event.After.Fields {
+				if field.Field != primaryField {
+					var text string
+					if json.Unmarshal(field.WireJSON, &text) != nil {
+						return Operation{}, fmt.Errorf("proof baseline field wire JSON is invalid")
+					}
+					columns[field.Field] = json.RawMessage(text)
+				}
+			}
+			if len(columns) == 0 {
+				return Operation{}, fmt.Errorf("proof baseline fields are absent")
+			}
+			encoded, err := json.Marshal(columns)
+			if err != nil {
+				return Operation{}, err
+			}
+			payload["columns"] = encoded
+			write.Payload, err = json.Marshal(payload)
+			return write, err
+		}
+	}
+	return Operation{}, fmt.Errorf("proof baseline source insert is absent")
+}
+
+func ValidateNativeLocalFixture(fixture *NativeLocalFixture) error {
+	if fixture == nil {
+		return nil
+	}
+	name := fixture.TableName
+	if len(name) == 0 || len(name) > 128 || strings.HasPrefix(strings.ToLower(name), "_synchro_") || strings.HasPrefix(strings.ToLower(name), "sqlite_") {
+		return fmt.Errorf("local fixture table name is invalid")
+	}
+	for index, character := range []byte(name) {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character == '_' || index > 0 && character >= '0' && character <= '9') {
+			return fmt.Errorf("local fixture table name is invalid")
+		}
+	}
+	if !utf8.ValidString(fixture.ID) || !utf8.ValidString(fixture.Value) || len(fixture.ID) == 0 || len(fixture.ID) > 256 || len(fixture.Value) == 0 || len(fixture.Value) > 1024 {
+		return fmt.Errorf("local fixture values are invalid")
+	}
+	return nil
 }
 
 func (v *scenarioValidator) validateNativeProof() {
+	if err := ValidateNativeLocalFixture(v.scenario.NativeLocalFixture); err != nil {
+		v.add("%s: %v", v.scenario.ID, err)
+	}
 	hasNativeObligation := false
 	for _, obligation := range v.scenario.ProofObligations {
 		if obligation.ProofType == "native-e2e" {
@@ -91,6 +195,9 @@ func (v *scenarioValidator) validateNativeProof() {
 		}
 	}
 	if !hasNativeObligation {
+		if v.scenario.NativeLocalFixture != nil {
+			v.add("%s local fixture requires native proof ownership", v.scenario.ID)
+		}
 		if boundSteps != 0 {
 			v.add("%s has native bindings without a native-e2e proof obligation", v.scenario.ID)
 		}
@@ -444,9 +551,29 @@ func (v *scenarioValidator) validateNativeStepBindings() {
 
 		if binding.Kind != "public-call" {
 			if activeStagedCall != "" && binding.Kind != "controller" {
-				v.add("%s native call %q is interrupted by binding %q on step %s", v.scenario.ID, activeStagedCall, binding.Kind, step.ID)
+				group := calls[activeStagedCall]
+				userID, clientID, _, identityErr := nativeOperationIdentity(step.Operation)
+				sameClient := identityErr == nil && binding.UserID == group.userID && binding.ClientID == group.clientID && userID == group.userID && clientID == group.clientID
+				adjacent := len(group.stepIndexes) == 1 && index == group.stepIndexes[0]+1
+				if binding.Kind == "process" && OperationKey(step.Operation) == "process/restart-client" && group.checkpoint != "" && sameClient && adjacent {
+					group.interruptedBy = step.ID
+					calls[activeStagedCall] = group
+					closedCalls[activeStagedCall] = struct{}{}
+					activeStagedCall = ""
+				} else if !(binding.Kind == "local-write" && sameClient && adjacent && group.checkpoint == "migration_committed" && activeStagedCall == "schema_proof_committed_recover") {
+					v.add("%s native call %q is interrupted by binding %q on step %s", v.scenario.ID, activeStagedCall, binding.Kind, step.ID)
+				}
 			}
 			if currentSynchronousCall != "" {
+				group := calls[currentSynchronousCall]
+				last := v.scenario.Steps[group.stepIndexes[len(group.stepIndexes)-1]]
+				var delivery struct {
+					Delivery string `json:"delivery"`
+				}
+				if binding.Kind == "process" && OperationKey(step.Operation) == "process/restart-client" && binding.UserID == group.userID && binding.ClientID == group.clientID && index == group.stepIndexes[len(group.stepIndexes)-1]+1 && OperationKey(last.Operation) == "push/submit" && json.Unmarshal(last.Operation.Payload, &delivery) == nil && delivery.Delivery == "drop_after_server" {
+					group.interruptedBy = step.ID
+					calls[currentSynchronousCall] = group
+				}
 				closedCalls[currentSynchronousCall] = struct{}{}
 				currentSynchronousCall = ""
 			}
@@ -484,6 +611,9 @@ func (v *scenarioValidator) validateNativeStepBindings() {
 			group.hasHTTP = true
 		}
 		group.stages = append(group.stages, binding.Stage)
+		if binding.Checkpoint != "" {
+			group.checkpoint = binding.Checkpoint
+		}
 		group.stepIndexes = append(group.stepIndexes, index)
 		calls[callID] = group
 
@@ -534,6 +664,9 @@ func (v *scenarioValidator) validateNativeStepBindings() {
 	for callID, group := range calls {
 		if !group.hasHTTP {
 			v.add("%s native call %q covers no HTTP step", v.scenario.ID, callID)
+			continue
+		}
+		if group.interruptedBy != "" {
 			continue
 		}
 		v.validateNativeCallStages(callID, group)
@@ -601,6 +734,9 @@ func nativeBindingOwnsOperation(kind string, step Step) bool {
 }
 
 func (v *scenarioValidator) validateNativeBindingShape(step Step, binding NativeStepBinding) {
+	if binding.Checkpoint != "" && (binding.Kind != "public-call" || binding.Stage != "begin" || binding.Checkpoint != "migration_prepared" && binding.Checkpoint != "migration_committed") {
+		v.add("%s step %s checkpoint requires a bounded begin binding", v.scenario.ID, step.ID)
+	}
 	hasClient := binding.UserID != "" && binding.ClientID != ""
 	hasCall := binding.CallID != nil && *binding.CallID != ""
 	if binding.Kind == "controller" {

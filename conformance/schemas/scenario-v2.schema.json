@@ -58,6 +58,16 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/ownership" }
     },
+    "native_local_fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_name", "id", "value"],
+      "properties": {
+        "table_name": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
     "model": { "$ref": "#/$defs/model" },
     "barrier_plan": { "$ref": "#/$defs/barrierPlan" },
     "fault_plans": {
@@ -168,9 +178,11 @@
         "method": { "type": "string", "enum": ["start", "sync-now", "retry-after-error", "reset-schema-and-start"] },
         "completion": { "type": "string", "enum": ["idle", "blocked", "error"] },
         "initialization": { "type": "string", "enum": ["current"] },
+        "checkpoint": { "type":"string", "enum":["migration_prepared","migration_committed"] },
         "workload": { "$ref": "#/$defs/nativeWorkloadParameters" }
       },
       "allOf": [
+        {"if":{"required":["checkpoint"]},"then":{"required":["stage"],"properties":{"kind":{"const":"public-call"},"stage":{"const":"begin"}}}},
         {
           "if": { "required": ["initialization"] },
           "then": {
@@ -998,7 +1010,8 @@
         "payload": {
           "oneOf": [
             { "type": "object", "maxProperties": 0 },
-            { "$ref": "#/$defs/schemaDispatchPredicatePayload" }
+            { "$ref": "#/$defs/schemaDispatchPredicatePayload" },
+            { "$ref": "#/$defs/schemaProofPredicatePayload" }
           ]
         }
       },
@@ -1034,6 +1047,44 @@
           }
         }
       ]
+    },
+    "schemaProofPredicatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [{"required":["after_step_id"]},{"required":["before_step_id"]}],
+      "properties": {
+        "after_step_id": {"$ref":"#/$defs/stepId"},
+        "before_step_id": {"$ref":"#/$defs/stepId"},
+        "compare_to": {"$ref":"#/$defs/expectationId"},
+        "schema_alias": {"type":"string","minLength":1},
+        "row_alias": {"type":"string","minLength":1},
+        "mutation_alias": {"type":"string","minLength":1},
+        "base_alias": {"type":"string","minLength":1},
+        "active_schema_alias": {"type":"string","minLength":1},
+        "journal_schema_alias": {"type":"string","minLength":1},
+        "authored_schema_alias": {"type":"string","minLength":1},
+        "outcome_schema_alias": {"type":"string","minLength":1},
+        "checkpoint": {"enum":["migration_prepared","migration_committed"]},
+        "active_cursor": {"enum":["captured-S1","actual-connect-replacement","journal-replacement"]},
+        "journal_cursor": {"const":"actual-connect-replacement"},
+        "physical_field": {"const":"note"},
+        "sentinel": {"const":"preserve-local"},
+        "base": {"enum":["actual-local-base","accepted-M1-server-version"]},
+        "depends_on": {"const":"proof-m1"},
+        "status": {"const":"applied"},
+        "columns": {"type":"object","additionalProperties":false,"properties":{"value":{"enum":["41","42"]},"note":{"const":"later-note"}}},
+        "field_order": {"const":["value","note"]},
+        "preserve": {"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["physical-schema","queued-intent","sentinel","row","version","checksum","historical-outcome","outcome-identity"]}},
+        "normalized_changes": {"const":["base_version","depends_on_mutation_id"]},
+        "queue_count": {"type":"integer","minimum":0,"maximum":2},
+        "outcome_count": {"type":"integer","minimum":0,"maximum":2},
+        "before_http": {"const":true},
+        "sealed": {"const":true},
+        "client_reconciled": {"const":false},
+        "m1_reconciled": {"const":true},
+        "m2_reconciled": {"const":false},
+        "preserve_original": {"const":true}
+      }
     },
     "schemaDispatchPredicatePayload": {
       "type": "object",

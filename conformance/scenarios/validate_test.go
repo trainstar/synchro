@@ -11,6 +11,92 @@ import (
 	"github.com/trainstar/synchro/conformance/vectors"
 )
 
+func TestSchemaProofCheckpointBindingsRemainBounded(t *testing.T) {
+	bundle, err := contract.Load(context.Background(), "../../")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := LoadFile(context.Background(), "../../", "conformance/scenarios/performance/schema-check-001.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(base, bundle); err != nil {
+		t.Fatal(err)
+	}
+	proofSteps := 0
+	proofCalls := make(map[NativeCallID]bool)
+	samples := 0
+	for _, step := range base.Steps {
+		if step.MeasurementSample != nil {
+			samples++
+		}
+		if strings.HasPrefix(string(step.ID), "STEP-PERF-SCHEMA-CHECK-PROOF-") {
+			proofSteps++
+			if step.MeasurementSample != nil {
+				t.Fatal("proof lane became measured")
+			}
+			if step.NativeBinding.CallID != nil {
+				proofCalls[*step.NativeBinding.CallID] = true
+			}
+		}
+	}
+	if proofSteps != 21 || len(proofCalls) != 7 || samples != 18 {
+		t.Fatalf("proof steps=%d calls=%d preserved measurement samples=%d", proofSteps, len(proofCalls), samples)
+	}
+	find := func(s *Scenario, suffix string) *Step {
+		for index := range s.Steps {
+			if s.Steps[index].ID == StepID("STEP-PERF-SCHEMA-CHECK-PROOF-"+suffix+"-001") {
+				return &s.Steps[index]
+			}
+		}
+		t.Fatalf("missing proof step %s", suffix)
+		return nil
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Scenario)
+	}{
+		{"checkpoint outside begin", func(s *Scenario) { find(s, "PREPARED-PUSH").NativeBinding.Checkpoint = "migration_committed" }},
+		{"unknown checkpoint", func(s *Scenario) { find(s, "PREPARED-MIGRATE").NativeBinding.Checkpoint = "other" }},
+		{"cut without checkpoint", func(s *Scenario) { find(s, "PREPARED-MIGRATE").NativeBinding.Checkpoint = "" }},
+		{"wrong client cut", func(s *Scenario) { find(s, "PREPARED-CUT").NativeBinding.ClientID = "client-schema-proof-committed" }},
+		{"nonadjacent cut", func(s *Scenario) {
+			for index := range s.Steps {
+				if s.Steps[index].ID == find(s, "PREPARED-CUT").ID {
+					s.Steps[index], s.Steps[index+1] = s.Steps[index+1], s.Steps[index]
+					break
+				}
+			}
+		}},
+		{"write at prepared recovery", func(s *Scenario) {
+			find(s, "COMMITTED-RECOVER").NativeBinding.CallID = find(s, "PREPARED-RECOVER").NativeBinding.CallID
+		}},
+		{"write without committed checkpoint", func(s *Scenario) { find(s, "COMMITTED-RECOVER").NativeBinding.Checkpoint = "migration_prepared" }},
+		{"closed migration call resumes", func(s *Scenario) {
+			id := *find(s, "PREPARED-MIGRATE").NativeBinding.CallID
+			for _, suffix := range []string{"PREPARED-RECOVER", "PREPARED-PUSH", "PREPARED-COMPLETE"} {
+				find(s, suffix).NativeBinding.CallID = &id
+			}
+		}},
+		{"missing recovery traffic", func(s *Scenario) {
+			for index := range s.WireExpectations {
+				if s.WireExpectations[index].StepID == find(s, "PREPARED-RECOVER").ID {
+					s.WireExpectations = append(s.WireExpectations[:index], s.WireExpectations[index+1:]...)
+					break
+				}
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mutant := cloneScenario(base)
+			test.mutate(&mutant)
+			if Validate(mutant, bundle) == nil {
+				t.Fatal("invalid bounded checkpoint group passed")
+			}
+		})
+	}
+}
+
 func TestValidateAuthoredTimeScenario(t *testing.T) {
 	bundle, err := contract.Load(context.Background(), "../../")
 	if err != nil {

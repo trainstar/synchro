@@ -38,6 +38,7 @@ type Scenario struct {
 	Assertions                []Assertion                   `json:"assertions"`
 	NativeIdentityAliases     []NativeIdentityAlias         `json:"native_identity_aliases,omitempty"`
 	NativeLifecycleBoundaries []NativeLifecycleBoundary     `json:"native_lifecycle_boundaries,omitempty"`
+	NativeLocalFixture        *NativeLocalFixture           `json:"native_local_fixture,omitempty"`
 	MeasurementBindings       []MeasurementBinding          `json:"measurement_bindings,omitempty"`
 
 	sourcePath  string
@@ -51,6 +52,12 @@ type NativeClient struct {
 	UserID      string `json:"user_id"`
 	ClientID    string `json:"client_id"`
 	DatabaseKey string `json:"database_key"`
+}
+
+type NativeLocalFixture struct {
+	TableName string `json:"table_name"`
+	ID        string `json:"id"`
+	Value     string `json:"value"`
 }
 
 type NativeClientOpenParameters struct {
@@ -486,6 +493,7 @@ type NativeStepBinding struct {
 	Method         string                    `json:"method,omitempty"`
 	Completion     string                    `json:"completion,omitempty"`
 	Initialization string                    `json:"initialization,omitempty"`
+	Checkpoint     string                    `json:"checkpoint,omitempty"`
 	Workload       *NativeWorkloadParameters `json:"workload,omitempty"`
 }
 
