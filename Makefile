@@ -318,6 +318,7 @@ CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all
+SWIFT_BUILD_ARGS ?=
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
@@ -1190,7 +1191,7 @@ ci-candidate-rn-android:
 	$(MAKE) test-rn-scenarios-android
 
 build-swift-native-runner:
-	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
+	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build $(SWIFT_BUILD_ARGS) --product synchro-native-runner
 
 build-kotlin-library:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
