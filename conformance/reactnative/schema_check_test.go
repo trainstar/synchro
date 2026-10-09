@@ -646,17 +646,25 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 	old, replacement := "old-token", "actual-server-token"
 	complete, notTruncated := true, false
 	journal := migrationJournalCapture{Source: source, Target: target, Stored: map[string]string{"scope_cursor_updates_json": `{"scope":"actual-server-token"}`}}
-	state := inspectedClientState{Schema: &target, ScopeStates: []clientScopeState{{ScopeID: "scope", Cursor: &replacement}}, PhysicalSchema: []byte(`[{"table_name":"items","name":"id","type":"TEXT","not_null":false,"primary_key_position":1},{"table_name":"items","name":"value","type":"TEXT","not_null":true,"primary_key_position":0},{"table_name":"items","name":"note","type":"TEXT","not_null":false,"primary_key_position":0}]`)}
+	columns := []physicalSchemaColumn{
+		{TableName: "cf_items", Name: "id", Type: "TEXT", PrimaryKeyPosition: 1},
+		{TableName: "cf_items", Name: "value", Type: "TEXT", NotNull: true},
+		{TableName: "cf_items", Name: "note", Type: "TEXT"},
+		{TableName: "cf_items", Name: "owner_id", Type: "TEXT", NotNull: true},
+		{TableName: "cf_items", Name: "updated_at", Type: "TEXT", NotNull: true},
+		{TableName: "cf_items", Name: "deleted_at", Type: "TEXT"},
+	}
+	physicalSchema, err := json.Marshal(append(append([]physicalSchemaColumn(nil), columns...), physicalSchemaColumn{TableName: "cf_global_items", Name: "id", Type: "TEXT", PrimaryKeyPosition: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := inspectedClientState{Schema: &target, ScopeStates: []clientScopeState{{ScopeID: "scope", Cursor: &replacement}}, PhysicalSchema: physicalSchema}
 	state.PhysicalSchemaTruncated, state.CaptureOverflowed = &notTruncated, &notTruncated
 	issued := hashFingerprint(replacement)
 	facts := map[string]any{"action": "replace", "schema_version": target.Version, "schema_hash": target.Hash, "affected_scope_fingerprints": []string{}, "affected_scopes_complete": true, "scope_cursor_updates": map[string]*string{hashFingerprint("scope"): &issued}, "scope_cursor_updates_complete": true}
 	raw, _ := json.Marshal(facts)
 	trace := traceSnapshot{Observations: []transportObservation{{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(old)}, CursorFingerprintsComplete: &complete, RequestFacts: []byte(`{"schema_version":1,"schema_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), ConnectResponseFacts: raw}}, SequenceCheckpoint: 1}
-	coordinator := &SchemaCheckCoordinator{tableName: "items", proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{target: {
-		{TableName: "items", Name: "id", Type: "TEXT", PrimaryKeyPosition: 1},
-		{TableName: "items", Name: "value", Type: "TEXT", NotNull: true},
-		{TableName: "items", Name: "note", Type: "TEXT"},
-	}}}
+	coordinator := &SchemaCheckCoordinator{tableName: "cf_items", primaryKey: "id", proofPhysicalSchemas: map[clientSchema][]physicalSchemaColumn{target: columns}}
 	if err := coordinator.validateProofActivation(state, &journal, trace, true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +674,7 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 	if err := coordinator.validateProofActivation(state, &journal, traceSnapshot{}, true, false); err == nil {
 		t.Fatal("journal cut omitted actual connect trace")
 	}
-	for _, name := range []string{"old active cursor", "old active schema", "journal cursor substitution", "target DDL missing", "wrong value type", "wrong value nullability", "wrong primary key position", "unexpected synchronized column"} {
+	for _, name := range []string{"old active cursor", "old active schema", "journal cursor substitution", "target DDL missing", "wrong value type", "wrong value nullability", "wrong primary key position", "unexpected synchronized column", "missing support column", "wrong support type", "wrong field binding", "duplicate subject column"} {
 		t.Run(name, func(t *testing.T) {
 			changed := state
 			changed.ScopeStates = append([]clientScopeState(nil), state.ScopeStates...)
@@ -688,12 +696,27 @@ func TestSchemaProofActivationRequiresActualIssuedCursorWithTargetSchema(t *test
 			case "wrong primary key position":
 				changed.PhysicalSchema = []byte(strings.Replace(string(state.PhysicalSchema), `"primary_key_position":1`, `"primary_key_position":0`, 1))
 			case "unexpected synchronized column":
-				changed.PhysicalSchema = []byte(strings.TrimSuffix(string(state.PhysicalSchema), "]") + `,{"table_name":"items","name":"extra","type":"TEXT","not_null":false,"primary_key_position":0}]`)
+				changed.PhysicalSchema = []byte(strings.TrimSuffix(string(state.PhysicalSchema), "]") + `,{"table_name":"cf_items","name":"extra","type":"TEXT","not_null":false,"primary_key_position":0}]`)
+			case "missing support column":
+				changed.PhysicalSchema, _ = json.Marshal(columns[:5])
+			case "wrong support type":
+				changed.PhysicalSchema = []byte(strings.Replace(string(state.PhysicalSchema), `"name":"updated_at","type":"TEXT"`, `"name":"updated_at","type":"INTEGER"`, 1))
+			case "wrong field binding":
+				changed.PhysicalSchema = []byte(strings.Replace(string(state.PhysicalSchema), `"name":"value"`, `"name":"physical_value"`, 1))
+			case "duplicate subject column":
+				changed.PhysicalSchema = []byte(strings.TrimSuffix(string(state.PhysicalSchema), "]") + `,{"table_name":"cf_items","name":"id","type":"TEXT","not_null":false,"primary_key_position":1}]`)
 			}
 			if err := coordinator.validateProofActivation(changed, &changedJournal, trace, true, false); err == nil {
 				t.Fatal("invalid activation cut passed")
 			}
 		})
+	}
+	for _, binding := range []struct{ table, primary string }{{"items", "id"}, {"cf_items", "physical_id"}} {
+		changed := *coordinator
+		changed.tableName, changed.primaryKey = binding.table, binding.primary
+		if err := changed.bindProofPhysicalSchema("schema-v2"); err == nil {
+			t.Fatal("wrong proof subject binding passed")
+		}
 	}
 }
 

@@ -2734,6 +2734,9 @@ func schemaProofPhysicalColumns(observed, expected []physicalSchemaColumn, table
 	actual := make(map[string]physicalSchemaColumn)
 	for _, column := range observed {
 		if column.TableName == table {
+			if _, duplicate := actual[column.Name]; duplicate {
+				return errors.New("synchronized physical schema contains a duplicate subject column")
+			}
 			column.Type = strings.ToUpper(column.Type)
 			actual[column.Name] = column
 		}
@@ -2750,6 +2753,9 @@ func schemaProofPhysicalColumns(observed, expected []physicalSchemaColumn, table
 }
 
 func (c *SchemaCheckCoordinator) bindProofPhysicalSchema(alias string) error {
+	if c.tableName != "cf_items" || c.primaryKey != "id" {
+		return errors.New("schema proof physical subject must bind items to cf_items with primary key id")
+	}
 	schema, err := c.runtimeSchema(alias)
 	if err != nil {
 		return err
@@ -2792,6 +2798,8 @@ func (c *SchemaCheckCoordinator) bindProofPhysicalSchema(alias string) error {
 		return errors.New("schema proof authored table manifest is incomplete")
 	}
 	var authored, runtime struct {
+		TableID string                     `json:"table_id"`
+		PK      map[string]json.RawMessage `json:"pk"`
 		Columns map[string]json.RawMessage `json:"columns"`
 	}
 	for _, step := range c.config.Scenario.Steps {
@@ -2808,8 +2816,23 @@ func (c *SchemaCheckCoordinator) bindProofPhysicalSchema(alias string) error {
 			}
 		}
 	}
+	if runtime.TableID != "cf_items" || len(runtime.PK) != 1 || len(runtime.PK["id"]) == 0 {
+		return errors.New("schema proof runtime write has the wrong physical table or primary-key binding")
+	}
+	fieldCount := 2
+	if alias == "schema-v2" {
+		fieldCount = 3
+	}
+	if len(manifest.Tables[0].Fields) != fieldCount {
+		return errors.New("schema proof authored physical field set is incomplete")
+	}
 	var expected []physicalSchemaColumn
+	seen := make(map[string]bool)
 	for _, field := range manifest.Tables[0].Fields {
+		if seen[field.FieldID] || field.FieldID != "id" && field.FieldID != "value" && (alias != "schema-v2" || field.FieldID != "note") || field.PrimaryKey != (field.FieldID == "id") {
+			return errors.New("schema proof authored physical field identity is invalid")
+		}
+		seen[field.FieldID] = true
 		if field.Type != "string" {
 			return errors.New("schema proof manifests must retain their authored string storage")
 		}
@@ -2827,9 +2850,18 @@ func (c *SchemaCheckCoordinator) bindProofPhysicalSchema(alias string) error {
 			if name == "" {
 				return errors.New("schema proof authored physical field has no runtime binding")
 			}
+			if name != field.FieldID {
+				return errors.New("schema proof authored physical field must retain its physical name")
+			}
 		}
 		expected = append(expected, physicalSchemaColumn{TableName: c.tableName, Name: name, Type: "TEXT", NotNull: !field.Nullable && !field.PrimaryKey, PrimaryKeyPosition: primaryPosition})
 	}
+	// conformance/blackbox/testdata/schema.sql prescribes these support columns for the cf_items fixture.
+	expected = append(expected,
+		physicalSchemaColumn{TableName: "cf_items", Name: "owner_id", Type: "TEXT", NotNull: true},
+		physicalSchemaColumn{TableName: "cf_items", Name: "updated_at", Type: "TEXT", NotNull: true},
+		physicalSchemaColumn{TableName: "cf_items", Name: "deleted_at", Type: "TEXT"},
+	)
 	if c.proofPhysicalSchemas == nil {
 		c.proofPhysicalSchemas = make(map[clientSchema][]physicalSchemaColumn)
 	}
