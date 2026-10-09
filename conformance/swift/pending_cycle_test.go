@@ -63,9 +63,9 @@ func TestSwiftPendingCycleWaitsForRecoveredPullApply(t *testing.T) {
 						"status": status, "pending_change_count": pending,
 						"process_id": "1234", "database_identity_fingerprint": strings.Repeat("a", 64),
 						"transport_observations": map[string]any{"observations": observations, "overflowed": false, "sequence_checkpoint": len(observations)},
-						"migration_journal": nil,
-						"accepted_mutation_outcomes": map[string]string{},
 					}
+					result["migration_journal"] = nil
+					result["accepted_mutation_outcomes"] = map[string]string{}
 					for _, field := range []string{"application_row_count", "mutation_ledger_count", "mutation_outcome_count", "sealed_batch_count", "rejected_mutation_count", "scope_state_count", "scope_row_count", "provenance_count", "row_metadata_count", "rebuild_attempt_count", "rebuild_receipt_count", "provenance_maintenance_work_cursor"} {
 						result[field] = 0
 					}
