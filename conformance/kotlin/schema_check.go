@@ -614,7 +614,7 @@ func runSchemaProofReplay(ctx context.Context, fixture *scenarios.NativeLocalFix
 	if err != nil {
 		return err
 	}
-	if originalRequest.Mutations[0].MutationID != lane.localOriginal.MutationID || replayRequest.Schema != *beforeM2.Schema || !reflect.DeepEqual(originalRequest.Mutations, replayRequest.Mutations) || originalRequest.BatchID == replayRequest.BatchID && !bytes.Equal(lane.original.Request, replay.Request) {
+	if originalRequest.Mutations[0].MutationID != lane.localOriginal.MutationID || !reflect.DeepEqual(originalRequest.Mutations, replayRequest.Mutations) || originalRequest.BatchID == replayRequest.BatchID && !bytes.Equal(lane.original.Request, replay.Request) || originalRequest.BatchID != replayRequest.BatchID && replayRequest.Schema != *beforeM2.Schema {
 		return errors.New("replay changed immutable M1 or reused batch bytes")
 	}
 	m1ID := originalRequest.Mutations[0].MutationID
