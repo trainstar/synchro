@@ -384,6 +384,8 @@ class EmulatorRunnerTests(unittest.TestCase):
                 selected = runner.arguments(argv)
                 self.assertEqual((selected.api, selected.image_api), (api, image))
                 self.calls.clear()
+                cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+                cache.unlink(missing_ok=True)
                 with self.boundaries(), mock.patch.object(runner.Runner, "command", autospec=True, side_effect=runner.Runner.command) as command_boundary:
                     self.assertEqual(runner.Runner(selected).run(), 0)
                 self.assertEqual([command for command, _ in self.commands("sdkmanager")], [[
@@ -455,6 +457,53 @@ class EmulatorRunnerTests(unittest.TestCase):
         with self.boundaries(), mock.patch.object(runner, "check_active_emulator", side_effect=runner.RunnerError("active")):
             self.assertEqual(runner.Runner(self.selected()).run(), 1)
         self.assertEqual(self.calls, [])
+
+    def test_verified_download_is_retained_in_cache(self):
+        self.assertEqual(self.run_fixture(), 0)
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        self.assertEqual(cache.read_bytes(), self.source_archive.read_bytes())
+        self.assertEqual(len(self.commands("curl")), 1)
+
+    def test_valid_cached_archive_avoids_download(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(self.source_archive.read_bytes())
+        self.assertEqual(self.run_fixture(), 0)
+        self.assertEqual(self.commands("curl"), [])
+        self.assertEqual((self.sdk / "emulator/emulator").read_bytes(), b"fixture executable")
+        self.assertEqual(cache.read_bytes(), self.source_archive.read_bytes())
+
+    def test_corrupt_cached_archive_preserves_previous_emulator(self):
+        previous = self.sdk / "emulator"
+        previous.mkdir()
+        (previous / "retained").write_text("unchanged")
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"corrupt")
+        for rejection in ("size", "digest"):
+            with self.subTest(rejection=rejection):
+                with self.boundaries(verified_archive=rejection == "digest"), mock.patch.object(runner, "digest", return_value="wrong"):
+                    self.assertEqual(runner.Runner(self.selected()).run(), 1)
+                self.assertEqual((previous / "retained").read_text(), "unchanged")
+                self.assertEqual(cache.read_bytes(), b"corrupt")
+                self.assertEqual(self.calls, [])
+
+    def test_symlink_or_nonregular_cached_archive_is_rejected(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        for kind in ("symlink", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    cache.symlink_to(self.source_archive)
+                else:
+                    cache.mkdir()
+                self.assertEqual(self.run_fixture(), 1)
+                self.assertEqual(self.calls, [])
+                self.assertFalse((self.sdk / "emulator").exists())
+                if kind == "symlink":
+                    cache.unlink()
+                else:
+                    cache.rmdir()
 
     def test_archive_size_rejection_preserves_previous_emulator(self):
         previous = self.sdk / "emulator"

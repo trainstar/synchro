@@ -32,6 +32,10 @@ Set both to your installed tool locations.
 Install the SDK platform and build-tools versions declared in the Android Gradle projects.
 Start the emulator required by the selected test target.
 
+The CI emulator runner caches its pinned archive at `$ANDROID_HOME/.synchro-cache/16428233/emulator.zip`.
+It verifies the archive size and SHA-256 before each installation.
+Remove that cache file if validation reports damaged bytes.
+
 Install the React Native workspace dependencies before bridge checks:
 
 ```sh

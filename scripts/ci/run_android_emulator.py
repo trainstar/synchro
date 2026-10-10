@@ -347,14 +347,18 @@ class Runner:
             self.environment.pop(variable, None)
         check_active_emulator(directory, self.command)
         check_ports()
+        cache = sdk / ".synchro-cache" / BUILD / "emulator.zip"
+        if cache.is_symlink() or (cache.exists() and not cache.is_file()):
+            raise RunnerError("The cached emulator archive must be a regular file")
         with tempfile.TemporaryDirectory(prefix=".synchro-emulator-", dir=sdk) as work:
             work = Path(work)
-            archive = work / "emulator.zip"
-            self.command([
-                "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
-                "--retry", "3", "--retry-all-errors",
-                "--connect-timeout", "30", "--max-time", "180", "--output", str(archive), ARCHIVE_URL,
-            ], timeout=750)
+            archive = cache if cache.exists() else work / "emulator.zip"
+            if archive != cache:
+                self.command([
+                    "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+                    "--retry", "3", "--retry-all-errors",
+                    "--connect-timeout", "30", "--max-time", "180", "--output", str(archive), ARCHIVE_URL,
+                ], timeout=750)
             if archive.stat().st_size != ARCHIVE_SIZE or digest(archive) != ARCHIVE_SHA256:
                 raise RunnerError("The emulator archive size or SHA-256 does not match the pin")
             members = extract_archive(archive, work)
@@ -367,6 +371,9 @@ class Runner:
             image = f"system-images;android-{selected.image_api};google_apis;x86_64"
             self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image], timeout=900)
             verify_installation(sdk, members, metadata)
+            if archive != cache:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                archive.replace(cache)
         version = self.command([str(directory / "emulator"), "-version"])
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
             raise RunnerError("The emulator executable version or build does not match the pin")
