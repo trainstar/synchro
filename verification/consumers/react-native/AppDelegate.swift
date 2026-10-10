@@ -52,17 +52,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     window = UIWindow(windowScene: windowScene)
 
-    let arguments = ProcessInfo.processInfo.arguments
-    let conformanceDetox = arguments.indices.contains { index in
-      arguments[index] == "-synchroConformance"
-        && index + 1 < arguments.endIndex
-        && arguments[index + 1] == "1"
-    }
     let appDelegate = UIApplication.shared.delegate as! AppDelegate
     factory.startReactNative(
-      withModuleName: "SynchroReactNativeExample",
+      withModuleName: "SynchroConsumer",
       in: window,
-      initialProperties: ["conformanceDetox": conformanceDetox],
       launchOptions: appDelegate.launchOptions
     )
   }
@@ -75,11 +68,7 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
 
   override func bundleURL() -> URL? {
 #if DEBUG
-#if DETOX_E2E
-    Bundle.main.url(forResource: "main", withExtension: "jsbundle")
-#else
     RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
-#endif
 #else
     Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif

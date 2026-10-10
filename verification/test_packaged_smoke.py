@@ -53,9 +53,10 @@ def measured_environment(cell_id: str) -> dict[str, str]:
     # Independently authored measurement fixtures; never derive these from the manifest.
     return {
         "SUP-PG-LINUX-X64-001": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"},
-        "SUP-IOS-MIN-001": {"ios": "16.4", "xcode": "16.4"},
+        "SUP-IOS-MIN-001": {"ios": "17.0", "xcode": "27.0"},
         "SUP-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0"},
         "SUP-RN-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.10"},
+        "SUP-RN-IOS-MIN-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.82.1"},
         "SUP-ANDROID-MIN-001": {
             "android_api": "24", "os": "ubuntu-24.04",
             "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27",
@@ -71,10 +72,62 @@ def measured_environment(cell_id: str) -> dict[str, str]:
             "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
             "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.83.10",
         },
+        "SUP-RN-ANDROID-MIN-001": {
+            "android_api": "37", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
+            "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.82.1",
+        },
     }[cell_id]
 
 
 class PackagedSmokeStructureTests(unittest.TestCase):
+    def test_kotlin_initial_readiness_retains_failed_commands_without_payloads(self) -> None:
+        script = (REPO_ROOT / "verification/consumers/kotlin/test-consumer-device.sh").read_text()
+        readiness = script.split("ready=0\n", 1)[1].split("\nset +e\n", 1)[0]
+        for read_status, pid_status, output, current_pid in (
+            (255, 255, "cat: files/initial-result.json: No such file or directory", "private-token"),
+            (0, 0, '{"status":"failed","error":"private-token","observed":{"row":"private-row"}}', "202"),
+        ):
+            with self.subTest(read_status=read_status, pid_status=pid_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "work").mkdir()
+                shell = """set -eu
+work_dir="$1/work"
+environment_dir="$1/evidence"
+package=com.trainstar.synchro.consumer
+initial_pid=101
+ready=0
+adb_command() {
+  case "$1" in
+    exec-out) printf '%s' "$RESULT_OUTPUT"; printf '%s' 'private-token' >&2; return "$READ_STATUS" ;;
+    shell) printf '%s\\r\\n' "$CURRENT_PID"; printf '%s' 'error: closed private-token' >&2; return "$PID_STATUS" ;;
+    logcat) printf '%s\\n' 'FATAL EXCEPTION: private-token private-row' 'java.lang.IllegalStateException: private-token'; return 0 ;;
+    *) exit 99 ;;
+  esac
+}
+""" + readiness
+                run = subprocess.run(
+                    ["sh", "-s", "--", str(root)], input=shell, text=True, capture_output=True,
+                    env={**os.environ, "READ_STATUS": str(read_status), "PID_STATUS": str(pid_status),
+                         "RESULT_OUTPUT": output, "CURRENT_PID": current_pid}, timeout=10,
+                )
+                self.assertEqual(run.returncode, 1, run.stderr)
+                evidence = root / "evidence/initial-readiness-failure.json"
+                report = json.loads(evidence.read_text())
+                self.assertEqual(report["initial_result_returncode"], read_status)
+                self.assertEqual(report["liveness_returncode"], pid_status)
+                self.assertEqual(report["expected_pid"], 101)
+                self.assertEqual(report["observed_pid"], 202 if pid_status == 0 else None)
+                self.assertEqual(report["initial_result_bytes"], len(output.encode()))
+                self.assertTrue(report["android_runtime_fatal_exception"])
+                self.assertEqual(report["exception_classes"], ["java.lang.IllegalStateException"])
+                if read_status == 0:
+                    self.assertEqual(report["initial_result_status"], "failed")
+                for secret in ("private-token", "private-row"):
+                    self.assertNotIn(secret, evidence.read_text())
+                    self.assertNotIn(secret, run.stdout + run.stderr)
+                self.assertLess(evidence.stat().st_size, 2048)
+
     def test_all_completed_profiles_retain_independent_measurements(self) -> None:
         for cell_id in packaged_smoke.required_cells(REPO_ROOT):
             with self.subTest(cell=cell_id), tempfile.TemporaryDirectory() as directory:
@@ -89,7 +142,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def test_changed_initial_resume_or_selected_environment_rejects_completion(self) -> None:
         for cell_id, changes in (
             ("SUP-PG-LINUX-X64-001", {"postgresql": "18.4"}),
-            ("SUP-IOS-MIN-001", {"ios": "16.5"}),
+            ("SUP-IOS-MIN-001", {"ios": "17.1"}),
             ("SUP-IOS-CURRENT-001", {"ios": "27.0.1"}),
             ("SUP-IOS-CURRENT-001", {"xcode": "27.0.1"}),
             ("SUP-ANDROID-CURRENT-001", {"android_api": "38", "system_image": "system-images;android-38;google_apis;x86_64"}),
@@ -171,7 +224,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
                     packaged_smoke.validate_cell(bad, expected, packaged_smoke.source_commit(REPO_ROOT))
 
-    def test_complete_summary_preserves_seven_measurements_and_35_obligations(self) -> None:
+    def test_complete_summary_preserves_nine_measurements_and_45_obligations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, output = self.completed_summary(Path(directory))
             summary = packaged_smoke.load_json(output, "summary")
@@ -180,7 +233,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 {"id": cell_id, "environment": measured_environment(cell_id)}
                 for cell_id in sorted(packaged_smoke.required_cells(REPO_ROOT))
             ])
-            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertEqual(len(summary["obligations"]), 45)
             self.assertNotIn("missing_environment_cells", summary)
             packaged_smoke.verify_summary(REPO_ROOT, output)
 
@@ -233,7 +286,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
             self.assertEqual(summary["status"], "failed")
             self.assertEqual(summary["resolved_support_cells"], [{"id": pg_cell, "environment": measured_environment(pg_cell)}])
             self.assertEqual(summary["missing_environment_cells"], sorted(set(packaged_smoke.required_cells(REPO_ROOT)) - {pg_cell}))
-            self.assertEqual(len(summary["obligations"]), 35)
+            self.assertEqual(len(summary["obligations"]), 45)
             self.assertTrue(all(record["status"] == "failed" and record["test_count"] == 0 for record in summary["obligations"]))
             self.assertNotIn("environment", packaged_smoke.load_json(cells_dir / f"{ios_cell}.json", "begin cell"))
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pass"):
@@ -286,7 +339,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
         profiles = {branch["properties"]["cell_id"]["const"]: branch["properties"]["environment"]["$ref"].split("/")[-1]
                     for branch in schema["oneOf"]}
         self.assertEqual(set(profiles), ids)
-        self.assertEqual(len(schema["oneOf"]), 7)
+        self.assertEqual(len(schema["oneOf"]), 9)
         for cell_id, definition in profiles.items():
             profile = schema["$defs"][definition]
             measured = measured_environment(cell_id)
@@ -490,6 +543,8 @@ class PackagedSmokeStructureTests(unittest.TestCase):
                 "SUP-ANDROID-CURRENT-001": [hashes["kotlin-maven"]],
                 "SUP-RN-IOS-CURRENT-001": [manifest_hash, hashes["react-native-npm"]],
                 "SUP-RN-ANDROID-CURRENT-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
+                "SUP-RN-IOS-MIN-001": [manifest_hash, hashes["react-native-npm"]],
+                "SUP-RN-ANDROID-MIN-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
             }
             summary = {
                 "schema_version": 1,
@@ -872,7 +927,7 @@ class PackagedSmokeStructureTests(unittest.TestCase):
     def test_required_cells_exclude_tested_development_hosts(self) -> None:
         cells = packaged_smoke.required_cells(REPO_ROOT)
         self.assertNotIn("SUP-MACOS-CURRENT-001", cells)
-        self.assertEqual(len(cells), 7)
+        self.assertEqual(len(cells), 9)
 
     def test_wrong_artifact_hash_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-hash.") as raw_directory:

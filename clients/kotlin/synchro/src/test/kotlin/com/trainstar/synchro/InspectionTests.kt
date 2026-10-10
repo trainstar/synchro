@@ -10,6 +10,15 @@ import com.trainstar.synchro.inspection.ScopeRowInspection
 import com.trainstar.synchro.inspection.ScopeStateInspection
 import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.MigrationCheckpoint
+import com.trainstar.synchro.inspection.withTransportObservation
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.runTest
 import java.io.IOException
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
@@ -41,6 +50,268 @@ private const val GUARD_SECONDS = 60L
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class InspectionTests {
+    @Test
+    fun acceptedOutcomeCapturePreservesStoredIdentityRawJSONAndBounds() {
+        val config = prepareClientConfig()
+        val client = SynchroClient(config, context)
+        val database = SynchroDatabase.open(context, config.dbPath)
+        try {
+            for (id in listOf("o1", "o2")) client.execute("INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                arrayOf(id, "authored", "2026-01-01T00:00:00.000000Z"))
+            val ids = client.inspectRetainedMutations().map { it.mutationID }
+            assertEquals(2, ids.size)
+            val first = " { \"mutation_id\": \"${ids[0]}\", \"marker\": \"é\" }\n"
+            val second = "{\"marker\":\"second\", \"mutation_id\":\"${ids[1]}\"}"
+            database.writeTransaction { db ->
+                for ((id, outcome) in ids.zip(listOf(first, second))) {
+                    db.execSQL("UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', accepted_outcome_json = ? WHERE mutation_id = ?",
+                        arrayOf(outcome, id))
+                }
+            }
+            val before = database.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+            val inspection = SynchroInspection(client)
+            var rows: List<Row> = emptyList()
+            val snapshot = inspection.captureSnapshot(8) { _, transaction ->
+                rows = transaction.query("SELECT id FROM orders ORDER BY id")
+                assertThrows(Exception::class.java) { transaction.query("UPDATE orders SET title = 'not read only'") }
+            }
+            assertEquals(listOf(mapOf("id" to "o1"), mapOf("id" to "o2")), rows)
+            assertEquals(mapOf(ids[0] to first, ids[1] to second), snapshot.capture.acceptedMutationOutcomes)
+            assertFalse(snapshot.capture.acceptedMutationOutcomesTruncated)
+            assertEquals(2, snapshot.capture.mutationLedgerCount)
+            assertEquals(0, snapshot.pendingChangeCount)
+            assertEquals(emptyList<Any>(), snapshot.retainedMutations)
+            assertEquals(emptyList<Any>(), client.inspectRetainedMutations())
+            assertEquals(before, database.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+            assertTrue(inspection.captureState(1).acceptedMutationOutcomesTruncated)
+            assertEquals(emptyMap<String, String>(), inspection.captureState(1).acceptedMutationOutcomes)
+            val padding = 65_536 - ids.sumOf { it.toByteArray(Charsets.UTF_8).size } -
+                first.toByteArray(Charsets.UTF_8).size - second.toByteArray(Charsets.UTF_8).size
+            val exact = first + " ".repeat(padding)
+            database.execute("UPDATE _synchro_pending_changes SET accepted_outcome_json = ? WHERE mutation_id = ?", arrayOf(exact, ids[0]))
+            assertFalse(inspection.captureState(8).acceptedMutationOutcomesTruncated)
+            assertEquals(exact, inspection.captureState(8).acceptedMutationOutcomes[ids[0]])
+            for (oversized in listOf(exact + " ", "x".repeat(4_194_304))) {
+                database.execute("UPDATE _synchro_pending_changes SET accepted_outcome_json = ? WHERE mutation_id = ?", arrayOf(oversized, ids[0]))
+                val capture = inspection.captureState(8)
+                assertTrue(capture.acceptedMutationOutcomesTruncated)
+                assertTrue(capture.overflowed)
+                assertEquals(emptyMap<String, String>(), capture.acceptedMutationOutcomes)
+            }
+            for (invalid in listOf(null, "{}".toByteArray(Charsets.UTF_8))) {
+                database.execute("UPDATE _synchro_pending_changes SET accepted_outcome_json = ? WHERE mutation_id = ?", arrayOf(invalid, ids[0]))
+                assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(8) }
+            }
+        } finally {
+            database.close()
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+    @Test
+    fun recoveredStartupPauseStopAndCloseDrainWithoutTransport() = runBlocking {
+        for (closing in listOf(false, true)) supervisorScope {
+            val collector = TransportObservationCollector()
+            val config = SynchroConfig(dbPath = "startup_pause_${UUID.randomUUID()}.sqlite", serverURL = "http://test.local",
+                authProvider = { "token" }, clientID = "inspection", appVersion = "1.0.0").withTransportObservation(collector)
+            val client = SynchroClient(config, context)
+            val database = SynchroDatabase.open(context, config.dbPath)
+            val draft = protocolOrdersSchemaManifest()
+            val manifest = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+            SchemaManager(database).prepareConnectMigration(ConnectResponse(
+                serverTime = "2026-01-01T00:00:00.000000Z", protocolVersion = 3, clientGeneration = 1, scopeSetVersion = 0,
+                schema = SchemaDescriptor(1, manifest.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()), scopeCursorUpdates = emptyMap(), schemaDefinition = manifest,
+            ), manifest.localTables(), false)
+            collector.armPause(MigrationCheckpoint.COMMITTED)
+            val startup = async(Dispatchers.IO) { runCatching { client.start() } }
+            var shutdown: kotlinx.coroutines.Deferred<Unit>? = null
+            try {
+                collector.awaitPause(MigrationCheckpoint.COMMITTED, 2_000)
+                assertEquals(SchemaRef(manifest.schemaVersion, manifest.schemaHash), SynchroInspection(client).captureState(32).schema)
+                shutdown = async(Dispatchers.IO) { if (closing) client.close() else client.stop() }
+                withTimeout(2_000) { shutdown.await(); startup.await() }
+                assertEquals(SyncStatus.Stopped, client.getSyncStatus())
+                assertEquals(0L, collector.snapshot().sequenceCheckpoint)
+            } finally {
+                startup.cancelAndJoin()
+                shutdown?.cancelAndJoin()
+                database.close()
+                if (!closing) client.close()
+                context.deleteDatabase(config.dbPath)
+            }
+        }
+    }
+
+    @Test
+    fun migrationCaptureReadsRawBindingsAndPhysicalColumnsWithoutChangingIntent() = runTest {
+        val collector = TransportObservationCollector()
+        val config = SynchroConfig(dbPath = "migration_capture_${UUID.randomUUID()}.sqlite", serverURL = "http://test.local",
+            authProvider = { "token" }, clientID = "inspection", appVersion = "1.0.0").withTransportObservation(collector)
+        val client = SynchroClient(config, context)
+        val database = SynchroDatabase.open(context, config.dbPath)
+        try {
+            val source = protocolOrdersSchemaManifest()
+            installTestSchema(database, 1, source.schemaHash, source.localTables())
+            database.execute("CREATE TABLE local_settings (value TEXT)")
+            database.execute("INSERT INTO local_settings VALUES ('sentinel')")
+            database.execute("INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES ('o1', 'first', 'u1', '2026-01-01T00:00:00.000000Z')")
+            database.execute("UPDATE orders SET ship_address = 'later' WHERE id = 'o1'")
+            val draft = protocolOrdersSchemaManifest(includeNotes = true, schemaVersion = 2,
+                parentSchema = SchemaRef(1, source.schemaHash), transitionClass = "class_2")
+            val target = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+            val manager = SchemaManager(database)
+            val response = ConnectResponse(
+                serverTime = "2026-01-01T00:00:00.000000Z", protocolVersion = 3, clientGeneration = 1, scopeSetVersion = 0,
+                schema = SchemaDescriptor(2, target.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()), scopeCursorUpdates = emptyMap(), schemaDefinition = target,
+            )
+            val tracker = ChangeTracker(database)
+            val engine = SyncEngine(config, database, HttpClient(config), manager, tracker,
+                PullProcessor(database), PushProcessor(database, tracker))
+            collector.armPause(MigrationCheckpoint.PREPARED)
+            val installation = async { engine.installConnectResponse(response) }
+            collector.awaitPause(MigrationCheckpoint.PREPARED, 2_000)
+            assertFalse(installation.isCompleted)
+            val before = database.query("SELECT * FROM _synchro_migration_journal")
+            val inspection = SynchroInspection(client)
+            val prepared = inspection.captureSnapshot(32) { _, transaction ->
+                assertEquals("sentinel", transaction.query("SELECT value FROM local_settings").single()["value"])
+                assertThrows(Exception::class.java) { transaction.query("UPDATE local_settings SET value = 'changed'") }
+            }
+            val journal = requireNotNull(prepared.capture.migrationJournal)
+            assertEquals(SchemaRef(1, source.schemaHash), journal.source)
+            assertEquals(SchemaRef(2, target.schemaHash), journal.target)
+            assertEquals("prepared", journal.phase)
+            assertEquals(before.single()["migration_plan_json"], journal.stored["migration_plan_json"])
+            assertEquals(before.single()["target_manifest_json"], journal.stored["target_manifest_json"])
+            assertEquals(before.single()["journal_version"].toString(), journal.stored["journal_version"])
+            database.execute("UPDATE _synchro_migration_journal SET migration_plan_version = 'invalid'")
+            assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(32) }
+            database.execute("UPDATE _synchro_migration_journal SET migration_plan_version = ?", arrayOf(journal.stored.getValue("migration_plan_version").toLong()))
+            for ((column, version) in listOf("source_schema_version" to journal.source.version, "target_schema_version" to journal.target.version)) {
+                database.execute("UPDATE _synchro_migration_journal SET $column = ?", arrayOf("x".repeat(4_194_304)))
+                val omitted = inspection.captureState(32)
+                assertEquals(null, omitted.migrationJournal)
+                assertTrue(omitted.migrationJournalTruncated)
+                database.execute("UPDATE _synchro_migration_journal SET $column = ?", arrayOf(version))
+            }
+            database.execute("UPDATE _synchro_migration_journal SET target_manifest_json = ?", arrayOf(byteArrayOf(0xff.toByte())))
+            assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(32) }
+            database.execute("UPDATE _synchro_migration_journal SET target_manifest_json = ?", arrayOf(journal.stored.getValue("target_manifest_json")))
+            assertFalse(prepared.capture.physicalSchema.any { it.name == "notes" || it.tableName == "local_settings" })
+            assertEquals(2, prepared.capture.mutationLedgerCount)
+            assertEquals(prepared, inspection.captureSnapshot(32) { _, _ -> })
+            assertEquals(before, database.query("SELECT * FROM _synchro_migration_journal"))
+            collector.armPause(MigrationCheckpoint.COMMITTED)
+            collector.resumePause()
+            collector.awaitPause(MigrationCheckpoint.COMMITTED, 2_000)
+            assertFalse(installation.isCompleted)
+            val committed = inspection.captureSnapshot(32) { _, _ -> }
+            assertEquals("ddl_applied", committed.capture.migrationJournal?.phase)
+            assertEquals(journal.target, committed.capture.schema)
+            assertTrue(committed.capture.physicalSchema.any { it.name == "notes" && !it.notNull })
+            assertEquals(prepared.retainedMutations, committed.retainedMutations)
+            val bounded = inspection.captureState(0)
+            assertTrue(bounded.migrationJournalTruncated)
+            assertTrue(bounded.physicalSchemaTruncated)
+            assertTrue(bounded.overflowed)
+            assertEquals(null, bounded.migrationJournal)
+            database.execute("UPDATE _synchro_migration_journal SET migration_plan_json = ?", arrayOf("x".repeat(4_194_304)))
+            assertTrue(inspection.captureState(32).migrationJournalTruncated)
+            assertEquals(null, inspection.captureState(32).migrationJournal)
+            assertTrue(inspection.captureState(32).physicalSchemaTruncated)
+            assertEquals(emptyList<Any>(), inspection.captureState(32).physicalSchema)
+            database.execute("UPDATE _synchro_migration_journal SET migration_plan_json = ?", arrayOf(journal.stored.getValue("migration_plan_json")))
+            collector.resumePause()
+            installation.await()
+            assertTrue(installation.isCompleted)
+        } finally {
+            collector.cancelPauseBarrier()
+            database.close()
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
+    @Test
+    fun migrationPhysicalCaptureDetectsPrematureTargetAndLeftoverSourceTables() {
+        val config = SynchroConfig(dbPath = "migration_union_${UUID.randomUUID()}.sqlite", serverURL = "http://test.local",
+            authProvider = { "token" }, clientID = "inspection", appVersion = "1.0.0")
+        val client = SynchroClient(config, context)
+        val database = SynchroDatabase.open(context, config.dbPath)
+        try {
+            val sourceDraft = protocolOrdersSchemaManifest().let { manifest ->
+                manifest.copy(tables = manifest.tables + manifest.tables[0].copy(
+                    tableID = "table-retired", relationID = "relation-retired", name = "retired"))
+            }
+            val source = sourceDraft.copy(schemaHash = Integrity.schemaManifestHash(sourceDraft))
+            val manager = SchemaManager(database)
+            manager.prepareConnectMigration(ConnectResponse(
+                serverTime = "2026-01-01T00:00:00.000000Z", protocolVersion = 3, clientGeneration = 1, scopeSetVersion = 0,
+                schema = SchemaDescriptor(1, source.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()), scopeCursorUpdates = emptyMap(), schemaDefinition = source,
+            ), source.localTables(), false)
+            val fresh = SynchroInspection(client).captureState(32)
+            assertEquals(SchemaRef(0, ""), fresh.migrationJournal?.source)
+            assertEquals(emptyList<Any>(), fresh.physicalSchema)
+            assertFalse(fresh.physicalSchemaTruncated)
+            database.writeSyncLockedTransaction { manager.applyPreparedMigrationInTransaction(it) }
+            manager.completeMigrationIfReady(authoritativeAssignmentsInstalled = true)
+            database.execute("CREATE TABLE unrelated_local (id TEXT)")
+            val targetDraft = protocolOrdersSchemaManifest(schemaVersion = 2, parentSchema = SchemaRef(1, source.schemaHash),
+                transitionClass = "class_4", compatibilityFloor = 2).let { manifest ->
+                manifest.copy(tables = manifest.tables + manifest.tables[0].copy(
+                    tableID = "table-added", relationID = "relation-added", name = "added"))
+            }
+            val target = targetDraft.copy(schemaHash = Integrity.schemaManifestHash(targetDraft))
+            manager.prepareConnectMigration(ConnectResponse(
+                serverTime = "2026-01-01T00:00:00.000000Z", protocolVersion = 3, clientGeneration = 1, scopeSetVersion = 0,
+                schema = SchemaDescriptor(2, target.schemaHash, SchemaAction.REPLACE),
+                scopes = ScopeAssignmentDelta(emptyList(), emptyList()), scopeCursorUpdates = emptyMap(), schemaDefinition = target,
+            ), target.localTables(), true)
+            val inspection = SynchroInspection(client)
+            val prepared = inspection.captureState(32)
+            assertFalse(prepared.physicalSchemaTruncated)
+            assertTrue(prepared.physicalSchema.any { it.tableName == "retired" })
+            assertFalse(prepared.physicalSchema.any { it.tableName == "added" || it.tableName == "unrelated_local" })
+            database.execute("CREATE TABLE added (id TEXT)")
+            val premature = inspection.captureState(32)
+            assertTrue(premature.physicalSchema.any { it.tableName == "added" })
+            assertFalse(premature.physicalSchema.any { it.tableName == "unrelated_local" })
+            database.execute("DROP TABLE added")
+            val archived = database.queryOne("SELECT manifest_json FROM _synchro_schema_archives WHERE schema_version = 1")!!["manifest_json"] as String
+            database.execute("UPDATE _synchro_schema_archives SET schema_hash = ? WHERE schema_version = 1", arrayOf("c".repeat(64)))
+            assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(32) }
+            database.execute("UPDATE _synchro_schema_archives SET schema_hash = ? WHERE schema_version = 1", arrayOf(source.schemaHash))
+            database.execute("UPDATE _synchro_migration_journal SET target_schema_hash = ?", arrayOf("d".repeat(64)))
+            assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(32) }
+            database.execute("UPDATE _synchro_migration_journal SET target_schema_hash = ?", arrayOf(target.schemaHash))
+            database.execute("UPDATE _synchro_schema_archives SET manifest_json = '{}' WHERE schema_version = 1")
+            assertThrows(SynchroError.InvalidResponse::class.java) { inspection.captureState(32) }
+            database.execute("UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = 1", arrayOf(archived + " ".repeat(4_194_304)))
+            val oversized = inspection.captureState(32)
+            assertTrue(oversized.migrationJournal != null)
+            assertTrue(oversized.physicalSchemaTruncated)
+            assertEquals(emptyList<Any>(), oversized.physicalSchema)
+            database.execute("UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = 1", arrayOf(archived))
+            database.writeSyncLockedTransaction { manager.applyPreparedMigrationInTransaction(it) }
+            val committed = inspection.captureState(32)
+            assertFalse(committed.physicalSchemaTruncated)
+            assertTrue(committed.physicalSchema.any { it.tableName == "added" })
+            assertFalse(committed.physicalSchema.any { it.tableName == "retired" || it.tableName == "unrelated_local" })
+            database.execute("CREATE TABLE retired (id TEXT)")
+            val leftover = inspection.captureState(32)
+            assertTrue(leftover.physicalSchema.any { it.tableName == "retired" })
+            assertFalse(leftover.physicalSchema.any { it.tableName == "unrelated_local" })
+            database.execute("DROP TABLE retired")
+        } finally {
+            database.close()
+            client.close()
+            context.deleteDatabase(config.dbPath)
+        }
+    }
+
     private data class RebuildReceiptProof(
         val rebuildIDFingerprint: String,
         val pageCount: Int,
@@ -349,10 +620,14 @@ class InspectionTests {
         } finally {
             client.close()
         }
+        val historicalID = requireNotNull(internalQueryOne(config,
+            "SELECT mutation_id FROM _synchro_pending_changes WHERE record_id = 'historical'",
+        )?.get("mutation_id") as? String)
+        val outcome = " { \"mutation_id\": \"$historicalID\" }\n"
         withInternalDatabase(config) { database ->
             database.execute(
-                "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted' WHERE record_id = ?",
-                arrayOf("historical"),
+                "UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', accepted_outcome_json = ? WHERE record_id = ?",
+                arrayOf(outcome, "historical"),
             )
         }
 
@@ -361,6 +636,7 @@ class InspectionTests {
             val capture = SynchroInspection(reopened).captureState(maximumRecords = 10)
             assertEquals(2, capture.mutationLedgerCount)
             assertEquals(1, capture.mutationOutcomeCount)
+            assertEquals(mapOf(historicalID to outcome), capture.acceptedMutationOutcomes)
             assertEquals(1, reopened.retainedMutationCount())
             assertEquals(listOf("retained"), reopened.inspectRetainedMutations().map { it.recordID })
         } finally {
@@ -410,7 +686,7 @@ class InspectionTests {
         val client = SynchroClient(config, context)
         try {
             val proof = SynchroInspection(client)
-            val inspection = proof.captureState(maximumRecords = 1)
+            val inspection = proof.captureState(maximumRecords = 4)
 
             assertEquals(SchemaRef(1, PROTOCOL_TEST_SCHEMA_HASH), inspection.schema)
             assertEquals(
@@ -524,6 +800,7 @@ class InspectionTests {
     fun snapshotKeepsOneStateWhenATransitionFollowsItsFirstTransaction() {
         val config = prepareClientConfig()
         val client = SynchroClient(config, context)
+        val database = SynchroClient::class.java.getDeclaredField("database").apply { isAccessible = true }.get(client) as SynchroDatabase
         val threads = Executors.newFixedThreadPool(3)
         val release = CountDownLatch(1)
         try {
@@ -531,6 +808,13 @@ class InspectionTests {
                 "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
                 arrayOf("o1", "before", "2026-01-01T00:00:00.000000Z"),
             )
+            val acceptedID = client.inspectRetainedMutations().first().mutationID
+            client.execute("UPDATE orders SET title = 'updated-before' WHERE id = 'o1'")
+            val beforeOutcome = " { \"mutation_id\": \"$acceptedID\", \"marker\": \"before\" }\n"
+            val afterOutcome = beforeOutcome + " \n"
+            database.writeTransaction { db ->
+                db.execSQL("UPDATE _synchro_pending_changes SET lifecycle_state = 'accepted', accepted_outcome_json = ? WHERE mutation_id = ?", arrayOf(beforeOutcome, acceptedID))
+            }
             val holding = CountDownLatch(1)
             val holder = threads.submit {
                 client.writeTransaction {
@@ -552,10 +836,12 @@ class InspectionTests {
             val transitionThread = AtomicReference<Thread>()
             val transition = threads.submit {
                 transitionThread.set(Thread.currentThread())
-                client.execute(
-                    "INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
-                    arrayOf("o2", "after", "2026-01-02T00:00:00.000000Z"),
-                )
+                database.writeTransaction { db ->
+                    client.execute("INSERT INTO orders (id, title, updated_at) VALUES (?, ?, ?)",
+                        arrayOf("o2", "after", "2026-01-02T00:00:00.000000Z"))
+                    db.execSQL("UPDATE _synchro_pending_changes SET accepted_outcome_json = ? WHERE mutation_id = ?",
+                        arrayOf(afterOutcome, acceptedID))
+                }
             }
             awaitQueuedOnLock(transitionThread)
             release.countDown()
@@ -565,7 +851,8 @@ class InspectionTests {
 
             assertEquals(listOf(mapOf("id" to "o1")), rows)
             assertEquals(1, captured.capture.applicationRowCount)
-            assertEquals(1, captured.capture.mutationLedgerCount)
+            assertEquals(2, captured.capture.mutationLedgerCount)
+            assertEquals(mapOf(acceptedID to beforeOutcome), captured.capture.acceptedMutationOutcomes)
             assertEquals(listOf("o1"), requireNotNull(captured.retainedMutations).map { it.recordID })
             assertEquals(1, captured.pendingChangeCount)
 
@@ -575,6 +862,7 @@ class InspectionTests {
             }
             assertEquals(listOf(mapOf("id" to "o1"), mapOf("id" to "o2")), laterRows)
             assertEquals(2, later.capture.applicationRowCount)
+            assertEquals(mapOf(acceptedID to afterOutcome), later.capture.acceptedMutationOutcomes)
             assertEquals(listOf("o1", "o2"), requireNotNull(later.retainedMutations).map { it.recordID })
         } finally {
             release.countDown()
@@ -616,7 +904,7 @@ class InspectionTests {
             assertTrue(bounded.rowMetadataTruncated)
             assertTrue(bounded.overflowed)
 
-            val complete = proof.captureState(maximumRecords = 2)
+            val complete = proof.captureState(maximumRecords = 4)
             assertEquals(listOf("unscoped-a", "unscoped-b"), complete.rowMetadata.map { it.recordID })
             assertFalse(complete.rowMetadataTruncated)
             assertFalse(complete.overflowed)

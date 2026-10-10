@@ -137,10 +137,16 @@ func runSwiftSchemaCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run direct Swift schema-check scenario: %v", err)
 	}
-	// The consumer binds one public call to each authored wire expectation, so a
-	// short call list means the run skipped an authored schema transition.
-	if len(result.Calls) != len(scenario.WireExpectations) {
-		t.Fatalf("Swift schema-check calls = %d, want %d", len(result.Calls), len(scenario.WireExpectations))
+	callIDs := make(map[scenarios.NativeCallID]struct{})
+	for _, step := range scenario.Steps {
+		if step.NativeBinding.Kind == "public-call" {
+			callIDs[*step.NativeBinding.CallID] = struct{}{}
+		}
+	}
+	// Interrupted checkpoint cuts have no completed call result.
+	observed := len(result.Calls) + len(result.ProofCalls) + len(result.InterruptedCuts)
+	if observed != len(callIDs) {
+		t.Fatalf("Swift schema-check call windows = %d, want %d", observed, len(callIDs))
 	}
 }
 

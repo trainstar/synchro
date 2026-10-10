@@ -59,20 +59,24 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 if (existing.phase == MigrationPhase.PREPARED || existing.target != source) {
                     throw SynchroError.InvalidResponse("a different schema migration is already pending")
                 }
+                applyPreparedMigrationInTransaction(db)
                 db.execSQL("DELETE FROM _synchro_migration_journal WHERE singleton = 1")
             }
             val carriedScopes = existing?.affectedScopes.orEmpty().filterNot { scopeRebuildFinal(db, it) }
-            val plan = buildMigrationPlan(db, source, target, targetTables, resetMaterialization)
+            val sourceTables = sourceProjection(db, source)
+            validateMigrationSource(db, sourceTables, targetTables)
+            val affected = (response.affectedScopes.orEmpty() + carriedScopes).distinct().sortedWith(unsignedUTF8Comparator)
+            val updates = response.scopeCursorUpdates.toMutableMap()
+            affected.forEach { updates[it] = null }
+            val plan = buildMigrationPlan(source, target, sourceTables, targetTables, resetMaterialization)
             val planJSON = json.encodeToString(plan)
             val journal = LocalMigrationJournal(
                 journalVersion = MIGRATION_JOURNAL_VERSION,
                 source = source,
                 target = target,
-                action = response.schema.action,
-                affectedScopes = (response.affectedScopes.orEmpty() + carriedScopes)
-                    .distinct()
-                    .sortedWith(unsignedUTF8Comparator),
-                scopeCursorUpdates = response.scopeCursorUpdates.toSortedMap(),
+                action = if (affected.isEmpty()) SchemaAction.REPLACE else SchemaAction.REBUILD_LOCAL,
+                affectedScopes = affected,
+                scopeCursorUpdates = updates.toSortedMap(),
                 targetManifest = manifest,
                 targetTables = targetTables.sortedWith(compareBy { it.tableID }),
                 plan = plan,
@@ -80,6 +84,7 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 resetMaterialization = resetMaterialization,
                 phase = MigrationPhase.PREPARED,
             )
+            validateJournal(journal)
             persistMigrationJournal(db, journal, planJSON)
             journal
         }
@@ -90,8 +95,13 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         val journal = loadMigrationJournal(db) ?: return null
         validateJournal(journal)
         val current = currentSchemaRef(db)
+        val sourceTables = sourceProjection(db, journal.source)
+        if (journal.plan != buildMigrationPlan(journal.source, journal.target, sourceTables, journal.targetTables, journal.resetMaterialization)) {
+            throw SynchroError.InvalidResponse("schema migration plan is not authorized by its source and target")
+        }
         when {
             current == journal.source && journal.phase == MigrationPhase.PREPARED -> {
+                validateMigrationSource(db, sourceTables, journal.targetTables)
                 applyMigrationPlan(db, journal)
                 validateTargetPhysicalSchema(db, journal.targetTables)
                 archiveSchemaTables(db, journal.target.version, journal.target.hash, journal.targetTables)
@@ -105,7 +115,9 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 }
                 SynchroMeta.applyScopeCursorUpdates(
                     db,
-                    journal.scopeCursorUpdates,
+                    journal.scopeCursorUpdates.filterNot { (scopeID, cursor) ->
+                        cursor == null && scopeID in journal.affectedScopes && SynchroMeta.getScope(db, scopeID) == null
+                    },
                     journal.affectedScopes,
                 )
                 val phase = if (journal.affectedScopes.isEmpty()) {
@@ -120,6 +132,9 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 MigrationPhase.DDL_APPLIED,
                 MigrationPhase.AWAITING_REBUILD,
             ) -> {
+                if (sourceProjection(db, journal.target) != journal.targetTables) {
+                    throw SynchroError.InvalidResponse("schema migration target projection does not match its journal")
+                }
                 validateTargetPhysicalSchema(db, journal.targetTables)
                 return journal
             }
@@ -128,23 +143,42 @@ internal class SchemaManager(private val database: SynchroDatabase) {
     }
 
     /** Recovery runs before any connect, push, pull, or rebuild request. */
-    internal fun recoverPendingMigration() {
+    internal fun recoverPendingMigration(): LocalMigrationJournal? =
         database.writeTransaction { db ->
-            val journal = loadMigrationJournal(db) ?: return@writeTransaction
-            validateJournal(journal)
             applyPreparedMigrationInTransaction(db)
         }
-    }
 
     /** Clears a journal only after every required scope reached verified finality. */
-    internal fun completeMigrationIfReady() {
+    internal fun completeMigrationIfReady(authoritativeAssignmentsInstalled: Boolean = false) {
         database.writeTransaction { db ->
-            val journal = loadMigrationJournal(db) ?: return@writeTransaction
+            var journal = loadMigrationJournal(db) ?: return@writeTransaction
             validateJournal(journal)
+            if (journal.plan != buildMigrationPlan(journal.source, journal.target, sourceProjection(db, journal.source), journal.targetTables, journal.resetMaterialization)) {
+                throw SynchroError.InvalidResponse("schema migration plan is not authorized by its source and target")
+            }
             if (currentSchemaRef(db) != journal.target) {
                 throw SynchroError.InvalidResponse("schema migration journal lost its target schema")
             }
+            if (sourceProjection(db, journal.target) != journal.targetTables) {
+                throw SynchroError.InvalidResponse("schema migration target projection does not match its journal")
+            }
             validateTargetPhysicalSchema(db, journal.targetTables)
+            if (authoritativeAssignmentsInstalled && journal.phase != MigrationPhase.PREPARED) {
+                val absent = journal.affectedScopes.filter { SynchroMeta.getScope(db, it) == null }.toSet()
+                if (absent.isNotEmpty()) {
+                    val affected = journal.affectedScopes.filterNot { it in absent }
+                    journal = journal.copy(
+                        affectedScopes = affected,
+                        scopeCursorUpdates = journal.scopeCursorUpdates.filterKeys { it !in absent },
+                        action = if (affected.isEmpty()) SchemaAction.REPLACE else SchemaAction.REBUILD_LOCAL,
+                        phase = if (affected.isEmpty()) MigrationPhase.DDL_APPLIED else MigrationPhase.AWAITING_REBUILD,
+                    )
+                    db.execSQL(
+                        "UPDATE _synchro_migration_journal SET affected_scopes_json = ?, scope_cursor_updates_json = ?, action = ?, phase = ? WHERE singleton = 1",
+                        arrayOf(json.encodeToString(affected), json.encodeToString(journal.scopeCursorUpdates), journal.action.name.lowercase(), journal.phase.name.lowercase()),
+                    )
+                }
+            }
             val complete = when (journal.phase) {
                 MigrationPhase.DDL_APPLIED -> journal.affectedScopes.isEmpty()
                 MigrationPhase.AWAITING_REBUILD -> journal.affectedScopes.all { scopeRebuildFinal(db, it) }
@@ -157,7 +191,7 @@ internal class SchemaManager(private val database: SynchroDatabase) {
     }
 
     private fun scopeRebuildFinal(db: SQLiteDatabase, scopeID: String): Boolean {
-        val scope = SynchroMeta.getScope(db, scopeID) ?: return true
+        val scope = SynchroMeta.getScope(db, scopeID) ?: return false
         return scope.cursor != null && scope.checksum != null && SynchroMeta.getRebuildAttempt(db, scopeID) == null
     }
 
@@ -292,16 +326,15 @@ internal class SchemaManager(private val database: SynchroDatabase) {
     }
 
     private fun buildMigrationPlan(
-        db: SQLiteDatabase,
         source: SchemaRef,
         target: SchemaRef,
+        sourceTables: List<LocalSchemaTable>,
         targetTables: List<LocalSchemaTable>,
         resetMaterialization: Boolean,
     ): MigrationPlan {
         val operations = if (resetMaterialization) {
             listOf(MigrationOperation(MigrationOperationKind.REPLACE_SYNCED_MATERIALIZATION))
         } else {
-            val sourceTables = loadStoredLocalSchemaInTransaction(db).orEmpty()
             val sourceByID = sourceTables.associateBy { it.tableID }
             val targetByID = targetTables.associateBy { it.tableID }
             val planned = mutableListOf<MigrationOperation>()
@@ -317,11 +350,7 @@ internal class SchemaManager(private val database: SynchroDatabase) {
 
             targetTables.sortedWith(compareBy { it.tableID }).forEach { table ->
                 val sourceTable = sourceByID[table.tableID]?.takeIf { it.tableName == table.tableName }
-                val exists = hasTable(db, table.tableName)
-                if (exists && sourceTable == null) {
-                    throw SynchroError.InvalidResponse("schema migration target table collides with an unowned table")
-                }
-                if (!exists) {
+                if (sourceTable == null) {
                     planned += MigrationOperation(MigrationOperationKind.CREATE_TABLE, table = table)
                     table.indexes.sortedWith(compareBy { it.indexID }).forEach { index ->
                         planned += MigrationOperation(MigrationOperationKind.CREATE_INDEX, table = table, index = index)
@@ -329,40 +358,43 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                     return@forEach
                 }
 
-                val present = tableColumnNames(db, table.tableName)
-                val retired = present - table.columns.map { it.name }.toSet()
-                if (retired.isNotEmpty()) {
-                    throw SynchroError.InvalidResponse("schema migration removes synced columns without a reset")
+                val targetColumns = table.columns.associateBy { it.fieldID }
+                if (sourceTable.primaryKeyFieldID != table.primaryKeyFieldID ||
+                    sourceTable.columns.any { old ->
+                        val next = targetColumns[old.fieldID]
+                        next == null || next.name != old.name || next.logicalType != old.logicalType ||
+                            next.isPrimaryKey != old.isPrimaryKey || (old.nullable && !next.nullable) ||
+                            next.sqliteDefaultSQL != old.sqliteDefaultSQL
+                    }
+                ) {
+                    throw SynchroError.InvalidResponse("schema migration has an incompatible retained field")
                 }
+                if (sourceTable.columns.any { !it.nullable && targetColumns.getValue(it.fieldID).nullable }) {
+                    planned += MigrationOperation(MigrationOperationKind.RECREATE_TABLE, table = table)
+                    table.indexes.sortedWith(compareBy { it.indexID }).forEach { index ->
+                        planned += MigrationOperation(MigrationOperationKind.CREATE_INDEX, table = table, index = index)
+                    }
+                    return@forEach
+                }
+                val present = sourceTable.columns.map { it.fieldID }.toSet()
                 val additions = table.columns
-                    .filter { it.name !in present }
+                    .filter { it.fieldID !in present }
                     .map { it.fieldID }
                     .sortedWith(unsignedUTF8Comparator)
                 if (additions.isNotEmpty()) {
                     planned += MigrationOperation(MigrationOperationKind.ADD_COLUMNS, table, additions)
                 }
 
-                val existingIndexes = physicalClientIndexes(db, table.tableName).associateBy { it.name }
-                val ownedIndexes = sourceTable!!.indexes.associateBy { it.name }
-                if (existingIndexes.keys != ownedIndexes.keys) {
-                    throw SynchroError.InvalidResponse("schema migration source indexes are not client-owned")
-                }
+                val ownedIndexes = sourceTable.indexes.associateBy { it.name }
                 val targetIndexes = table.indexes.associateBy { it.name }
                 sourceTable.indexes.sortedWith(compareBy { it.indexID }).forEach { index ->
                     val targetIndex = targetIndexes[index.name]
-                    val current = existingIndexes.getValue(index.name)
-                    val sourcePhysical = PhysicalIndex(index.name, index.unique, index.columnNames, partial = false)
-                    if (current != sourcePhysical) {
-                        throw SynchroError.InvalidResponse("schema migration source index is invalid")
-                    }
                     if (targetIndex == null || targetIndex != index) {
                         planned += MigrationOperation(MigrationOperationKind.DROP_INDEX, table = sourceTable, index = index)
                     }
                 }
                 table.indexes.sortedWith(compareBy { it.indexID }).forEach { index ->
-                    val current = existingIndexes[index.name]
-                    val expected = PhysicalIndex(index.name, index.unique, index.columnNames, partial = false)
-                    if (current == null || current != expected || ownedIndexes[index.name] != index) {
+                    if (ownedIndexes[index.name] != index) {
                         planned += MigrationOperation(MigrationOperationKind.CREATE_INDEX, table = table, index = index)
                     }
                 }
@@ -384,6 +416,23 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             return
         }
         validateSchemaCompatibility(db, journal.targetTables)
+        val views = mutableListOf<Pair<String, String>>()
+        val viewTriggers = mutableListOf<String>()
+        if (journal.plan.operations.any { it.kind == MigrationOperationKind.RECREATE_TABLE }) {
+            // SQLite has no view dependency catalog. Save all views to include transitive dependencies without parsing SQL.
+            db.rawQuery(
+                "SELECT type, name, sql FROM sqlite_master WHERE type = 'view' OR " +
+                    "(type = 'trigger' AND tbl_name COLLATE NOCASE IN (SELECT name FROM sqlite_master WHERE type = 'view')) ORDER BY rowid",
+                null,
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    if (cursor.isNull(2)) throw SynchroError.InvalidResponse("schema migration view definition is missing")
+                    val sql = cursor.getString(2)
+                    if (cursor.getString(0) == "view") views += cursor.getString(1) to sql else viewTriggers += sql
+                }
+            }
+            views.forEach { (name, _) -> db.execSQL("DROP VIEW ${SQLiteHelpers.quoteIdentifier(name)}") }
+        }
         journal.plan.operations.forEach { operation ->
             when (operation.kind) {
                 MigrationOperationKind.CREATE_TABLE -> {
@@ -406,10 +455,32 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                     operation.columnFieldIDs.forEach { fieldID ->
                         val column = byID[fieldID]
                             ?: throw SynchroError.InvalidResponse("schema migration references an unknown field")
-                        if (column.name !in tableColumnNames(db, table.tableName)) {
-                            addSyncedColumn(db, table, column)
-                        }
+                        addSyncedColumn(db, table, column)
                     }
+                }
+                MigrationOperationKind.RECREATE_TABLE -> {
+                    val target = operation.table!!
+                    val source = sourceProjection(db, journal.source).single { it.tableID == target.tableID }
+                    val temporaryName = "_synchro_migration_${target.tableID}"
+                    if (hasTable(db, temporaryName)) {
+                        throw SynchroError.InvalidResponse("schema migration temporary table already exists")
+                    }
+                    val physical = physicalColumns(db, source.tableName).associateBy { it.name }
+                    val oldColumns = source.columns.associateBy { it.fieldID }
+                    // Required additions need nullable storage when retained rows have no target value.
+                    val storage = target.copy(tableName = temporaryName, columns = target.columns.map { column ->
+                        val old = oldColumns[column.fieldID]
+                        val nullableStorage = !column.isPrimaryKey && !column.nullable && column.sqliteDefaultSQL == null &&
+                            (old == null || physical.getValue(old.name).notNull.not())
+                        if (nullableStorage) column.copy(nullable = true) else column
+                    })
+                    db.execSQL(SQLiteSchema.generateCreateTableSQL(storage))
+                    val retained = target.columns.mapNotNull { next -> oldColumns[next.fieldID]?.let { it.name to next.name } }
+                    val into = retained.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it.second) }
+                    val from = retained.joinToString(", ") { SQLiteHelpers.quoteIdentifier(it.first) }
+                    db.execSQL("INSERT INTO ${SQLiteHelpers.quoteIdentifier(temporaryName)} ($into) SELECT $from FROM ${SQLiteHelpers.quoteIdentifier(source.tableName)}")
+                    db.execSQL("DROP TABLE ${SQLiteHelpers.quoteIdentifier(source.tableName)}")
+                    db.execSQL("ALTER TABLE ${SQLiteHelpers.quoteIdentifier(temporaryName)} RENAME TO ${SQLiteHelpers.quoteIdentifier(target.tableName)}")
                 }
                 MigrationOperationKind.DROP_INDEX -> {
                     val index = operation.index
@@ -430,6 +501,11 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         }
         journal.targetTables.forEach { table ->
             SQLiteSchema.generateCDCTriggers(table).forEach(db::execSQL)
+        }
+        views.forEach { (_, sql) -> db.execSQL(sql) }
+        viewTriggers.forEach(db::execSQL)
+        views.forEach { (name, _) ->
+            db.rawQuery("SELECT * FROM ${SQLiteHelpers.quoteIdentifier(name)} LIMIT 0", null).use { it.columnCount }
         }
     }
 
@@ -549,19 +625,46 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         }
     }
 
+    private fun sourceProjection(db: SQLiteDatabase, reference: SchemaRef): List<LocalSchemaTable> {
+        val tables = if (reference == SchemaRef(0, "")) emptyList() else {
+            val encoded = db.rawQuery(
+                "SELECT manifest_json FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
+                arrayOf(reference.version.toString(), reference.hash),
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) throw SynchroError.InvalidResponse("schema migration source archive is missing")
+                cursor.getString(0)
+            }
+            try {
+                json.decodeFromString<List<LocalSchemaTable>>(encoded)
+            } catch (_: Exception) {
+                throw SynchroError.InvalidResponse("schema migration source archive is invalid")
+            }
+        }
+        if (tables.map { it.tableID }.toSet().size != tables.size || tables.any { table ->
+                table.columns.map { it.fieldID }.toSet().size != table.columns.size ||
+                    table.indexes.map { it.indexID }.toSet().size != table.indexes.size
+            }
+        ) {
+            throw SynchroError.InvalidResponse("schema migration source projection has duplicate identifiers")
+        }
+        if (reference == currentSchemaRef(db) && loadStoredLocalSchemaInTransaction(db).orEmpty() != tables) {
+            throw SynchroError.InvalidResponse("schema migration source projection does not match active metadata")
+        }
+        return tables
+    }
+
+    private fun validateMigrationSource(db: SQLiteDatabase, sourceTables: List<LocalSchemaTable>, targetTables: List<LocalSchemaTable>) {
+        validateTargetPhysicalSchema(db, sourceTables)
+        val ownedNames = sourceTables.map { it.tableName }.toSet()
+        if (targetTables.any { hasTable(db, it.tableName) && it.tableName !in ownedNames }) {
+            throw SynchroError.InvalidResponse("schema migration target table collides with an unowned table")
+        }
+    }
+
     private fun hasTable(db: SQLiteDatabase, tableName: String): Boolean = db.rawQuery(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         arrayOf(tableName),
     ).use { it.moveToFirst() }
-
-    private fun tableColumnNames(db: SQLiteDatabase, tableName: String): Set<String> {
-        val names = mutableSetOf<String>()
-        db.rawQuery("PRAGMA table_info(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
-            val index = cursor.getColumnIndex("name")
-            while (cursor.moveToNext()) names += cursor.getString(index)
-        }
-        return names
-    }
 
     private data class PhysicalColumn(
         val name: String,
@@ -580,13 +683,28 @@ internal class SchemaManager(private val database: SynchroDatabase) {
 
     private fun physicalColumns(db: SQLiteDatabase, tableName: String): List<PhysicalColumn> {
         val columns = mutableListOf<PhysicalColumn>()
-        db.rawQuery("PRAGMA table_info(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
+        val virtual = db.rawQuery("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", arrayOf(tableName)).use { cursor ->
+            cursor.moveToFirst() && cursor.getString(0).trimStart().startsWith("CREATE VIRTUAL TABLE", ignoreCase = true)
+        }
+        if (virtual) throw SynchroError.InvalidResponse("synced table has an unsupported virtual representation")
+        val version = db.rawQuery("SELECT sqlite_version()", null).use { cursor ->
+            if (!cursor.moveToFirst()) throw SynchroError.InvalidResponse("SQLite version is unavailable")
+            cursor.getString(0).split('.').map { it.toInt() }
+        }
+        // SQLite before 3.26 has no table_xinfo and cannot store generated columns.
+        val extended = version[0] > 3 || (version[0] == 3 && version[1] >= 26)
+        val pragma = if (extended) "table_xinfo" else "table_info"
+        db.rawQuery("PRAGMA $pragma(${SQLiteHelpers.quoteIdentifier(tableName)})", null).use { cursor ->
             val nameIndex = cursor.getColumnIndexOrThrow("name")
             val typeIndex = cursor.getColumnIndexOrThrow("type")
             val notNullIndex = cursor.getColumnIndexOrThrow("notnull")
             val defaultIndex = cursor.getColumnIndexOrThrow("dflt_value")
             val primaryKeyIndex = cursor.getColumnIndexOrThrow("pk")
+            val hiddenIndex = if (extended) cursor.getColumnIndexOrThrow("hidden") else -1
             while (cursor.moveToNext()) {
+                if (hiddenIndex >= 0 && cursor.getInt(hiddenIndex) != 0) {
+                    throw SynchroError.InvalidResponse("synced table has an unsupported hidden or generated column")
+                }
                 columns += PhysicalColumn(
                     name = cursor.getString(nameIndex),
                     type = cursor.getString(typeIndex).uppercase(),
@@ -652,7 +770,10 @@ internal class SchemaManager(private val database: SynchroDatabase) {
         }
     }
 
-    private fun validateTargetPhysicalSchema(db: SQLiteDatabase, tables: List<LocalSchemaTable>) {
+    private fun validateTargetPhysicalSchema(
+        db: SQLiteDatabase,
+        tables: List<LocalSchemaTable>,
+    ) {
         tables.forEach { table ->
             if (!hasTable(db, table.tableName)) {
                 throw SynchroError.InvalidResponse("schema migration target table is missing")
@@ -667,8 +788,13 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 )
             }
             val actualColumns = physicalColumns(db, table.tableName)
+            val actualByName = actualColumns.associateBy { it.name }
             if (actualColumns.size != expectedColumns.size ||
-                actualColumns.associateBy { it.name } != expectedColumns.associateBy { it.name }
+                expectedColumns.any { expected ->
+                    val actual = actualByName[expected.name]
+                    actual != expected && !(expected.notNull && expected.primaryKeyPosition == 0 &&
+                        expected.defaultSQL == null && actual == expected.copy(notNull = false))
+                }
             ) {
                 throw SynchroError.InvalidResponse("schema migration target columns do not match the manifest")
             }
@@ -680,9 +806,27 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 throw SynchroError.InvalidResponse("schema migration target indexes do not match the manifest")
             }
         }
-        try {
-            ApplicationWriteGuard.requireExactAllowedTriggerSet(db, tables)
-        } catch (_: IllegalStateException) {
+        val expectedTriggers = tables.flatMap { table ->
+            SQLiteSchema.expectedCDCTriggerSQL(table).map { (name, sql) ->
+                name to (table.tableName to SQLiteSchema.canonicalDDL(sql))
+            }
+        }.toMap()
+        val actualTriggers = mutableMapOf<String, Pair<String, String?>>()
+        db.rawQuery(
+            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND " +
+                "tbl_name COLLATE NOCASE NOT IN (SELECT name FROM sqlite_master WHERE type = 'view')",
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                actualTriggers[cursor.getString(0)] = cursor.getString(1) to
+                    if (cursor.isNull(2)) null else SQLiteSchema.canonicalDDL(cursor.getString(2))
+            }
+        }
+        if (actualTriggers.keys != expectedTriggers.keys || expectedTriggers.any { (name, expected) ->
+                val actual = actualTriggers[name]
+                actual == null || !actual.first.equals(expected.first, ignoreCase = true) || actual.second != expected.second
+            }
+        ) {
             throw SynchroError.InvalidResponse("schema migration target triggers do not match the manifest")
         }
     }
@@ -794,61 +938,25 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             throw SynchroError.InvalidResponse("schema migration journal manifest hash is invalid")
         }
         val expectedTables = journal.targetManifest.localTables().associateBy { it.tableID }
-        if (journal.targetTables.associateBy { it.tableID } != expectedTables) {
+        if (journal.targetTables.size != expectedTables.size || journal.targetTables.associateBy { it.tableID } != expectedTables) {
             throw SynchroError.InvalidResponse("schema migration journal tables are invalid")
         }
         if (journal.affectedScopes.any { it.isEmpty() } ||
             journal.affectedScopes != journal.affectedScopes.distinct().sortedWith(unsignedUTF8Comparator) ||
-            journal.scopeCursorUpdates.keys.any { it.isEmpty() }
+            journal.scopeCursorUpdates.keys.any { it.isEmpty() } ||
+            journal.scopeCursorUpdates.values.any { it != null && it.isEmpty() } ||
+            (journal.action == SchemaAction.REBUILD_LOCAL) != journal.affectedScopes.isNotEmpty() ||
+            journal.affectedScopes.any { it !in journal.scopeCursorUpdates || journal.scopeCursorUpdates[it] != null } ||
+            journal.scopeCursorUpdates.any { (scope, cursor) -> cursor == null && scope !in journal.affectedScopes } ||
+            (journal.resetMaterialization && journal.scopeCursorUpdates.keys != journal.affectedScopes.toSet()) ||
+            (journal.phase == MigrationPhase.DDL_APPLIED && journal.affectedScopes.isNotEmpty()) ||
+            (journal.phase == MigrationPhase.AWAITING_REBUILD && journal.affectedScopes.isEmpty())
         ) {
             throw SynchroError.InvalidResponse("schema migration journal scope state is invalid")
         }
         val planJSON = json.encodeToString(journal.plan)
         if (migrationPlanHash(planJSON) != journal.planHash) {
             throw SynchroError.InvalidResponse("schema migration journal plan is invalid")
-        }
-        validateMigrationPlan(journal.plan, journal.targetTables)
-    }
-
-    private fun validateMigrationPlan(plan: MigrationPlan, targetTables: List<LocalSchemaTable>) {
-        val targetByID = targetTables.associateBy { it.tableID }
-        plan.operations.forEach { operation ->
-            val table = operation.table
-            when (operation.kind) {
-                MigrationOperationKind.CREATE_TABLE,
-                MigrationOperationKind.DROP_TABLE -> {
-                    if (table == null || operation.columnFieldIDs.isNotEmpty() || operation.index != null) {
-                        throw SynchroError.InvalidResponse("schema migration plan table operation is invalid")
-                    }
-                }
-                MigrationOperationKind.ADD_COLUMNS -> {
-                    if (table == null || operation.index != null || operation.columnFieldIDs.isEmpty() ||
-                        operation.columnFieldIDs != operation.columnFieldIDs.distinct().sortedWith(unsignedUTF8Comparator) ||
-                        operation.columnFieldIDs.any { fieldID -> table.columns.none { it.fieldID == fieldID } }
-                    ) {
-                        throw SynchroError.InvalidResponse("schema migration plan column operation is invalid")
-                    }
-                }
-                MigrationOperationKind.DROP_INDEX,
-                MigrationOperationKind.CREATE_INDEX -> {
-                    val index = operation.index
-                    if (table == null || index == null || operation.columnFieldIDs.isNotEmpty() ||
-                        index.columnNames.isEmpty() || index.columnNames.any { name -> table.columns.none { it.name == name } }
-                    ) {
-                        throw SynchroError.InvalidResponse("schema migration plan index operation is invalid")
-                    }
-                    if (operation.kind == MigrationOperationKind.CREATE_INDEX &&
-                        targetByID[table.tableID]?.indexes?.none { it == index } != false
-                    ) {
-                        throw SynchroError.InvalidResponse("schema migration plan creates an unknown target index")
-                    }
-                }
-                MigrationOperationKind.REPLACE_SYNCED_MATERIALIZATION -> {
-                    if (table != null || operation.columnFieldIDs.isNotEmpty() || operation.index != null) {
-                        throw SynchroError.InvalidResponse("schema migration reset operation is invalid")
-                    }
-                }
-            }
         }
     }
 
@@ -899,9 +1007,14 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             throw SynchroError.InvalidResponse("scope cursor update targets an unknown scope $scopeId")
         }
         val tablesByName = tables.associateBy { it.tableName }
-        val entries = SynchroMeta.getScopeRows(db, scopeId).map { (tableName, recordId) ->
+        var hasProtectedProvenance = false
+        val entries = SynchroMeta.getScopeRows(db, scopeId).mapNotNull { (tableName, recordId) ->
             val table = tablesByName[tableName]
                 ?: throw SynchroError.InvalidResponse("scope references unknown table $tableName")
+            if (isApplicationRowProtected(db, tableName, recordId)) {
+                hasProtectedProvenance = true
+                return@mapNotNull null
+            }
             val row = loadWireRow(db, table, recordId)
             val primaryKey = row[table.primaryKeyFieldID]
                 ?: throw SynchroError.InvalidResponse("scope row lacks its primary key field")
@@ -923,11 +1036,14 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             )
             computed.identity to computed.checksum
         }
-        val localChecksum = Integrity.scopeDigest(schemaHash, scopeId, entries)
+        // Protected rows retain source provenance, which cannot verify target-schema integrity.
+        val localChecksum = if (hasProtectedProvenance) "" else {
+            json.encodeToString(ChecksumObject.serializer(), Integrity.scopeDigest(schemaHash, scopeId, entries))
+        }
         SynchroMeta.setScopeLocalChecksum(
             db,
             scopeId,
-            json.encodeToString(ChecksumObject.serializer(), localChecksum),
+            localChecksum,
         )
     }
 

@@ -329,6 +329,24 @@ export interface ClientStateInspection {
   provenanceMaintenanceWorkCursor: string;
 }
 
+export type MigrationCheckpoint = 'migration_prepared' | 'migration_committed';
+
+export interface MigrationJournalInspection {
+  source: SchemaRef;
+  target: SchemaRef;
+  action: string;
+  phase: string;
+  stored: Record<string, string>;
+}
+
+export interface PhysicalSchemaColumnInspection {
+  table_name: string;
+  name: string;
+  type: string;
+  not_null: boolean;
+  primary_key_position: number;
+}
+
 export type TransportOperationClass =
   | 'connect'
   | 'pull'
@@ -342,12 +360,15 @@ export interface TransportObservation {
   sequence: number;
   operationClass: TransportOperationClass;
   statusCode: number;
+  errorCode?: string;
+  retryable?: boolean;
   durationNanoseconds: number;
   cursorFingerprints?: string[];
   cursorFingerprintsComplete?: boolean;
   requestFacts?: Record<string, JSONValue>;
   rebuildResponseFacts?: Record<string, JSONValue>;
   pullResponseFacts?: Record<string, JSONValue>;
+  connectResponseFacts?: Record<string, JSONValue>;
 }
 
 export interface TransportObservationSnapshot {

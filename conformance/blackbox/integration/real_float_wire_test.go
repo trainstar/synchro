@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/scenarios"
 	"github.com/trainstar/synchro/conformance/vectors"
 )
 
@@ -34,11 +35,11 @@ func TestRealFloatWire(t *testing.T) {
 	harness, token := provisionRealProofHarness(t, ctx)
 
 	// The diagnostic schema has no float field. The fixed operator transitions add one to cf_items.
-	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_items", "", "measure", "", ""); err != nil {
+	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_items", "", &scenarios.QueueReplaySchemaField{Name: "measure", Type: "string", Nullable: true, Writable: true}, "", ""); err != nil {
 		t.Fatalf("add float wire field: %v", err)
 	}
 	waitForRealFloatWireField(t, ctx, harness, "", "string")
-	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_items", "", "", "measure", "float"); err != nil {
+	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_items", "", nil, "measure", "float"); err != nil {
 		t.Fatalf("change float wire field type: %v", err)
 	}
 	manifest, measureField := waitForRealFloatWireField(t, ctx, harness, "string", "float")

@@ -1,6 +1,7 @@
 package scenarios
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -701,6 +702,28 @@ func (v *scenarioValidator) validateAssertionsAndObligations() {
 			}
 		} else if expectation.StateFacts != nil {
 			v.add("%s model expectation %s has state facts for a non-state predicate", v.scenario.ID, expectation.ID)
+		}
+		var boundary struct {
+			After   StepID        `json:"after_step_id"`
+			Before  StepID        `json:"before_step_id"`
+			Compare ExpectationID `json:"compare_to"`
+		}
+		if json.Unmarshal(expectation.Predicate.Payload, &boundary) == nil && (boundary.After != "" || boundary.Before != "") {
+			if expectation.Predicate.ContractPredicate != "state-transition" || expectation.Predicate.Name != "legal-state-transition" {
+				v.add("%s model expectation %s capture boundary requires a legal state transition", v.scenario.ID, expectation.ID)
+			}
+			for _, id := range []StepID{boundary.After, boundary.Before} {
+				if id != "" {
+					if _, found := v.steps[id]; !found {
+						v.add("%s model expectation %s references unknown capture boundary %s", v.scenario.ID, expectation.ID, id)
+					}
+				}
+			}
+			if boundary.Compare != "" {
+				if _, found := v.expectations[boundary.Compare]; !found {
+					v.add("%s model expectation %s references unknown comparison %s", v.scenario.ID, expectation.ID, boundary.Compare)
+				}
+			}
 		}
 	}
 }

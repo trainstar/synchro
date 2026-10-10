@@ -16,7 +16,7 @@ final class InspectionFacadeContractTests: XCTestCase {
 
     /// Named types that the facade uses but does not define. The public client API owns them.
     private func referencedNames(_ operations: [Operation], _ models: [Model]) -> [String] {
-        let defined = Set(models.map(\.name)).union(["array", "function", "void", "string", "bool", "int", "int64"])
+        let defined = Set(models.map(\.name)).union(["array", "string-map", "function", "void", "string", "bool", "int", "int64"])
         var names = Set<String>()
         func visit(_ shape: TypeShape) {
             if !defined.contains(shape.name) { names.insert(shape.name) }
@@ -85,7 +85,13 @@ final class InspectionFacadeContractTests: XCTestCase {
             capture: capture, pendingChangeCount: 1, retainedMutations: nil, rejectedMutations: nil,
             blockingFailure: nil
         )
-        return [schema, scopeState, scopeRow, capture, snapshot, metadata, attempt, receipt].map(model)
+        let journal = MigrationJournalInspection(
+            source: schema, target: schema, action: "replace", phase: "prepared", stored: ["key": "value"]
+        )
+        let column = PhysicalSchemaColumnInspection(
+            tableName: "table", name: "id", type: "TEXT", notNull: true, primaryKeyPosition: 1
+        )
+        return [schema, scopeState, scopeRow, capture, snapshot, metadata, attempt, receipt, journal, column].map(model)
     }
 
     private func snapshotOperation(
@@ -157,6 +163,13 @@ final class InspectionFacadeContractTests: XCTestCase {
 
     private func typeShape(_ type: Any.Type) -> TypeShape {
         if type == Optional<SchemaRef>.self { return TypeShape(name: "SchemaRef", nullable: true) }
+        if type == Optional<MigrationJournalInspection>.self { return TypeShape(name: "MigrationJournalInspection", nullable: true) }
+        if type == [PhysicalSchemaColumnInspection].self {
+            return TypeShape(name: "array", nullable: false, element: TypeShape(name: "PhysicalSchemaColumnInspection", nullable: false))
+        }
+        if type == [String: String].self {
+            return TypeShape(name: "string-map", nullable: false, element: TypeShape(name: "string", nullable: false))
+        }
         if type == ClientStateSnapshotInspection.self { return TypeShape(name: "ClientStateSnapshotInspection", nullable: false) }
         // Swift has one application transaction type. The snapshot gives it a read-only connection.
         if type == ApplicationTransaction.self { return TypeShape(name: "ApplicationReadTransaction", nullable: false) }

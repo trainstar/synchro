@@ -14,12 +14,15 @@ CELL_FIELDS = {
     "SUP-PG-LINUX-X64-001": frozenset({"architecture", "os", "postgresql"}),
     "SUP-IOS-MIN-001": frozenset({"ios", "xcode"}),
     "SUP-IOS-CURRENT-001": frozenset({"ios", "xcode"}),
+    "SUP-RN-IOS-MIN-001": frozenset({"ios", "xcode", "react_native"}),
     "SUP-RN-IOS-CURRENT-001": frozenset({"ios", "xcode", "react_native"}),
     "SUP-ANDROID-MIN-001": ANDROID_FIELDS,
     "SUP-ANDROID-CURRENT-001": ANDROID_FIELDS,
+    "SUP-RN-ANDROID-MIN-001": ANDROID_FIELDS | {"react_native"},
     "SUP-RN-ANDROID-CURRENT-001": ANDROID_FIELDS | {"react_native"},
 }
 REQUIRED_IDS = frozenset(CELL_FIELDS)
+RN_MIN_CELLS = frozenset({"SUP-RN-IOS-MIN-001", "SUP-RN-ANDROID-MIN-001"})
 COMPONENT = r"(?:0|[1-9][0-9]*)"
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 APPLE_VERSION = re.compile(rf"{COMPONENT}\.{COMPONENT}(?:\.{COMPONENT})?")
@@ -66,7 +69,7 @@ def validate_environment(cell_id: object, value: object) -> dict[str, str]:
         if not APPLE_VERSION.fullmatch(value["ios"]) or not APPLE_VERSION.fullmatch(value["xcode"]):
             raise EnvironmentError(f"cell {cell_id} requires canonical Apple versions")
         major = version_components(value["ios"])[0]
-        if major < 16 or (cell_id == "SUP-IOS-MIN-001" and major != 16):
+        if major < 17 or (cell_id == "SUP-IOS-MIN-001" and major != 17):
             raise EnvironmentError(f"cell {cell_id} iOS version violates the supported minimum")
     if "android_api" in value:
         for field in ("android_api", "system_image_revision", "emulator_build"):
@@ -84,16 +87,20 @@ def validate_environment(cell_id: object, value: object) -> dict[str, str]:
         if not THREE_COMPONENT_VERSION.fullmatch(value["react_native"]):
             raise EnvironmentError(f"cell {cell_id} requires a canonical React Native version")
         runtime = version_components(value["react_native"])
-        if runtime[:2] != (0, 83):
-            raise EnvironmentError(f"cell {cell_id} React Native must use the supported 0.83 series")
-        if "xcode" in value and version_components(value["xcode"]) >= (26, 4) and runtime[2] < 5:
-            raise EnvironmentError(f"cell {cell_id} Xcode 26.4 or later requires React Native 0.83.5 or later")
+        if cell_id in RN_MIN_CELLS:
+            if runtime != (0, 82, 1):
+                raise EnvironmentError(f"cell {cell_id} React Native must use 0.82.1")
+        else:
+            if runtime[:2] != (0, 83):
+                raise EnvironmentError(f"cell {cell_id} React Native must use the supported 0.83 series")
+            if "xcode" in value and version_components(value["xcode"]) >= (26, 4) and runtime[2] < 5:
+                raise EnvironmentError(f"cell {cell_id} Xcode 26.4 or later requires React Native 0.83.5 or later")
     return dict(sorted(value.items()))
 
 
 def validate_required_ids(required_ids: set[str] | frozenset[str]) -> None:
     if required_ids != REQUIRED_IDS:
-        raise EnvironmentError("support matrix required IDs do not match the seven supported profiles")
+        raise EnvironmentError("support matrix required IDs do not match the nine supported profiles")
 
 
 def validate_records(
@@ -119,7 +126,9 @@ def validate_records(
         raise EnvironmentError("support environments must contain every required cell exactly once")
     for native, bridge, field in (
         ("SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "ios"),
+        ("SUP-IOS-CURRENT-001", "SUP-RN-IOS-MIN-001", "ios"),
         ("SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001", "android_api"),
+        ("SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-MIN-001", "android_api"),
     ):
         if native in records and bridge in records and records[native][field] != records[bridge][field]:
             raise EnvironmentError(f"native and React Native current {field} versions differ")

@@ -467,7 +467,9 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let inspection = try XCTUnwrap(try JSONSerialization.jsonObject(with: json) as? [String: Any])
         XCTAssertEqual(
             Set(inspection.keys),
-            ["client_state", "retained_mutations", "rejected_mutations"]
+            ["client_state", "retained_mutations", "rejected_mutations", "migration_journal",
+             "migration_journal_truncated", "physical_schema", "physical_schema_truncated",
+             "accepted_mutation_outcomes", "accepted_mutation_outcomes_truncated"]
         )
         // bridge_items is a local table, so the mutation ledger stays empty.
         for member in ["retained_mutations", "rejected_mutations"] {

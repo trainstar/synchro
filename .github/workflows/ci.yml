@@ -164,11 +164,6 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install --locked --force cargo-mutants --version 27.1.0
 
-      - name: Start local PostgreSQL
-        run: |
-          make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
-
       - name: Run candidate-server tests
         run: make ci-candidate-server SOAK_ARTIFACT_DIR="$RUNNER_TEMP/soak-evidence"
 
@@ -180,10 +175,6 @@ jobs:
           path: ${{ runner.temp }}/soak-evidence
           # A failure before the stress test leaves no journal. The test step keeps that failure.
           if-no-files-found: ignore
-
-      - name: Stop local PostgreSQL
-        if: always()
-        run: make local-postgres-stop
 
   candidate-swift:
     name: candidate Swift
@@ -318,7 +309,7 @@ jobs:
   candidate-rn-ios:
     name: candidate React Native iOS
     if: github.event_name == 'push'
-    runs-on: macos-15
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -352,6 +343,18 @@ jobs:
             brew install wix/brew/applesimutils
           fi
 
+      - name: Select Xcode 27 and current iOS simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_27.0.app
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = '27.0'
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == "27.0" }; abort "iOS 27.0 runtime is required" unless r; puts r.fetch("identifier")')"
+          udid="$(xcrun simctl create Synchro_RN_Current com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          echo "RN_IOS_TEST_DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
       - name: Start local PostgreSQL
         run: |
           set -euo pipefail
@@ -378,6 +381,12 @@ jobs:
         run: |
           make synchrod-pg-test-stop
           make local-postgres-stop
+
+      - name: Delete React Native simulator
+        if: always() && env.IOS_SIMULATOR_UDID != ''
+        run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+          xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
 
   candidate-rn-android:
     name: candidate React Native Android
@@ -450,9 +459,6 @@ jobs:
           make local-postgres-start
           echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
 
-      - name: Build React Native Android app
-        run: make test-rn-e2e-android-build
-
       - name: Enable KVM permissions
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -466,7 +472,7 @@ jobs:
           python3 scripts/ci/run_android_emulator.py \
             --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
             --api 34 --image-api 34 --avd-name Pixel_7_API_34 --profile pixel_7 --memory 6144 \
-            --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make ci-candidate-rn-android
+            --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make test-rn-e2e-android-build ci-candidate-rn-android
 
   pull-request:
     name: pull-request

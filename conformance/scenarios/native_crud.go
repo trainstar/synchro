@@ -841,13 +841,36 @@ func RequireLocalWriteRow(write Operation, rows []map[string]json.RawMessage) er
 	}
 	var payload struct {
 		PK      map[string]json.RawMessage `json:"pk"`
-		Columns []struct {
-			FieldID string          `json:"field_id"`
-			Value   json.RawMessage `json:"value"`
-		} `json:"columns"`
+		Columns json.RawMessage            `json:"columns"`
 	}
 	if err := json.Unmarshal(write.Payload, &payload); err != nil || len(payload.PK) != 1 || len(payload.Columns) == 0 {
 		return errors.New("local write row check payload is invalid")
+	}
+	var columns map[string]json.RawMessage
+	if err := json.Unmarshal(payload.Columns, &columns); err != nil {
+		var entries []map[string]json.RawMessage
+		if err := json.Unmarshal(payload.Columns, &entries); err != nil {
+			return errors.New("local write row check columns are invalid")
+		}
+		columns = make(map[string]json.RawMessage, len(entries))
+		for _, entry := range entries {
+			var fieldID string
+			if len(entry) != 2 || json.Unmarshal(entry["field_id"], &fieldID) != nil {
+				return errors.New("local write row check column is invalid")
+			}
+			if _, duplicate := columns[fieldID]; duplicate {
+				return errors.New("local write row check column is duplicated")
+			}
+			columns[fieldID] = entry["value"]
+		}
+	}
+	if len(columns) == 0 {
+		return errors.New("local write row check columns are empty")
+	}
+	for fieldID, value := range columns {
+		if fieldID == "" || !json.Valid(value) {
+			return errors.New("local write row check column is invalid")
+		}
 	}
 	var matched map[string]json.RawMessage
 	for field, key := range payload.PK {
@@ -868,13 +891,13 @@ func RequireLocalWriteRow(write Operation, rows []map[string]json.RawMessage) er
 			return fmt.Errorf("local write row %s is absent from %d captured rows with keys %v", key, len(rows), observed)
 		}
 	}
-	for _, column := range payload.Columns {
-		observed, found := matched[column.FieldID]
+	for fieldID, value := range columns {
+		observed, found := matched[fieldID]
 		if !found {
-			return fmt.Errorf("local write row has no column %q", column.FieldID)
+			return fmt.Errorf("local write row has no column %q", fieldID)
 		}
-		if !jsonValuesEqual(observed, column.Value) {
-			return fmt.Errorf("local write row column %q is %s, want %s", column.FieldID, observed, column.Value)
+		if !jsonValuesEqual(observed, value) {
+			return fmt.Errorf("local write row column %q is %s, want %s", fieldID, observed, value)
 		}
 	}
 	return nil

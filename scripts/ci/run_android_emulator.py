@@ -6,6 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -238,6 +239,7 @@ class Runner:
             raise Cancelled()
 
     def command(self, command: list[str], *, timeout: float = 180, input: str | None = None) -> str:
+        cleaning = self.cleaning
         self.command_process = subprocess.Popen(
             command, env=self.environment, start_new_session=True,
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -257,14 +259,14 @@ class Runner:
                     break
                 except subprocess.TimeoutExpired:
                     input = None
-                    if self.emulator is not None and self.emulator.poll() is not None:
+                    if not self.cleaning and self.emulator is not None and self.emulator.poll() is not None:
                         raise RunnerError("The emulator exited during an Android command")
             self.log.write(output)
             self.log.flush()
             self.check_adb_server()
             status = self.command_process.returncode
             if status:
-                raise RunnerError(f"Command failed with status {status}: {command[0]}")
+                raise RunnerError(f"Command failed with status {status}: {shlex.join(command)}")
         except BaseException as error:
             failure = error
             raise
@@ -300,8 +302,8 @@ class Runner:
                                 raise
             finally:
                 self.command_process = None
-                self.cleaning = False
-        if self.cancel_signal:
+                self.cleaning = cleaning
+        if self.cancel_signal and not self.cleaning:
             raise Cancelled()
         return output
 
@@ -345,13 +347,21 @@ class Runner:
             self.environment.pop(variable, None)
         check_active_emulator(directory, self.command)
         check_ports()
+        cache = sdk / ".synchro-cache" / BUILD / "emulator.zip"
+        cached = cache.exists()
+        if cache.is_symlink() or (cached and not cache.is_file()):
+            raise RunnerError("The cached emulator archive must be a regular file")
         with tempfile.TemporaryDirectory(prefix=".synchro-emulator-", dir=sdk) as work:
             work = Path(work)
             archive = work / "emulator.zip"
-            self.command([
-                "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
-                "--connect-timeout", "30", "--max-time", "180", "--output", str(archive), ARCHIVE_URL,
-            ])
+            if cached:
+                shutil.copyfile(cache, archive)
+            else:
+                self.command([
+                    "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+                    "--retry", "3", "--retry-all-errors",
+                    "--connect-timeout", "30", "--max-time", "180", "--output", str(archive), ARCHIVE_URL,
+                ], timeout=750)
             if archive.stat().st_size != ARCHIVE_SIZE or digest(archive) != ARCHIVE_SHA256:
                 raise RunnerError("The emulator archive size or SHA-256 does not match the pin")
             members = extract_archive(archive, work)
@@ -364,6 +374,9 @@ class Runner:
             image = f"system-images;android-{selected.image_api};google_apis;x86_64"
             self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image], timeout=900)
             verify_installation(sdk, members, metadata)
+            if not cached:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                archive.replace(cache)
         version = self.command([str(directory / "emulator"), "-version"])
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
             raise RunnerError("The emulator executable version or build does not match the pin")
@@ -375,8 +388,8 @@ class Runner:
             "--package", image, "--device", selected.profile,
         ], input="no\n")
         config = avd_home / f"{selected.avd_name}.avd/config.ini"
-        lines = [line for line in config.read_text().splitlines() if not line.startswith("hw.cpu.ncore=")]
-        config.write_text("\n".join([*lines, "hw.cpu.ncore=2"]) + "\n")
+        lines = [line for line in config.read_text().splitlines() if not line.startswith(("hw.cpu.ncore=", "disk.dataPartition.size="))]
+        config.write_text("\n".join([*lines, "hw.cpu.ncore=2", "disk.dataPartition.size=6G"]) + "\n")
 
     def adb(self, command: list[str], timeout: float = 180) -> str:
         return self.command([
@@ -411,7 +424,10 @@ class Runner:
         options = ["-no-snapshot-save", "-no-window"]
         if self.selected.memory:
             options.extend(("-memory", self.selected.memory))
-        options.extend(("-gpu", "swiftshader_indirect", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        if self.selected.api == "37":
+            # The API 37 GoldfishMapper DMA path requires both SDK capabilities.
+            options.extend(("-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"))
         with (self.selected.log_dir / "emulator.log").open("ab") as emulator_log:
             self.emulator = subprocess.Popen([
                 str(self.selected.sdk_root / "emulator/emulator"), "-port", "5554",
@@ -477,8 +493,20 @@ class Runner:
                     if process is None:
                         continue
                     try:
-                        stop_group(process)
-                    except (RunnerError, OSError, ValueError) as error:
+                        try:
+                            if process is self.emulator and process.poll() is None:
+                                if self.adb_server is None:
+                                    raise RunnerError("The owned ADB server is unavailable for emulator shutdown")
+                                self.check_adb_server()
+                                self.adb(["emu", "kill"], timeout=15)
+                                process.wait(timeout=30)
+                        finally:
+                            stop_group(process)
+                        if process is self.emulator:
+                            result = process.wait(timeout=0)
+                            if result not in (0, -signal.SIGTERM):
+                                raise RunnerError(f"The emulator exited with status {result}")
+                    except (RunnerError, OSError, ValueError, subprocess.TimeoutExpired) as error:
                         print(f"Android emulator cleanup failed: {error}", file=sys.stderr)
                         if self.log:
                             try:

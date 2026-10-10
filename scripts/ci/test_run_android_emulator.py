@@ -118,7 +118,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         elif name == "avdmanager":
             config = Path(options["env"]["ANDROID_AVD_HOME"]) / f"{command[command.index('-n') + 1]}.avd/config.ini"
             config.parent.mkdir(exist_ok=True)
-            config.write_text("hw.cpu.ncore=8\nhw.ramSize=2048\n")
+            config.write_text("hw.cpu.ncore=8\nhw.ramSize=2048\ndisk.dataPartition.size=800M\n")
         elif name == "adb":
             if command[-2:] == ["server", "nodaemon"]:
                 polls = self.adb_server_polls
@@ -177,8 +177,9 @@ class EmulatorRunnerTests(unittest.TestCase):
         }
         self.assertEqual(self.run_fixture(environment=environment), 0)
         curl = self.commands("curl")[0][0]
-        self.assertEqual(curl[:12], [
+        self.assertEqual(curl[:15], [
             "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+            "--retry", "3", "--retry-all-errors",
             "--connect-timeout", "30", "--max-time", "180", "--output",
         ])
         self.assertEqual(curl[-1], runner.ARCHIVE_URL)
@@ -191,11 +192,11 @@ class EmulatorRunnerTests(unittest.TestCase):
             str(self.manager.with_name("avdmanager")), "create", "avd", "--force", "-n", "Synchro_Kotlin_API_34",
             "--package", "system-images;android-34;google_apis;x86_64", "--device", "pixel_2",
         ])
-        self.assertEqual((self.root / "logs/avd/Synchro_Kotlin_API_34.avd/config.ini").read_text(), "hw.ramSize=2048\nhw.cpu.ncore=2\n")
+        self.assertEqual((self.root / "logs/avd/Synchro_Kotlin_API_34.avd/config.ini").read_text(), "hw.ramSize=2048\nhw.cpu.ncore=2\ndisk.dataPartition.size=6G\n")
         launch = self.commands("emulator")[1][0]
         self.assertEqual(launch, [
             str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", "Synchro_Kotlin_API_34",
-            "-no-snapshot-save", "-no-window", "-gpu", "swiftshader_indirect", "-noaudio",
+            "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
             "-no-boot-anim", "-camera-back", "none",
         ])
         test, options = self.commands("make")[0]
@@ -221,10 +222,11 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertTrue(server_options["stdout"].closed)
         adb = [command for command, _ in self.commands("adb")[1:]]
         self.assertTrue(all(command[:5] == [str(self.sdk / "platform-tools/adb"), "-L", runner.ADB_ENDPOINT, "-s", runner.SERIAL] for command in adb))
-        self.assertEqual(adb[-4:], [
+        self.assertEqual(adb[-5:], [
             [*adb[0][:5], "shell", "input", "keyevent", "82"],
             *[[*adb[0][:5], "shell", "settings", "put", "global", name, "0.0"] for name in
-              ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")],
+               ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")],
+            [*adb[0][:5], "emu", "kill"],
         ])
         self.assertEqual((self.sdk / "emulator/package.xml").read_bytes(), runner.METADATA.read_bytes())
         self.assertEqual(len(self.stopped), len(self.calls))
@@ -236,7 +238,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.argv[-3:-3] = ["--memory", "6144"]
         self.assertEqual(self.run_fixture(), 0)
         command = self.commands("emulator")[1][0]
-        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "swiftshader_indirect"])
+        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
 
     def test_server_is_ready_before_emulator_starts(self):
         with self.boundaries(), mock.patch.object(runner.socket, "create_connection") as connect:
@@ -251,7 +253,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         server_index = next(index for index, (command, _) in enumerate(self.calls) if command[-2:] == ["server", "nodaemon"])
         emulator_index = next(index for index, (command, _) in enumerate(self.calls) if Path(command[0]).name == "emulator" and "-version" not in command)
         self.assertLess(server_index, emulator_index)
-        self.assertEqual(self.stopped[-3:], [execution.test.pid, execution.emulator.pid, execution.adb_server.pid])
+        self.assertEqual(self.stopped[-4:], [execution.test.pid, 1000 + len(self.calls), execution.emulator.pid, execution.adb_server.pid])
         self.assertTrue(execution.adb_server_log.closed)
 
     def test_occupied_server_endpoint_prevents_any_server_or_emulator_start(self):
@@ -336,7 +338,7 @@ class EmulatorRunnerTests(unittest.TestCase):
                 return process
             with mock.patch.object(runner.subprocess, "Popen", side_effect=launch):
                 self.assertEqual(execution.run(), 143)
-            self.assertEqual(self.stopped[-3:], [execution.test.pid, execution.emulator.pid, execution.adb_server.pid])
+            self.assertEqual(self.stopped[-4:], [execution.test.pid, 1000 + len(self.calls), execution.emulator.pid, execution.adb_server.pid])
             self.assertTrue(execution.adb_server_log.closed)
 
     def test_server_cleanup_failure_preserves_nonzero_test_status(self):
@@ -350,7 +352,7 @@ class EmulatorRunnerTests(unittest.TestCase):
                         raise runner.RunnerError("server cleanup failed")
                 with mock.patch.object(runner, "stop_group", side_effect=cleanup):
                     self.assertEqual(execution.run(), expected)
-                self.assertEqual(self.stopped[-3:], [execution.test.pid, execution.emulator.pid, execution.adb_server.pid])
+                self.assertEqual(self.stopped[-4:], [execution.test.pid, 1000 + len(self.calls), execution.emulator.pid, execution.adb_server.pid])
                 self.assertTrue(execution.adb_server_log.closed)
 
     def test_server_log_close_failure_preserves_nonzero_test_status(self):
@@ -382,13 +384,22 @@ class EmulatorRunnerTests(unittest.TestCase):
                 selected = runner.arguments(argv)
                 self.assertEqual((selected.api, selected.image_api), (api, image))
                 self.calls.clear()
+                cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+                cache.unlink(missing_ok=True)
                 with self.boundaries(), mock.patch.object(runner.Runner, "command", autospec=True, side_effect=runner.Runner.command) as command_boundary:
                     self.assertEqual(runner.Runner(selected).run(), 0)
                 self.assertEqual([command for command, _ in self.commands("sdkmanager")], [[
                     str(self.manager), f"--sdk_root={self.sdk}", platform_package, image_package,
                 ]])
+                self.assertEqual(self.commands("emulator")[1][0], [
+                    str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", selected.avd_name,
+                    "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
+                    "-no-boot-anim", "-camera-back", "none",
+                    *(["-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"] if api == "37" else []),
+                ])
                 self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])
-                self.assertTrue(all(call.kwargs.get("timeout", 180) <= 180 for call in command_boundary.call_args_list if Path(call.args[1][0]).name != "sdkmanager"))
+                command_boundary.assert_any_call(mock.ANY, self.commands("curl")[0][0], timeout=750)
+                self.assertTrue(all(call.kwargs.get("timeout", 180) <= 180 for call in command_boundary.call_args_list if Path(call.args[1][0]).name not in {"sdkmanager", "curl"}))
 
     def test_malformed_selections_are_rejected(self):
         cases = [("--api", "36"), ("--image-api", "37"), ("--avd-name", "../escape"), ("--profile", "unknown")]
@@ -446,6 +457,76 @@ class EmulatorRunnerTests(unittest.TestCase):
         with self.boundaries(), mock.patch.object(runner, "check_active_emulator", side_effect=runner.RunnerError("active")):
             self.assertEqual(runner.Runner(self.selected()).run(), 1)
         self.assertEqual(self.calls, [])
+
+    def test_verified_download_is_retained_in_cache(self):
+        self.assertEqual(self.run_fixture(), 0)
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        self.assertEqual(cache.read_bytes(), self.source_archive.read_bytes())
+        self.assertEqual(len(self.commands("curl")), 1)
+
+    def test_valid_cached_archive_avoids_download(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(self.source_archive.read_bytes())
+        self.assertEqual(self.run_fixture(), 0)
+        self.assertEqual(self.commands("curl"), [])
+        self.assertEqual((self.sdk / "emulator/emulator").read_bytes(), b"fixture executable")
+        self.assertEqual(cache.read_bytes(), self.source_archive.read_bytes())
+
+    def test_cache_replacement_after_hashing_installs_private_snapshot(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(self.source_archive.read_bytes())
+        self.write_archive([
+            archive_member("emulator/", mode=stat.S_IFDIR | 0o755),
+            archive_member("emulator/emulator", b"replacement executable", stat.S_IFREG | 0o755),
+            archive_member("emulator/source.properties", self.properties),
+        ])
+        replacement_bytes = self.source_archive.read_bytes()
+        extract = runner.extract_archive
+
+        def replace_cache_then_extract(archive, destination):
+            self.source_archive.replace(cache)
+            return extract(archive, destination)
+
+        with self.boundaries(), mock.patch.object(runner, "extract_archive", side_effect=replace_cache_then_extract) as extraction:
+            self.assertEqual(runner.Runner(self.selected()).run(), 0)
+        extraction.assert_called_once()
+        self.assertEqual(self.commands("curl"), [])
+        self.assertEqual(cache.read_bytes(), replacement_bytes)
+        self.assertEqual((self.sdk / "emulator/emulator").read_bytes(), b"fixture executable")
+
+    def test_corrupt_cached_archive_preserves_previous_emulator(self):
+        previous = self.sdk / "emulator"
+        previous.mkdir()
+        (previous / "retained").write_text("unchanged")
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"corrupt")
+        for rejection in ("size", "digest"):
+            with self.subTest(rejection=rejection):
+                with self.boundaries(verified_archive=rejection == "digest"), mock.patch.object(runner, "digest", return_value="wrong"):
+                    self.assertEqual(runner.Runner(self.selected()).run(), 1)
+                self.assertEqual((previous / "retained").read_text(), "unchanged")
+                self.assertEqual(cache.read_bytes(), b"corrupt")
+                self.assertEqual(self.calls, [])
+
+    def test_symlink_or_nonregular_cached_archive_is_rejected(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        for kind in ("symlink", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    cache.symlink_to(self.source_archive)
+                else:
+                    cache.mkdir()
+                self.assertEqual(self.run_fixture(), 1)
+                self.assertEqual(self.calls, [])
+                self.assertFalse((self.sdk / "emulator").exists())
+                if kind == "symlink":
+                    cache.unlink()
+                else:
+                    cache.rmdir()
 
     def test_archive_size_rejection_preserves_previous_emulator(self):
         previous = self.sdk / "emulator"
@@ -562,6 +643,155 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.test_polls = [23]
         self.assertEqual(self.run_fixture(), 23)
 
+    def test_final_emulator_status_rejects_abort_and_forced_kill_without_hiding_test_failure(self):
+        for test_status, emulator_status, expected in (
+            (0, 0, 0), (0, -signal.SIGTERM, 0),
+            (0, -signal.SIGABRT, 1), (0, -signal.SIGKILL, 1), (0, 7, 1),
+            (23, -signal.SIGABRT, 23), (23, -signal.SIGKILL, 23),
+        ):
+            with self.subTest(test_status=test_status, emulator_status=emulator_status), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.test_polls = [test_status]
+                execution = runner.Runner(self.selected())
+                def launch(command, **options):
+                    process = self.popen(command, **options)
+                    if Path(command[0]).name == "emulator" and "-version" not in command:
+                        process.status = emulator_status
+                    return process
+                with mock.patch.object(runner.subprocess, "Popen", side_effect=launch):
+                    self.assertEqual(execution.run(), expected)
+                self.assertEqual(execution.test_status, test_status)
+                self.assertEqual(self.stopped[-4:], [execution.test.pid, 1000 + len(self.calls), execution.emulator.pid, execution.adb_server.pid])
+                if emulator_status not in (0, -signal.SIGTERM):
+                    self.assertIn("Android emulator cleanup failed", errors.getvalue())
+                    self.assertIn(f"status {emulator_status}", errors.getvalue())
+                else:
+                    self.assertEqual(errors.getvalue(), "")
+
+    def test_official_shutdown_waits_for_parent_before_residual_cleanup(self):
+        for test_status, prior_signal, request_signal, expected in (
+            (0, 0, 0, 0), (0, signal.SIGTERM, 0, 143),
+            (0, 0, signal.SIGINT, 130), (19, 0, signal.SIGTERM, 19),
+        ):
+            with self.subTest(test_status=test_status, prior_signal=prior_signal, request_signal=request_signal), self.boundaries():
+                self.test_polls = [test_status]
+                execution = runner.Runner(self.selected())
+                events = []
+                request = None
+                def launch(command, **options):
+                    nonlocal request
+                    process = self.popen(command, **options)
+                    if Path(command[0]).name == "make":
+                        execution.cancel_signal = prior_signal
+                    if Path(command[0]).name == "emulator" and "-version" not in command:
+                        def wait(timeout=None):
+                            if timeout == 30:
+                                self.assertEqual(events[-1], "request-stop")
+                                self.assertTrue(execution.cleaning)
+                                self.assertIsNone(execution.adb_server.returncode)
+                                events.append("parent-wait")
+                            else:
+                                self.assertEqual(timeout, 0)
+                            process.returncode = process.status
+                            return process.status
+                        process.wait = mock.Mock(side_effect=wait)
+                    if command[-2:] == ["emu", "kill"]:
+                        request = process
+                        self.assertEqual(command, [str(self.sdk / "platform-tools/adb"), "-L", runner.ADB_ENDPOINT, "-s", runner.SERIAL, "emu", "kill"])
+                        self.assertTrue(options["start_new_session"])
+                        self.assertEqual(events, ["test-stop"])
+                        events.append("shutdown-request")
+                        def communicate(input=None, timeout=None):
+                            self.assertTrue(execution.cleaning)
+                            self.assertIsNone(execution.adb_server.returncode)
+                            if not process.communications:
+                                process.communications.append(timeout)
+                                execution.emulator.polls = [0]
+                                raise subprocess.TimeoutExpired(command, timeout)
+                            if request_signal:
+                                execution.cancel(request_signal, None)
+                            process.returncode = 0
+                            return "", None
+                        process.communicate = mock.Mock(side_effect=communicate)
+                    return process
+                def cleanup(process):
+                    self.stopped.append(process.pid)
+                    if process is execution.test:
+                        events.append("test-stop")
+                    elif process is request:
+                        events.append("request-stop")
+                    elif process is execution.emulator:
+                        if events[-1] != "parent-wait":
+                            process.status = -signal.SIGABRT
+                        events.append("emulator-stop")
+                    elif process is execution.adb_server:
+                        events.append("server-stop")
+                with mock.patch.object(runner.subprocess, "Popen", side_effect=launch), mock.patch.object(runner, "stop_group", side_effect=cleanup), mock.patch.object(execution, "command", wraps=execution.command) as command:
+                    self.assertEqual(execution.run(), expected)
+                command.assert_any_call([str(self.sdk / "platform-tools/adb"), "-L", runner.ADB_ENDPOINT, "-s", runner.SERIAL, "emu", "kill"], timeout=15)
+                self.assertEqual(events, ["test-stop", "shutdown-request", "request-stop", "parent-wait", "emulator-stop", "server-stop"])
+                self.assertEqual(execution.emulator.wait.call_args_list, [mock.call(timeout=30), mock.call(timeout=0)])
+                self.assertIsNone(execution.command_process)
+                self.assertFalse(execution.cleaning)
+
+    def test_shutdown_request_and_wait_failures_keep_cleanup_and_failure_status(self):
+        for phase in ("request-spawn", "request-status", "request-timeout", "parent-timeout"):
+            for test_status, expected in ((0, 1), (19, 19)):
+                with self.subTest(phase=phase, test_status=test_status), self.boundaries(), contextlib.ExitStack() as stack, contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.test_polls = [test_status]
+                    execution = runner.Runner(self.selected())
+                    request = None
+                    def launch(command, **options):
+                        nonlocal request
+                        if command[-2:] == ["emu", "kill"] and phase == "request-spawn":
+                            raise OSError("shutdown spawn failed")
+                        process = self.popen(command, **options)
+                        if Path(command[0]).name == "emulator" and "-version" not in command and phase == "parent-timeout":
+                            process.wait = mock.Mock(side_effect=subprocess.TimeoutExpired("emulator", 30))
+                        if command[-2:] == ["emu", "kill"]:
+                            request = process
+                            if phase == "request-status":
+                                process.status = 9
+                            elif phase == "request-timeout":
+                                stack.enter_context(mock.patch.object(runner.time, "monotonic", side_effect=[0, 15]))
+                                process.communicate = mock.Mock(return_value=("", None))
+                        return process
+                    def cleanup(process):
+                        self.stopped.append(process.pid)
+                        if process is execution.emulator:
+                            process.returncode = process.status = -signal.SIGTERM
+                    with mock.patch.object(runner.subprocess, "Popen", side_effect=launch), mock.patch.object(runner, "stop_group", side_effect=cleanup):
+                        self.assertEqual(execution.run(), expected)
+                    self.assertEqual(self.stopped[-2:], [execution.emulator.pid, execution.adb_server.pid])
+                    self.assertLess(self.stopped.index(execution.test.pid), self.stopped.index(execution.emulator.pid))
+                    if request is not None:
+                        self.assertIn(request.pid, self.stopped)
+                    if phase == "parent-timeout":
+                        execution.emulator.wait.assert_called_once_with(timeout=30)
+                    self.assertIn("Android emulator cleanup failed", errors.getvalue())
+                    self.assertIn({"request-spawn": "shutdown spawn failed", "request-status": "status 9", "request-timeout": "timed out after 15 seconds", "parent-timeout": "timed out after 30 seconds"}[phase], errors.getvalue())
+                    self.assertIsNone(execution.command_process)
+                    self.assertFalse(execution.cleaning)
+
+    def test_preexisting_emulator_exit_is_not_replaced_by_shutdown(self):
+        for emulator_status in (0, -signal.SIGTERM, -signal.SIGABRT, -signal.SIGKILL, 7):
+            for test_status in (0, 19):
+                with self.subTest(emulator_status=emulator_status, test_status=test_status), self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
+                    execution = runner.Runner(self.selected())
+                    execution.log = io.StringIO()
+                    execution.test = Process(101)
+                    execution.emulator = Process(102, status=emulator_status)
+                    execution.adb_server = Process(103, polls=[None])
+                    execution.test_status = test_status
+                    expected = test_status or (0 if emulator_status in (0, -signal.SIGTERM) else 1)
+                    with mock.patch.object(execution, "prepare"), mock.patch.object(execution, "execute", return_value=test_status), mock.patch.object(runner.subprocess, "Popen") as launch:
+                        self.assertEqual(execution.run(), expected)
+                    launch.assert_not_called()
+                    self.assertEqual(self.stopped[-3:], [101, 102, 103])
+                    if emulator_status not in (0, -signal.SIGTERM):
+                        self.assertIn(f"status {emulator_status}", errors.getvalue())
+                    else:
+                        self.assertEqual(errors.getvalue(), "")
+
     def test_cleanup_failure_is_visible_without_hiding_test_failure(self):
         for test_status, expected in ((0, 1), (9, 9)):
             with self.subTest(test_status=test_status), self.boundaries():
@@ -598,7 +828,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         for number in previous:
             with self.subTest(number=number), self.boundaries():
                 execution = runner.Runner(self.selected())
-                execution.emulator = Process(102)
+                execution.emulator = Process(102, status=-signal.SIGABRT)
                 with mock.patch.object(execution, "prepare", side_effect=lambda: execution.cancel(number, None)):
                     self.assertEqual(execution.run(), 128 + number)
         self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
@@ -863,16 +1093,17 @@ class EmulatorRunnerTests(unittest.TestCase):
                     self.assertEqual({number: signal.getsignal(number) for number in previous}, previous)
 
     def test_command_failure_is_not_ignored(self):
-        with self.boundaries():
+        with self.boundaries(), contextlib.redirect_stderr(io.StringIO()) as errors:
             execution = runner.Runner(self.selected())
             execution.log = mock.Mock(wraps=io.StringIO())
             process = Process(100, "failure\n", status=9)
             process.communicate = mock.Mock(wraps=process.communicate)
-            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.command(["fixture"])):
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process), mock.patch.object(execution, "prepare", side_effect=lambda: execution.adb(["shell", "settings", "put", "global", "window_animation_scale", "0.0"])):
                 self.assertEqual(execution.run(), 1)
             self.assertEqual(self.stopped[-1], 100)
             process.communicate.assert_called_once_with(input=None, timeout=1)
             self.assertEqual(execution.log.write.call_args_list.count(mock.call("failure\n")), 1)
+            self.assertIn(f"{self.sdk}/platform-tools/adb -L {runner.ADB_ENDPOINT} -s {runner.SERIAL} shell settings put global window_animation_scale 0.0", errors.getvalue())
 
     def test_port_checks_cover_server_and_both_emulator_ports(self):
         connection = mock.MagicMock()

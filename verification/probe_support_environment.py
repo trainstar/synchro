@@ -23,13 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support_environments
 
 
-IOS_CELLS = frozenset({"SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001"})
 RN_IOS_CELL = "SUP-RN-IOS-CURRENT-001"
+RN_IOS_CELLS = frozenset({"SUP-RN-IOS-MIN-001", RN_IOS_CELL})
+IOS_CELLS = frozenset({"SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001"}) | RN_IOS_CELLS
 UDID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 COMMAND_TIMEOUT_SECONDS = 30
 PG_CELL = "SUP-PG-LINUX-X64-001"
-ANDROID_CELLS = frozenset({"SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"})
 RN_ANDROID_CELL = "SUP-RN-ANDROID-CURRENT-001"
+RN_ANDROID_CELLS = frozenset({"SUP-RN-ANDROID-MIN-001", RN_ANDROID_CELL})
+ANDROID_CELLS = frozenset({"SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001"}) | RN_ANDROID_CELLS
 PROC_ROOT = Path("/proc")
 PG_VERSION_QUERY = """SELECT pg_catalog.json_build_object(
     'version', pg_catalog.current_setting('server_version'),
@@ -47,17 +49,22 @@ def device_identity(value: object) -> UUID:
     return UUID(value)
 
 
-def run_command(command: list[str], label: str, *, env: dict[str, str] | None = None) -> str:
+def run_command(command: list[str], label: str, *, env: dict[str, str] | None = None, raw_output: bool = False) -> str:
     try:
         options = {} if env is None else {"env": env}
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=COMMAND_TIMEOUT_SECONDS, **options)
+        result = subprocess.run(command, capture_output=True, text=not raw_output, check=True, timeout=COMMAND_TIMEOUT_SECONDS, **options)
+        stdout = result.stdout.decode("utf-8") if raw_output else result.stdout
     except subprocess.TimeoutExpired:
         raise ProbeError(f"{label} timed out after 30 seconds") from None
-    except (subprocess.CalledProcessError, OSError, UnicodeError):
-        raise ProbeError(f"{label} command failed") from None
-    if not isinstance(result.stdout, str):
+    except subprocess.CalledProcessError as error:
+        raise ProbeError(f"{label} command failed with exit status {error.returncode}") from None
+    except OSError as error:
+        raise ProbeError(f"{label} command failed ({type(error).__name__}, errno {error.errno})") from None
+    except UnicodeError:
+        raise ProbeError(f"{label} returned invalid UTF-8 text") from None
+    if not isinstance(stdout, str):
         raise ProbeError(f"{label} returned invalid text")
-    return result.stdout
+    return stdout
 
 
 def parse_metadata(text: str, label: str) -> Any:
@@ -140,7 +147,7 @@ def probe_ios(cell_id: str, simulator_udid: str, output: Path, react_native_app:
     if cell_id not in IOS_CELLS:
         raise ProbeError("unsupported Apple support cell")
     requested = device_identity(simulator_udid)
-    if (cell_id == RN_IOS_CELL) != (react_native_app is not None):
+    if (cell_id in RN_IOS_CELLS) != (react_native_app is not None):
         raise ProbeError("React Native app is required only for the React Native iOS cell")
     xcode, build_line = xcode_metadata(run_command(["xcodebuild", "-version"], "Xcode version"))
     devices = parse_metadata(run_command(["xcrun", "simctl", "list", "devices", "booted", "-j"], "booted simulator devices"), "booted simulator devices")
@@ -403,9 +410,29 @@ def android_process(sdk_root: Path, serial: str, avd_name: str) -> tuple[dict[st
         try:
             if process.stat().st_uid != os.getuid():
                 continue
-            for fd in (process / "fd").iterdir():
+            fd_directory = process / "fd"
+            try:
+                descriptors = list(fd_directory.iterdir())
+            except PermissionError:
+                text = run_command(["sudo", "--non-interactive", "ls", "-1", "--", str(fd_directory)], "Android descriptor directory", raw_output=True)
+                names = []
+                if text:
+                    if not text.endswith("\n"):
+                        raise ProbeError("Android descriptor directory is malformed")
+                    names = text[:-1].split("\n")
+                    if any(not re.fullmatch(r"0|[1-9][0-9]*", name) for name in names) or len(names) != len(set(names)):
+                        raise ProbeError("Android descriptor directory is malformed")
+                descriptors = [fd_directory / name for name in names]
+            for fd in descriptors:
                 try:
                     link = os.readlink(fd)
+                except PermissionError:
+                    text = run_command(["sudo", "--non-interactive", "readlink", "--", str(fd)], "Android descriptor link", raw_output=True)
+                    if not text.endswith("\n"):
+                        raise ProbeError("Android descriptor link is malformed")
+                    link = text[:-1]
+                    if not link or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in link):
+                        raise ProbeError("Android descriptor link is malformed")
                 except FileNotFoundError:
                     continue
                 if link in {f"socket:[{inode}]" for inode in inodes}:
@@ -463,7 +490,7 @@ def android_binary_version(text: str) -> tuple[str, str, str]:
 def probe_android(cell_id: str, sdk_root: Path, serial: str, output: Path, identity_output: Path,
                   react_native_app: Path | None = None, initial_identity: Path | None = None,
                   initial_environment: Path | None = None) -> dict[str, object]:
-    if cell_id not in ANDROID_CELLS or (cell_id == RN_ANDROID_CELL) != (react_native_app is not None):
+    if cell_id not in ANDROID_CELLS or (cell_id in RN_ANDROID_CELLS) != (react_native_app is not None):
         raise ProbeError("React Native app is required only for the React Native Android cell")
     if (initial_identity is None) != (initial_environment is None) or output.resolve() == identity_output.resolve():
         raise ProbeError("Android output paths must differ and initial records must be supplied together")

@@ -312,7 +312,7 @@ public final class SynchroClient: @unchecked Sendable {
     }
 
     func inspectClientStateCapture(maximumRecords: Int) throws -> ClientStateCaptureInspection {
-        guard maximumRecords >= 0 else {
+        guard maximumRecords >= 0, maximumRecords < Int.max else {
             throw SynchroError.invalidResponse(message: "inspection record limit is invalid")
         }
         return try database.stateInspectionTransaction { db, provenanceMaintenanceWorkCursor in
@@ -330,7 +330,7 @@ public final class SynchroClient: @unchecked Sendable {
         maximumRecords: Int,
         readApplicationRows: (ClientStateCaptureInspection, ApplicationTransaction) throws -> Void
     ) throws -> ClientStateSnapshotInspection {
-        guard maximumRecords >= 0 else {
+        guard maximumRecords >= 0, maximumRecords < Int.max else {
             throw SynchroError.invalidResponse(message: "inspection record limit is invalid")
         }
         return try database.stateInspectionTransaction { db, provenanceMaintenanceWorkCursor in
@@ -388,6 +388,9 @@ public final class SynchroClient: @unchecked Sendable {
         let rebuildAttemptsTruncated = rebuildAttempts.count > maximumRecords
         let rebuildReceiptsTruncated = rebuildReceipts.count > maximumRecords
         let rowMetadataTruncated = rowMetadataCount > maximumRecords
+        let migration = try Self.inspectMigrationJournal(db, maximumRecords: maximumRecords)
+        let physicalSchema = try Self.inspectPhysicalSchema(db, maximumRecords: maximumRecords, migration: migration)
+        let accepted = try Self.inspectAcceptedMutationOutcomes(db, maximumRecords: maximumRecords)
         return ClientStateCaptureInspection(
             schema: try Self.inspectSchema(db),
             scopeStates: Array(scopeStates.prefix(maximumRecords)),
@@ -404,7 +407,10 @@ public final class SynchroClient: @unchecked Sendable {
                 || scopeRowsTruncated
                 || rebuildAttemptsTruncated
                 || rebuildReceiptsTruncated
-                || rowMetadataTruncated,
+                || rowMetadataTruncated
+                || migration.truncated
+                || physicalSchema.truncated
+                || accepted.truncated,
             applicationRowCount: try Self.inspectApplicationRowCount(db),
             mutationLedgerCount: try Self.inspectCount(db, sql: "SELECT COUNT(*) FROM _synchro_pending_changes"),
             mutationOutcomeCount: try Self.inspectCount(
@@ -419,8 +425,211 @@ public final class SynchroClient: @unchecked Sendable {
             rowMetadataCount: rowMetadataCount,
             rebuildAttemptCount: rebuildAttemptCount,
             rebuildReceiptCount: rebuildReceiptCount,
-            provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor
+            provenanceMaintenanceWorkCursor: provenanceMaintenanceWorkCursor,
+            migrationJournal: migration.journal,
+            migrationJournalTruncated: migration.truncated,
+            physicalSchema: physicalSchema.columns,
+            physicalSchemaTruncated: physicalSchema.truncated,
+            acceptedMutationOutcomes: accepted.outcomes,
+            acceptedMutationOutcomesTruncated: accepted.truncated
         )
+    }
+
+    private static func inspectAcceptedMutationOutcomes(
+        _ db: GRDB.Database,
+        maximumRecords: Int
+    ) throws -> (outcomes: [String: String], truncated: Bool) {
+        guard let preflight = try Row.fetchOne(db, sql: """
+            SELECT COUNT(*) AS record_count,
+                coalesce(SUM(coalesce(length(CAST(mutation_id AS BLOB)), 0) +
+                             coalesce(length(CAST(accepted_json AS BLOB)), 0)), 0) AS byte_count,
+                coalesce(MIN(typeof(mutation_id) = 'text' AND typeof(accepted_json) = 'text'), 1) AS storage_valid
+            FROM _synchro_pending_changes WHERE lifecycle_state = 'accepted'
+            """) else {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection preflight is missing")
+        }
+        let count = try preflight.decode(Int64.self, forColumn: "record_count")
+        let bytes = try preflight.decode(Int64.self, forColumn: "byte_count")
+        guard try preflight.decode(Bool.self, forColumn: "storage_valid"), count >= 0, bytes >= 0 else {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection storage is invalid")
+        }
+        if count > maximumRecords || bytes > 65_536 { return ([:], true) }
+        var outcomes: [String: String] = [:]
+        do {
+            for row in try Row.fetchAll(db, sql: """
+                SELECT mutation_id, accepted_json FROM _synchro_pending_changes
+                WHERE lifecycle_state = 'accepted' ORDER BY mutation_id
+                """) {
+                let id = try row.decode(String.self, forColumn: "mutation_id")
+                outcomes[id] = try row.decode(String.self, forColumn: "accepted_json")
+            }
+        } catch {
+            throw SynchroError.invalidResponse(message: "accepted outcome inspection values are invalid")
+        }
+        return (outcomes, false)
+    }
+
+    private static func inspectMigrationJournal(
+        _ db: GRDB.Database,
+        maximumRecords: Int
+    ) throws -> (journal: MigrationJournalInspection?, truncated: Bool) {
+        guard let preflight = try Row.fetchOne(db, sql: """
+            SELECT typeof(source_schema_version) = 'integer' AND typeof(target_schema_version) = 'integer' AND
+                typeof(journal_version) = 'integer' AND typeof(migration_plan_version) = 'integer' AND
+                typeof(is_schema_reset) = 'integer' AND typeof(source_schema_hash) = 'text' AND
+                typeof(target_schema_hash) = 'text' AND typeof(action) = 'text' AND typeof(phase) = 'text' AND
+                typeof(target_manifest_json) = 'text' AND typeof(affected_scopes_json) = 'text' AND
+                typeof(scope_cursor_updates_json) = 'text' AND typeof(migration_plan_json) = 'text' AND
+                typeof(migration_plan_hash) = 'text' AS storage_valid,
+                CASE WHEN ? = 0 THEN 0 ELSE
+                coalesce(length(CAST(source_schema_version AS BLOB)), 0) + coalesce(length(CAST(target_schema_version AS BLOB)), 0) +
+                coalesce(length(CAST(journal_version AS BLOB)), 0) + coalesce(length(CAST(target_manifest_json AS BLOB)), 0) +
+                coalesce(length(CAST(affected_scopes_json AS BLOB)), 0) + coalesce(length(CAST(scope_cursor_updates_json AS BLOB)), 0) +
+                coalesce(length(CAST(migration_plan_version AS BLOB)), 0) + coalesce(length(CAST(migration_plan_json AS BLOB)), 0) +
+                coalesce(length(CAST(migration_plan_hash AS BLOB)), 0) + coalesce(length(CAST(is_schema_reset AS BLOB)), 0) +
+                coalesce(length(CAST(action AS BLOB)), 0) + coalesce(length(CAST(phase AS BLOB)), 0) +
+                coalesce(length(CAST(source_schema_hash AS BLOB)), 0) + coalesce(length(CAST(target_schema_hash AS BLOB)), 0)
+                END AS byte_count FROM _synchro_schema_migration WHERE singleton = 1
+            """, arguments: [maximumRecords]) else {
+            return (nil, false)
+        }
+        let byteCount: Int64 = try preflight.decode(Int64.self, forColumn: "byte_count")
+        guard maximumRecords > 0, byteCount <= 65_536 else { return (nil, true) }
+        let storageValid: Bool = try preflight.decode(Bool.self, forColumn: "storage_valid")
+        guard storageValid, byteCount >= 0 else {
+            throw SynchroError.invalidResponse(message: "migration inspection journal storage is invalid")
+        }
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT source_schema_version, source_schema_hash, target_schema_version, target_schema_hash,
+                   action, phase, journal_version, target_manifest_json, affected_scopes_json,
+                   scope_cursor_updates_json, migration_plan_version, migration_plan_json,
+                   migration_plan_hash, is_schema_reset
+            FROM _synchro_schema_migration WHERE singleton = 1
+            """) else {
+            throw SynchroError.invalidResponse(message: "migration inspection journal is invalid")
+        }
+        do {
+            let keys = ["target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json",
+                        "migration_plan_json", "migration_plan_hash"]
+            var stored: [String: String] = [:]
+            for key in keys {
+                let value: String = try row.decode(String.self, forColumn: key)
+                stored[key] = value
+            }
+            for key in ["journal_version", "migration_plan_version", "is_schema_reset"] {
+                let value: Int64 = try row.decode(Int64.self, forColumn: key)
+                stored[key] = String(value)
+            }
+            let action: String = try row.decode(String.self, forColumn: "action")
+            let phase: String = try row.decode(String.self, forColumn: "phase")
+            let sourceHash: String = try row.decode(String.self, forColumn: "source_schema_hash")
+            let targetHash: String = try row.decode(String.self, forColumn: "target_schema_hash")
+            let sourceVersion: Int64 = try row.decode(Int64.self, forColumn: "source_schema_version")
+            let targetVersion: Int64 = try row.decode(Int64.self, forColumn: "target_schema_version")
+            return (MigrationJournalInspection(
+                source: SchemaRef(version: sourceVersion, hash: sourceHash),
+                target: SchemaRef(version: targetVersion, hash: targetHash),
+                action: action,
+                phase: phase,
+                stored: stored
+            ), false)
+        } catch {
+            throw SynchroError.invalidResponse(message: "migration inspection journal values are invalid")
+        }
+    }
+
+    private static func inspectPhysicalSchema(
+        _ db: GRDB.Database,
+        maximumRecords: Int,
+        migration: (journal: MigrationJournalInspection?, truncated: Bool)
+    ) throws -> (columns: [PhysicalSchemaColumnInspection], truncated: Bool) {
+        if migration.truncated { return ([], true) }
+        let source: (tables: [LocalSchemaTable]?, truncated: Bool)
+        var targetNames: [String] = []
+        if let journal = migration.journal {
+            do {
+                if journal.source != SchemaRef(version: 0, hash: "") { try journal.source.validate() }
+                try journal.target.validate()
+                guard let encoded = journal.stored["target_manifest_json"] else {
+                    throw SynchroError.invalidResponse(message: "migration inspection target is missing")
+                }
+                let target = try JSONDecoder().decode(SchemaManifest.self, from: Data(encoded.utf8))
+                try target.validate()
+                guard SchemaRef(version: target.schemaVersion, hash: target.schemaHash) == journal.target,
+                      try Integrity.schemaManifestHash(target) == journal.target.hash else {
+                    throw SynchroError.invalidResponse(message: "migration inspection target binding is invalid")
+                }
+                targetNames = target.tables.map(\.name)
+                if journal.source.version == 0 {
+                    source = ([], false)
+                } else {
+                    source = try inspectSchemaProjection(db, maximumRecords: maximumRecords,
+                        sql: "SELECT schema_json AS metadata FROM _synchro_schema_archive WHERE schema_version = ? AND schema_hash = ?",
+                        arguments: [journal.source.version, journal.source.hash])
+                    if source.tables?.isEmpty != false && !source.truncated {
+                        throw SynchroError.invalidResponse(message: "migration inspection source archive is missing")
+                    }
+                }
+            } catch {
+                throw SynchroError.invalidResponse(message: "migration inspection identities are invalid")
+            }
+        } else {
+            source = try inspectSchemaProjection(db, maximumRecords: maximumRecords,
+                sql: "SELECT value AS metadata FROM _synchro_meta WHERE key = 'local_schema'", arguments: [])
+        }
+        if source.truncated { return ([], true) }
+        let tables = source.tables ?? []
+        guard Set(tables.map(\.tableID)).count == tables.count,
+              Set(tables.map(\.tableName)).count == tables.count,
+              tables.allSatisfy({ !$0.tableID.isEmpty && !$0.relationID.isEmpty }) else {
+            throw SynchroError.invalidResponse(message: "inspection source table identities are invalid")
+        }
+        let names = Set(tables.map(\.tableName) + targetNames).sorted()
+        guard names.allSatisfy({ !$0.isEmpty && !$0.contains("\u{0}") &&
+            !$0.lowercased().hasPrefix("_synchro_") && !$0.lowercased().hasPrefix("sqlite_") }) else {
+            throw SynchroError.invalidResponse(message: "inspection table names are invalid")
+        }
+        if names.count > maximumRecords { return ([], true) }
+        var columns: [PhysicalSchemaColumnInspection] = []
+        var byteCount = 0
+        for tableName in names {
+            let rows = try Row.fetchAll(db, sql: "SELECT name, type, \"notnull\", pk FROM pragma_table_info(?) ORDER BY cid LIMIT ?",
+                                        arguments: [tableName, maximumRecords - columns.count + 1])
+            for row in rows {
+                if columns.count == maximumRecords { return (columns, true) }
+                let name: String = row["name"]
+                let type: String = row["type"]
+                byteCount += tableName.utf8.count + name.utf8.count + type.utf8.count
+                if byteCount > 65_536 { return (columns, true) }
+                columns.append(PhysicalSchemaColumnInspection(
+                    tableName: tableName, name: name, type: type,
+                    notNull: (row["notnull"] as Int) != 0, primaryKeyPosition: row["pk"]
+                ))
+            }
+        }
+        return (columns, false)
+    }
+
+    private static func inspectSchemaProjection(
+        _ db: GRDB.Database,
+        maximumRecords: Int,
+        sql: String,
+        arguments: StatementArguments
+    ) throws -> (tables: [LocalSchemaTable]?, truncated: Bool) {
+        guard let byteCount = try Int64.fetchOne(db,
+            sql: "SELECT length(CAST(metadata AS BLOB)) FROM (\(sql))",
+            arguments: arguments) else { return (nil, false) }
+        if maximumRecords == 0 || byteCount > 65_536 { return (nil, true) }
+        guard byteCount >= 0, let encoded = try String.fetchOne(db, sql: sql, arguments: arguments) else {
+            throw SynchroError.invalidResponse(message: "inspection schema projection is missing")
+        }
+        do {
+            let tables = try JSONDecoder().decode([LocalSchemaTable].self, from: Data(encoded.utf8))
+            if tables.count > maximumRecords { return (nil, true) }
+            return (tables, false)
+        } catch {
+            throw SynchroError.invalidResponse(message: "inspection schema projection is invalid")
+        }
     }
 
     func inspectRowMetadata(tableName: String, recordID: String) throws -> RowMetadataInspection? {

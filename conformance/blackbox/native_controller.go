@@ -86,9 +86,11 @@ type NativeStepObservation struct {
 }
 
 // NativeCaptureFacts binds one requested source to its durable state facts.
+// RuntimeRows uses full stored row JSON, not authored primary-key JSON.
 type NativeCaptureFacts struct {
-	Source     string               `json:"source"`
-	StateFacts scenarios.StateFacts `json:"state_facts"`
+	Source      string               `json:"source"`
+	StateFacts  scenarios.StateFacts `json:"state_facts"`
+	RuntimeRows []scenarios.RowFact  `json:"runtime_rows"`
 }
 
 type nativeInstallationBinding struct {
@@ -306,13 +308,7 @@ type nativeAuthoredTable struct {
 	Fields            []nativeAuthoredField `json:"fields"`
 }
 
-type nativeAuthoredField struct {
-	FieldID    string `json:"field_id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	PrimaryKey bool   `json:"primary_key"`
-	Writable   bool   `json:"writable"`
-}
+type nativeAuthoredField = scenarios.QueueReplaySchemaField
 
 type nativeAuthoredRelation struct {
 	Relation               string   `json:"relation"`
@@ -1350,6 +1346,7 @@ func (c *NativeController) ApplyStep(ctx context.Context, operation scenarios.Op
 			}
 			c.mu.Lock()
 			if c.installation != nil {
+				c.installation.runtimeRegistryGeneration = membershipChange.runtimeRegistryGeneration
 				c.installation.pendingMembershipChange = nil
 			}
 			c.mu.Unlock()
@@ -2011,7 +2008,8 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 	for _, field := range payload.Tables[0].Fields {
 		nextFields[field.FieldID] = field
 	}
-	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored string
+	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored, changedAuthored string
+	var added *nativeAuthoredField
 	for authoredField, physicalField := range current.FieldNames {
 		if _, retained := nextFields[authoredField]; !retained {
 			if removedPhysical != "" {
@@ -2021,13 +2019,14 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 			removedAuthored = authoredField
 		}
 	}
-	for _, field := range payload.Tables[0].Fields {
+	for index, field := range payload.Tables[0].Fields {
 		runtimeFieldID, retained := current.Fields[field.FieldID]
 		if !retained {
-			if addedPhysical != "" {
+			if added != nil {
 				return nativeTableBinding{}, errors.New("native synced-table transition adds more than one field")
 			}
 			addedPhysical = field.Name
+			added = &payload.Tables[0].Fields[index]
 			continue
 		}
 		runtimeField, found := runtimeFields[runtimeFieldID]
@@ -2038,22 +2037,33 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 			if changedPhysical != "" {
 				return nativeTableBinding{}, errors.New("native synced-table transition changes more than one field type")
 			}
+			if runtimeField.Type != "string" || field.Type != "int" {
+				return nativeTableBinding{}, errors.New("native synced-table transition type conversion is unsupported")
+			}
 			changedPhysical = runtimeField.Name
 			changedType = field.Type
+			changedAuthored = field.FieldID
 		}
 	}
 	if (removedPhysical == "" && addedPhysical == "" && changedPhysical == "") ||
 		(removedPhysical != "" && removedPhysical == addedPhysical) ||
 		(removedPhysical != "" && !validSchemaTransitionColumn(removedPhysical)) ||
-		(addedPhysical != "" && !validSchemaTransitionColumn(addedPhysical)) ||
+		(added != nil && !validSchemaTransitionColumn(addedPhysical)) ||
 		(changedPhysical != "" && (!validSchemaTransitionColumn(changedPhysical) || changedPhysical == removedPhysical || changedPhysical == addedPhysical)) {
 		return nativeTableBinding{}, errors.New("native synced-table transition fields are invalid")
 	}
-	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, addedPhysical, changedPhysical, changedType); err != nil {
+	if added != nil && !added.Writable {
+		if err := c.harness.Operator().PublishStoredGeneratedColumns(ctx); err != nil {
+			return nativeTableBinding{}, err
+		}
+	}
+	if err := c.harness.Operator().TransitionSyncedTableField(ctx, current.RuntimeName, removedPhysical, added, changedPhysical, changedType); err != nil {
 		return nativeTableBinding{}, err
 	}
 	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])
-	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
+	if err := c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields, changedAuthored); err != nil {
+		return nativeTableBinding{}, err
+	}
 	return current, nil
 }
 
@@ -2109,8 +2119,7 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	// the removed authored field, and the capture validates every named field
 	// against the runtime row, so the removed field must leave the binding.
 	c.retireNativeSchemaField(authoredTable, removedAuthored, current.Fields[removedAuthored])
-	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
-	return nil
+	return c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields, "")
 }
 
 // retireNativeSchemaField keeps the runtime identity of one removed authored
@@ -2131,29 +2140,50 @@ func (c *NativeController) retireNativeSchemaField(authoredTable, authoredField,
 	c.installation.retiredFields[authoredTable+"\x00"+authoredField] = runtimeField
 }
 
-// rebindNativeTableAfterTransition drops each authored field the transition
-// removed from the table binding and from every record image that names it.
-func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
+// rebindNativeTableAfterTransition stages current images after the server
+// transition without changing the historical images that share their fields.
+func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField, changedAuthored string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return
+		return errors.New("native controller contract is not installed")
+	}
+	if changedAuthored != "" && retained[changedAuthored].Type != "int" {
+		return errors.New("native current-image type conversion is unsupported")
 	}
 	// The table field map is a naming dictionary. A mutation queued under the
 	// earlier schema still names the retired field, so the dictionary keeps it.
 	// Only the row image drops it, because the capture validates every image
 	// field against the runtime row.
+	staged := make(map[*nativeRecordBinding]nativeAuthoredImage, len(c.records))
 	for _, record := range c.records {
 		if record == nil || record.Table.RuntimeID != runtimeTableID {
 			continue
 		}
-		for authoredField := range record.Image.Fields {
+		image := record.Image
+		image.Fields = make(map[string]json.RawMessage, len(record.Image.Fields))
+		for authoredField, value := range record.Image.Fields {
 			if _, keep := retained[authoredField]; keep {
-				continue
+				image.Fields[authoredField] = value
 			}
-			delete(record.Image.Fields, authoredField)
 		}
+		if changedAuthored != "" {
+			var text string
+			if err := json.Unmarshal(image.Fields[changedAuthored], &text); err != nil {
+				return errors.New("native current-image conversion requires a JSON string")
+			}
+			value, err := strconv.ParseInt(text, 10, 32)
+			if err != nil {
+				return errors.New("native current-image conversion requires a 32-bit decimal integer")
+			}
+			image.Fields[changedAuthored] = json.RawMessage(strconv.FormatInt(value, 10))
+		}
+		staged[record] = image
 	}
+	for record, image := range staged {
+		record.Image = image
+	}
+	return nil
 }
 
 // RuntimeFieldID returns the runtime field identifier bound to one authored
@@ -3221,15 +3251,27 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 func (c *NativeController) awaitApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
 	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
 	defer cancel()
+	var lastErr error
 	for {
+		if deadline.Err() != nil {
+			break
+		}
 		resolveErr := c.resolveApplicationPushRecords(deadline, transaction)
 		if resolveErr == nil {
 			return nil
 		}
+		if deadline.Err() != nil {
+			break
+		}
+		lastErr = resolveErr
 		if err := waitNativePoll(deadline); err != nil {
-			return fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+			break
 		}
 	}
+	if lastErr != nil {
+		return fmt.Errorf("native application push records did not resolve: %w (context: %w)", lastErr, deadline.Err())
+	}
+	return fmt.Errorf("native application push records did not resolve: %w", deadline.Err())
 }
 
 // resolveApplicationPushRecords binds an application push to the current
@@ -3242,14 +3284,22 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		return err
 	}
 	defer database.Close()
-	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+	candidate := *transaction
+	candidate.Events = append([]nativeEventBinding(nil), transaction.Events...)
+	for index := range candidate.Events {
+		if candidate.Events[index].After != nil {
+			image := *candidate.Events[index].After
+			candidate.Events[index].After = &image
+		}
+	}
+	if err := c.resolveApplicationPushIdentities(ctx, database, &candidate); err != nil {
 		return err
 	}
-	for index := range transaction.Events {
-		if !transaction.RuntimeAcceptedEvents[index] {
+	for index := range candidate.Events {
+		if !candidate.RuntimeAcceptedEvents[index] {
 			continue
 		}
-		event := &transaction.Events[index]
+		event := &candidate.Events[index]
 		var rowData []byte
 		var version, checksum string
 		var deleted bool
@@ -3280,6 +3330,10 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		event.After.Version = version
 		event.After.Checksum = checksum
 	}
+	transaction.RuntimeBatchID = candidate.RuntimeBatchID
+	transaction.RuntimeMutationIDs = candidate.RuntimeMutationIDs
+	transaction.RuntimeAcceptedEvents = candidate.RuntimeAcceptedEvents
+	transaction.Events = candidate.Events
 	c.bindApplicationPushRecords(transaction)
 	return nil
 }
@@ -3315,8 +3369,9 @@ func (c *NativeController) resolveApplicationPushIdentities(ctx context.Context,
 	// callers hold c.mu, so this reads the bindings as the record update below
 	// does.
 	boundBatches := make(map[string]struct{}, len(c.transactions))
-	for _, other := range c.transactions {
-		if other != transaction && other.RuntimeBatchID != "" {
+	transactionKey := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
+	for key, other := range c.transactions {
+		if key != transactionKey && other.RuntimeBatchID != "" {
 			boundBatches[other.RuntimeBatchID] = struct{}{}
 		}
 	}
@@ -3384,6 +3439,7 @@ func (c *NativeController) bindApplicationPushRecords(transaction *nativeTransac
 			// The accepted write replaced the source row that the image models,
 			// unless a later source change already replaced that image.
 			if event.Before != nil && reflect.DeepEqual(record.Image, *event.Before) {
+				record.Table = event.Table
 				record.Image = *event.After
 			}
 			continue
@@ -3770,7 +3826,7 @@ func (c *NativeController) Capture(ctx context.Context, clientKeys, sources []st
 	if err != nil {
 		return nil, err
 	}
-	return []NativeCaptureFacts{{Source: "server-state", StateFacts: facts}}, nil
+	return []NativeCaptureFacts{facts}, nil
 }
 
 // resolvePendingApplicationPushRecords binds the runtime identities of each
@@ -3793,7 +3849,7 @@ func (c *NativeController) resolvePendingApplicationPushRecords(ctx context.Cont
 	return nil
 }
 
-func (c *NativeController) captureServerState(ctx context.Context) (scenarios.StateFacts, error) {
+func (c *NativeController) captureServerState(ctx context.Context) (NativeCaptureFacts, error) {
 	c.mu.Lock()
 	installation := c.installation
 	transactions := make([]*nativeTransactionBinding, 0, len(c.transactions))
@@ -3813,39 +3869,45 @@ func (c *NativeController) captureServerState(ctx context.Context) (scenarios.St
 	}
 	c.mu.Unlock()
 	if installation == nil {
-		return scenarios.StateFacts{}, errors.New("native controller contract is not installed")
+		return NativeCaptureFacts{}, errors.New("native controller contract is not installed")
 	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Table.RuntimeID == records[j].Table.RuntimeID {
+			return records[i].RuntimeRecordID < records[j].RuntimeRecordID
+		}
+		return records[i].Table.RuntimeID < records[j].Table.RuntimeID
+	})
 	database, err := c.harness.openDatabase(ctx, c.harness.names.Database, c.harness.env.Admin, false)
 	if err != nil {
-		return scenarios.StateFacts{}, errors.New("open native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("open native server-state capture failed")
 	}
 	defer database.Close()
 	tx, err := database.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
-		return scenarios.StateFacts{}, errors.New("begin native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("begin native server-state capture failed")
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-		return scenarios.StateFacts{}, errors.New("set native server-state capture read-only failed")
+		return NativeCaptureFacts{}, errors.New("set native server-state capture read-only failed")
 	}
 
-	var facts scenarios.StateFacts
-	if err := captureNativeRegistryAndStream(ctx, tx, installation, transactions, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	capture := NativeCaptureFacts{Source: "server-state", RuntimeRows: make([]scenarios.RowFact, 0, len(records))}
+	if err := captureNativeRegistryAndStream(ctx, tx, installation, transactions, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeTransactions(ctx, tx, installation, transactions, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeTransactions(ctx, tx, installation, transactions, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeRowsAndScopes(ctx, tx, installation, transactions, records, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeRowsAndScopes(ctx, tx, installation, transactions, records, &capture.StateFacts, &capture.RuntimeRows); err != nil {
+		return NativeCaptureFacts{}, err
 	}
-	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &facts); err != nil {
-		return scenarios.StateFacts{}, err
+	if err := captureNativeCountsAndRebuilds(ctx, tx, installation, &capture.StateFacts); err != nil {
+		return NativeCaptureFacts{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return scenarios.StateFacts{}, errors.New("commit native server-state capture failed")
+		return NativeCaptureFacts{}, errors.New("commit native server-state capture failed")
 	}
-	return facts, nil
+	return capture, nil
 }
 
 func captureNativeRegistryAndStream(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, facts *scenarios.StateFacts) error {
@@ -3924,7 +3986,7 @@ func captureNativeTransactions(ctx context.Context, tx *sql.Tx, installation *na
 	return nil
 }
 
-func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts) error {
+func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *nativeInstallationBinding, transactions []*nativeTransactionBinding, records []*nativeRecordBinding, facts *scenarios.StateFacts, runtimeRows *[]scenarios.RowFact) error {
 	scopeRows := make(map[string]uint64)
 	scopeVersions := make(map[string][]string)
 	facts.RowScopeEdges = make([]scenarios.RowScopeEdgeFact, 0)
@@ -3974,6 +4036,12 @@ func captureNativeRowsAndScopes(ctx context.Context, tx *sql.Tx, installation *n
 		if err != nil || hex.EncodeToString(digest[:]) != runtimeChecksum {
 			return errors.New("native runtime captured row checksum is invalid")
 		}
+		*runtimeRows = append(*runtimeRows, scenarios.RowFact{
+			TableID:           record.Table.RuntimeID,
+			CanonicalWireJSON: string(rowData),
+			Version:           runtimeVersion,
+			Checksum:          runtimeChecksum,
+		})
 		facts.Rows = append(facts.Rows, scenarios.RowFact{
 			TableID:           record.Table.AuthoredID,
 			CanonicalWireJSON: record.Image.CanonicalWireJSON,

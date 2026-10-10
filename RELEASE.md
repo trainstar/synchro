@@ -219,11 +219,17 @@ The server cell is PostgreSQL 18 on Ubuntu 24.04 Linux x64.
 
 Direct Go binaries support Linux x64.
 
-Swift supports iOS 16 and current iOS with Swift 6.
+Swift supports iOS 17 and current iOS with Swift 6.
 
 Kotlin supports Android API 24 and current Android.
 
-React Native 0.83.x supports current iOS and Android.
+React Native 0.82.1 through 0.83.x supports current iOS and Android.
+
+Package checks cover RN 0.82.1 and 0.83.10 on both platforms.
+The representative semantic corpus runs on RN 0.83.10.
+RN 0.82.1 iOS checks apply the upstream fmt 12.1.0 podspec backport.
+React Native iOS and Apple package checks use Xcode 27.0 through the GitHub-hosted `xcode-27` runner.
+The iOS 17 runtime uses an anonymous Apple download when the runner does not contain it.
 
 macOS hosts Apple and Swift validation. It is not a PostgreSQL support cell.
 

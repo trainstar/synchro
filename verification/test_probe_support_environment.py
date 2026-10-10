@@ -31,14 +31,14 @@ def command_fixtures(ios: str = "27.0", xcode: str = "27.0") -> list[str]:
     return [
         f"Xcode {xcode}\nBuild version 27A266a\n",
         json.dumps({"devices": {
-            "com.apple.CoreSimulator.SimRuntime.iOS-16-4": [
+            "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [
                 {"udid": OTHER_UDID, "state": "Booted", "isAvailable": True},
             ],
             RUNTIME: [{"udid": UDID, "state": "Booted", "isAvailable": True}],
         }}),
         json.dumps({"runtimes": [
             {"identifier": RUNTIME, "version": ios, "isAvailable": True, "platform": "iOS", "buildversion": "24A335"},
-            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-16-4", "version": "16.4", "isAvailable": True, "platform": "iOS"},
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-17-0", "version": "17.0", "isAvailable": True, "platform": "iOS"},
         ]}),
     ]
 
@@ -81,7 +81,7 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
 
     def test_native_minimum_and_current_measure_actual_runtime_and_xcode(self) -> None:
         for cell, ios, xcode in (
-            ("SUP-IOS-MIN-001", "16.4", "16.4.1"),
+            ("SUP-IOS-MIN-001", "17.0", "27.0"),
             ("SUP-IOS-CURRENT-001", "27.0", "27.0"),
             ("SUP-IOS-CURRENT-001", "27.0.1", "27.0.1"),
         ):
@@ -99,12 +99,27 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
             record = self.run_probe(root, command_fixtures(), probe.RN_IOS_CELL, app)
             self.assertEqual(record["environment"], {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.11"})
 
+    def test_minimum_react_native_requires_exact_installed_runtime(self) -> None:
+        for version in ("0.82.1", "0.82.0", "0.82.2", "0.83.10", None):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                app = root / "missing-app" if version is None else self.installed_app(root, json.dumps({"version": version}))
+                if version == "0.82.1":
+                    record = self.run_probe(root, command_fixtures(), "SUP-RN-IOS-MIN-001", app)
+                    self.assertEqual(record, {"id": "SUP-RN-IOS-MIN-001", "environment": {
+                        "ios": "27.0", "xcode": "27.0", "react_native": "0.82.1",
+                    }})
+                else:
+                    self.assert_rejected(root, command_fixtures(), "SUP-RN-IOS-MIN-001", app)
+
     def test_invalid_cell_udid_and_app_arguments_reject_before_commands(self) -> None:
         cases = [(cell, UDID, None) for cell in ("", "SUP-ANDROID-CURRENT-001", "SUP-PG-LINUX-X64-001", "SUP-MACOS-CURRENT-001")]
+        cases.extend((cell, UDID, Path("app")) for cell in ("SUP-RN-ANDROID-MIN-001", "SUP-RN-IOS-MIN-002"))
         cases.extend(("SUP-IOS-CURRENT-001", identity, None) for identity in (
             "", "booted", "not-a-uuid", " " + UDID, UDID + "\n", UDID.replace("-", ""), "{" + UDID + "}", None,
         ))
-        cases.extend([(probe.RN_IOS_CELL, UDID, None), ("SUP-IOS-CURRENT-001", UDID, Path("app")), ("SUP-IOS-MIN-001", UDID, Path("app"))])
+        cases.extend([(probe.RN_IOS_CELL, UDID, None), ("SUP-RN-IOS-MIN-001", UDID, None),
+                      ("SUP-IOS-CURRENT-001", UDID, Path("app")), ("SUP-IOS-MIN-001", UDID, Path("app"))])
         for cell, identity, app in cases:
             with self.subTest(cell=cell, identity=identity), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "measured.json"
@@ -186,7 +201,8 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
 
     def test_shared_validator_rejects_unsupported_or_noncanonical_apple_versions(self) -> None:
         for cell, ios, xcode in (
-            ("SUP-IOS-MIN-001", "17.0", "27.0"), ("SUP-IOS-MIN-001", "15.9", "27.0"),
+            ("SUP-IOS-MIN-001", "18.0", "27.0"), ("SUP-IOS-MIN-001", "16.4", "27.0"),
+            ("SUP-IOS-MIN-001", "15.9", "27.0"),
             ("SUP-IOS-CURRENT-001", "15.9", "27.0"), ("SUP-IOS-CURRENT-001", "027.0", "27.0"),
             ("SUP-IOS-CURRENT-001", "27.0-beta", "27.0"), ("SUP-IOS-CURRENT-001", "27.0", "27"),
             ("SUP-IOS-CURRENT-001", "27.0", "27.0-beta"), ("SUP-IOS-CURRENT-001", "27.0", "current"),
@@ -195,7 +211,7 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
                 self.assert_rejected(Path(directory), command_fixtures(ios, xcode), cell)
 
     def test_installed_react_native_missing_malformed_and_duplicate_metadata_reject(self) -> None:
-        for text in (None, "{", "[]", '{}', '{"version":null}', '{"version":"0.84.0"}',
+        for text in (None, "{", "[]", '{}', '{"version":null}', '{"version":"0.84.0"}', '{"version":"0.82.1"}',
                      '{"version":"0.083.10"}', '{"version":"0.83"}', '{"version":"current"}',
                      '{"version":"0.83.10","version":"0.83.10"}', '{"metadata":{"a":1,"a":1},"version":"0.83.10"}'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
@@ -228,6 +244,12 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
                         probe.probe_ios("SUP-IOS-CURRENT-001", UDID, output)
                     self.assertEqual(command.call_count, index + 1)
                     self.assertNotIn(secret, str(raised.exception))
+                    if isinstance(error, subprocess.CalledProcessError):
+                        self.assertIn("exit status 7", str(raised.exception))
+                    elif isinstance(error, OSError):
+                        self.assertIn("OSError", str(raised.exception))
+                    elif isinstance(error, UnicodeError):
+                        self.assertIn("invalid UTF-8", str(raised.exception))
                     self.assertLess(len(str(raised.exception)), 100)
                     self.assertFalse(output.exists())
 
@@ -235,7 +257,7 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "nested/measured.json"
-            record = {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "xcode": "16.4"}}
+            record = {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}}
             with mock.patch.object(probe.os, "replace", wraps=os.replace) as replace:
                 probe.write_record(output, record)
             source, destination = replace.call_args.args
@@ -653,6 +675,31 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
         self.version = self.version.replace("37.2.12.0", "37.2.12")
         self.assertEqual(self.measure()["environment"]["emulator_version"], "37.2.12")
 
+    def test_minimum_react_native_requires_exact_installed_runtime(self) -> None:
+        package = self.app / "node_modules/react-native/package.json"
+        for version in ("0.82.0", "0.82.2", "0.83.10", None):
+            with self.subTest(version=version):
+                if version is None:
+                    package.unlink()
+                else:
+                    package.write_text(json.dumps({"version": version}), encoding="utf-8")
+                self.rejected(cell="SUP-RN-ANDROID-MIN-001", react_native_app=self.app)
+        package.write_text('{"version":"0.82.1"}', encoding="utf-8")
+        record = self.measure("SUP-RN-ANDROID-MIN-001", react_native_app=self.app)
+        self.assertEqual(record, {"id": "SUP-RN-ANDROID-MIN-001", "environment": {
+            "android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64",
+            "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.82.1",
+        }})
+        self.assertEqual(json.loads(self.identity.read_text())["id"], "SUP-RN-ANDROID-MIN-001")
+
+    def test_wrong_minimum_cells_and_missing_app_reject_before_commands(self) -> None:
+        for cell, app in (("SUP-RN-IOS-MIN-001", self.app), ("SUP-RN-ANDROID-MIN-002", self.app),
+                          ("SUP-RN-ANDROID-MIN-001", None)):
+            with self.subTest(cell=cell, app=app):
+                self.command.reset_mock()
+                self.rejected(cell=cell, react_native_app=app)
+                self.command.assert_not_called()
+
     def test_inherited_conflicts_and_malformed_serials_precede_commands(self) -> None:
         for values in ({"ANDROID_SERIAL": "emulator-5554", "KOTLIN_ANDROID_SERIAL": "emulator-5556"}, {"ANDROID_SERIAL": " emulator-5554"}, {"KOTLIN_ANDROID_SERIAL": "emulator-05554"}, {"ANDROID_SERIAL": "emulator-65536"}, {"ANDROID_SERIAL": "emulator-5554\n"}, {"ANDROID_SERIAL": "physical"}, {"ANDROID_SERIAL": "emulator-5556"}):
             with self.subTest(values=values), mock.patch.dict(os.environ, values):
@@ -763,14 +810,157 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
             return original(path)
         with mock.patch.object(Path, "iterdir", disappearing):
             self.measure()
-        self.output.unlink()
-        self.identity.unlink()
+        command = ["sudo", "--non-interactive", "ls", "-1", "--", str(self.proc / "321/fd")]
+        def denied(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+            if arguments == command:
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                raise subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error")
+            return self.execute(arguments, **options)
+        self.command.side_effect = denied
         def unreadable(path: Path):
             if path == self.proc / "321/fd":
                 raise PermissionError()
             return original(path)
         with mock.patch.object(Path, "iterdir", unreadable):
             self.rejected()
+        self.assertTrue(any(call.args[0] == command for call in self.command.call_args_list))
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_directories_are_inspected_empty_valid_and_duplicate_owner_rejects(self) -> None:
+        directory = self.proc / "321/fd"
+        unrelated = self.proc / "999/fd"
+        unrelated.mkdir(parents=True)
+        descriptor = unrelated / "0"
+        descriptor.symlink_to("/dev/null")
+        restricted = {directory, unrelated}
+        original = Path.iterdir
+
+        def unreadable(path: Path):
+            if path in restricted:
+                raise PermissionError("private directory details")
+            return original(path)
+
+        def execute(command: list[str], **options: object) -> subprocess.CompletedProcess:
+            if command[:5] == ["sudo", "--non-interactive", "ls", "-1", "--"]:
+                self.assertEqual(len(command), 6)
+                self.assertIn(Path(command[5]), restricted)
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                names = [fd.name for fd in original(Path(command[5]))]
+                text = "".join(name + "\n" for name in names).encode("utf-8")
+                return subprocess.CompletedProcess(command, 0, text, b"private tool diagnostics")
+            return self.execute(command, **options)
+
+        self.command.side_effect = execute
+        with mock.patch.object(Path, "iterdir", unreadable):
+            self.measure()
+            command = ["sudo", "--non-interactive", "ls", "-1", "--", str(directory)]
+            self.assertEqual(sum(call.args[0] == command for call in self.command.call_args_list), 2)
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            descriptor.unlink()
+            self.measure()
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            duplicate = self.process(322)
+            (duplicate / "fd/1").unlink()
+            restricted.add(duplicate / "fd")
+            self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_directory_timeout_and_malformed_names_reject(self) -> None:
+        directory = self.proc / "321/fd"
+        command = ["sudo", "--non-interactive", "ls", "-1", "--", str(directory)]
+        original = Path.iterdir
+        self.output.write_text("previous environment", encoding="utf-8")
+        self.identity.write_text("previous identity", encoding="utf-8")
+
+        def unreadable(path: Path):
+            if path == directory:
+                raise PermissionError("private directory details")
+            return original(path)
+
+        failures = [
+            subprocess.TimeoutExpired(command, 30, output=b"private output", stderr=b"private error"),
+            b"\n", b"0", b"0\n\n", b"0\r\n", b"0\r", b"0\n1", b"00\n", b"01\n", b"-1\n", b"+1\n",
+            b" 0\n", b"0 \n", b"0\t\n", b"0\x00\n", b"\xff\n", "١\n".encode("utf-8"),
+            b"../0\n", b"/0\n", b"0/1\n", b"0\\1\n", b"0\n0\n", b"0\n1\n0\n",
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def execute(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+                    if arguments == command:
+                        self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return subprocess.CompletedProcess(arguments, 0, failure, b"private tool diagnostics")
+                    return self.execute(arguments, **options)
+                self.command.side_effect = execute
+                with mock.patch.object(Path, "iterdir", unreadable), mock.patch.object(probe.os, "readlink") as readlink:
+                    self.rejected()
+                    readlink.assert_not_called()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_descriptors_are_inspected_and_duplicate_owner_rejects(self) -> None:
+        descriptor = self.proc / "999/fd/0"
+        descriptor.parent.mkdir(parents=True)
+        descriptor.symlink_to("/dev/null")
+        restricted = {descriptor}
+        original = os.readlink
+
+        def unreadable(path: Path, *args: object, **options: object) -> str:
+            if Path(path) in restricted:
+                raise PermissionError("private descriptor details")
+            return original(path, *args, **options)
+
+        def execute(command: list[str], **options: object) -> subprocess.CompletedProcess:
+            if command[:4] == ["sudo", "--non-interactive", "readlink", "--"]:
+                self.assertEqual(len(command), 5)
+                self.assertIn(Path(command[4]), restricted)
+                self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                return subprocess.CompletedProcess(command, 0, original(command[4]).encode("utf-8") + b"\n", b"private tool diagnostics")
+            return self.execute(command, **options)
+
+        self.command.side_effect = execute
+        with mock.patch.object(probe.os, "readlink", unreadable):
+            self.measure()
+            command = ["sudo", "--non-interactive", "readlink", "--", str(descriptor)]
+            self.assertEqual(sum(call.args[0] == command for call in self.command.call_args_list), 2)
+            self.assertEqual(json.loads(self.identity.read_text())["pid"], 321)
+            duplicate = self.process(322)
+            (duplicate / "fd/1").unlink()
+            restricted.add(duplicate / "fd/0")
+            self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
+
+    def test_restricted_descriptor_denial_timeout_and_malformed_text_reject(self) -> None:
+        descriptor = self.proc / "321/fd/0"
+        command = ["sudo", "--non-interactive", "readlink", "--", str(descriptor)]
+        original = os.readlink
+        self.output.write_text("previous environment", encoding="utf-8")
+        self.identity.write_text("previous identity", encoding="utf-8")
+
+        def unreadable(path: Path, *args: object, **options: object) -> str:
+            if Path(path) == descriptor:
+                raise PermissionError("private descriptor details")
+            return original(path, *args, **options)
+
+        failures = [
+            subprocess.CalledProcessError(1, command, output=b"private output", stderr=b"private error"),
+            subprocess.TimeoutExpired(command, 30, output=b"private output", stderr=b"private error"),
+            b"", b"\n", b"/dev/null", b"/dev/null\n\n", b"/dev/null\nother\n", b"/dev/null\r\n", b"/dev/null\r",
+            b"/dev/\x00null\n", b"/dev/\tnull\n", b"/dev/\x7fnull\n", b"/dev/\xc2\x85null\n", b"/dev/\xffnull\n",
+        ]
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def execute(arguments: list[str], **options: object) -> subprocess.CompletedProcess:
+                    if arguments == command:
+                        self.assertEqual(options, {"capture_output": True, "text": False, "check": True, "timeout": 30})
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return subprocess.CompletedProcess(arguments, 0, failure, b"private tool diagnostics")
+                    return self.execute(arguments, **options)
+                self.command.side_effect = execute
+                with mock.patch.object(probe.os, "readlink", unreadable):
+                    self.rejected()
+        self.assertNotIn("private", self.diagnostics.getvalue())
 
     def test_wrong_duplicate_missing_avd_selectors_and_stat(self) -> None:
         for selectors in (["-avd", "Wrong"], ["-avd", self.name, "@" + self.name], ["-avd", self.name, "-avd", self.name], [], ["-avd"]):
@@ -834,8 +1024,14 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
                 self.version = version
                 self.rejected()
         self.version = original
-        (self.app / "node_modules/react-native/package.json").write_text('{"version":"0.84.0"}', encoding="utf-8")
-        self.rejected(cell=probe.RN_ANDROID_CELL, react_native_app=self.app)
+        package = self.app / "node_modules/react-native/package.json"
+        for text in ('{"version":"0.84.0"}', '{"version":"0.82.1"}', None):
+            with self.subTest(metadata=text):
+                if text is None:
+                    package.unlink()
+                else:
+                    package.write_text(text, encoding="utf-8")
+                self.rejected(cell=probe.RN_ANDROID_CELL, react_native_app=self.app)
 
     def test_resume_matches_complete_records_and_rejects_every_identity_change(self) -> None:
         options = self.initial()

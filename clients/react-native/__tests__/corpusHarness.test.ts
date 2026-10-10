@@ -12,6 +12,7 @@ import {
   runCorpusCommandLoop,
 } from '../example/e2e/corpus-harness';
 import { WAIT_TIMEOUT_MS } from '../example/src/timeouts';
+import * as corpusHarness from '../example/e2e/corpus-harness';
 
 const detox = jest.requireMock<{
   device: { terminateApp: jest.Mock };
@@ -186,4 +187,52 @@ it('fails at the requested poll deadline instead of accepting a late result', as
   expect(resultAttributes).not.toHaveBeenCalled();
   await jest.advanceTimersByTimeAsync(1);
   await rejected;
+});
+
+it('cuts the schema-check process only for an explicit restart', async () => {
+  const register = jest.fn();
+  const originalIt = global.it;
+  let journey: () => Promise<void>;
+  try {
+    global.it = register as unknown as typeof global.it;
+    await import('../example/e2e/schema-check.test');
+    journey = register.mock.calls[0][1] as () => Promise<void>;
+  } finally {
+    global.it = originalIt;
+  }
+  const runtimeGlobal = global as unknown as { device?: typeof detox.device };
+  const originalDevice = Object.getOwnPropertyDescriptor(global, 'device');
+  try {
+    runtimeGlobal.device = detox.device;
+    for (const restart of [true, false]) {
+      const calls: string[] = [];
+      const command = {
+        action: { action: { actor: 'client', command: 'open', parameters: {
+          database_mode: 'reuse', ...(restart ? { process_restart: true } : {}),
+        } } },
+        runtime: { database_path: 'preserved-proof.db' },
+      };
+      detox.device.terminateApp.mockImplementation(async () => { calls.push('terminate'); });
+      jest.spyOn(corpusHarness, 'launchCorpusApp').mockImplementation(async (options) => {
+        calls.push(options?.delete ? 'initial-launch' : 'reuse-launch');
+        if (!options?.delete) expect(options).toEqual({ newInstance: true, delete: false, launchArgs: { synchroConformance: '1' } });
+      });
+      jest.spyOn(corpusHarness, 'coordinatorCount').mockReturnValue(2);
+      jest.spyOn(corpusHarness, 'exchange')
+        .mockResolvedValueOnce({ schema_version: 1, sequence: 1, state: 'command', command })
+        .mockResolvedValueOnce({ schema_version: 1, sequence: 2, state: 'complete', command: null });
+      jest.spyOn(corpusHarness, 'submitCorpusCommand').mockImplementation(async (raw) => {
+        calls.push('submit');
+        expect(JSON.parse(raw)).toEqual(command);
+      });
+      jest.spyOn(corpusHarness, 'pollCorpusResult').mockResolvedValue({ raw: JSON.stringify(passed), envelope: { ...passed, outcome: 'passed' } });
+      await journey!();
+      expect(calls).toEqual(restart
+        ? ['initial-launch', 'terminate', 'reuse-launch', 'submit', 'terminate']
+        : ['initial-launch', 'submit', 'terminate']);
+    }
+  } finally {
+    if (originalDevice === undefined) delete runtimeGlobal.device;
+    else Object.defineProperty(global, 'device', originalDevice);
+  }
 });

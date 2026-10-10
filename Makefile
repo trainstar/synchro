@@ -212,6 +212,7 @@ export ANDROID_SERIAL
 endif
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
+RN_POD_UPDATE ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
 # uses every online device, so a device gate requires exactly one serial.
 REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
@@ -303,9 +304,9 @@ BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
 SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
 DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
 # A timeout bounds a run but cannot omit a test, so it is not a selector.
-# Each integration test has its own deadline. This package limit only stops a hang,
-# so it is about twice the measured CI runtime of the package.
-BLACKBOX_TIMEOUT ?= 40m
+# Each integration test retains its own deadline.
+# This outer package timeout bounds the complete run.
+BLACKBOX_TIMEOUT ?= 120m
 SWIFT_SCENARIOS_TIMEOUT ?= 30m
 changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
 declared_selection = @case "$(PARTIAL)" in \
@@ -317,6 +318,7 @@ CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all
+SWIFT_BUILD_ARGS ?=
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
@@ -409,7 +411,7 @@ help:
 	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
 	@echo "  ci-source-quality     - Run the tests of the CI source-quality job"
-	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (ADAPTER_TEST_URL, SOAK_ARTIFACT_DIR)"
+	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (SOAK_ARTIFACT_DIR)"
 	@echo "  ci-candidate-swift    - Run the tests of the CI candidate-swift job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
 	@echo "  ci-candidate-kotlin   - Run the tests of the CI candidate-kotlin job on KOTLIN_ANDROID_SERIAL (ADAPTER_TEST_URL)"
 	@echo "  ci-candidate-rn-ios   - Run the tests of the CI candidate-rn-ios job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
@@ -1040,7 +1042,7 @@ release-run-support-cell:
 					"$$release/artifacts/synchro-seed-linux-x64-$(VERSION)" \
 					"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" "$(SUPPORT_CELL_ID)" \
 					"$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json" "$$hashes" ;; \
-		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-MIN-001|SUP-RN-ANDROID-MIN-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			$(MAKE) --no-print-directory release-consumer-artifacts VERSION="$(VERSION)" RELEASE_DIR="$$release" \
 				RELEASE_CONSUMER_DIR="$(abspath $(RELEASE_CONSUMER_DIR))"; \
 			case "$(SUPPORT_CELL_ID)" in \
@@ -1151,7 +1153,29 @@ ci-candidate-server: export SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACT
 ci-candidate-server:
 	$(MAKE) test-rust-pg
 	$(MAKE) test-rust-mutants
-	$(MAKE) test-adapter
+	@set -eu; \
+		mkdir -p "$(CURDIR)/.ignore/r2/tmp"; \
+		state="$$(mktemp -d "$(CURDIR)/.ignore/r2/tmp/candidate-server-adapter.XXXXXX")"; \
+		set -- LOCAL_POSTGRES_STATE_DIR="$$state" \
+			LOCAL_POSTGRES_PID_FILE="$$state/postgres.pid" \
+			LOCAL_POSTGRES_LOG_FILE="$$state/postgres.log" \
+			LOCAL_POSTGRES_URL_FILE="$$state/postgres.url" \
+			LOCAL_POSTGRES_ATTACH_ENV_FILE="$$state/attach.env"; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT HUP INT TERM; \
+			$(MAKE) --no-print-directory local-postgres-stop "$$@" || { stop_status=$$?; test "$$status" -ne 0 || status=$$stop_status; }; \
+			if [ "$$status" -eq 0 ]; then rm -rf "$$state"; \
+			else echo "API fixture logs retained at $$state" >&2; fi; \
+			exit "$$status"; \
+		}; \
+		trap 'cleanup "$$@"' EXIT; \
+		trap 'exit 129' HUP; \
+		trap 'exit 130' INT; \
+		trap 'exit 143' TERM; \
+		$(MAKE) --no-print-directory local-postgres-start "$$@"; \
+		adapter_url="$$(cat "$$state/postgres.url")"; \
+		$(MAKE) --no-print-directory test-adapter ADAPTER_TEST_URL="$$adapter_url"
 	rm -rf "$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)" "$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"
 	$(MAKE) conformance-update-baseline-extension-artifact
 	$(MAKE) test-blackbox
@@ -1175,19 +1199,21 @@ ci-candidate-rn-ios:
 	$(MAKE) test-rn-e2e-ios-build
 	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
-	$(MAKE) test-consumer-rn-ios
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.83.10
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-ios
 	$(MAKE) test-rn-scenarios-ios
 
 ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
-	$(MAKE) test-consumer-rn-android
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.83.10
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-android
 	$(MAKE) test-rn-scenarios-android
 
 build-swift-native-runner:
-	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
+	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build $(SWIFT_BUILD_ARGS) --product synchro-native-runner
 
 build-kotlin-library:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
@@ -1918,7 +1944,7 @@ rn-watchman-reset:
 	fi
 
 rn-ios-pods:
-	cd clients/react-native/example/ios && pod install
+	cd clients/react-native/example/ios && pod $(if $(RN_POD_UPDATE),update $(RN_POD_UPDATE) --no-repo-update,install)
 
 .PHONY: rn-ios-build rn-ios-bundle
 # Callers such as test-rn-e2e-ios-build select the seed, so create the pinned seed only when none exists.
@@ -2292,7 +2318,7 @@ test-client-platforms:
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
 		SUP-IOS-MIN-001) \
-			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "17" || { echo "SUPPORT_PLATFORM_VERSION must be 17" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
@@ -2303,13 +2329,13 @@ test-client-platforms:
 			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial" ;; \
-		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001|SUP-RN-ANDROID-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
 			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
 			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; else $(MAKE) test-consumer-rn-android-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; fi ;; \
-		SUP-RN-IOS-CURRENT-001) \
+		SUP-RN-IOS-CURRENT-001|SUP-RN-IOS-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-rn-ios-smoke ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
@@ -2511,23 +2537,26 @@ local-postgres-start: build-local-postgres
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
 		exit 1
 
-# Each provisioner cleanup stage has its own deadline, so the stop waits for
-# exit. A forced kill would skip cluster removal and extension restoration.
-# The start time distinguishes the provisioner from a process that reuses its PID.
+# The owned lifecycle command verifies destruction after cluster removal and
+# extension restoration. Retain metadata and logs if cleanup cannot be verified.
 local-postgres-stop:
 	@set -eu; \
-		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
-			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
-			if kill -0 "$$pid" 2>/dev/null; then \
-				started="$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)"; \
-				kill "$$pid"; \
-				while [ -n "$$started" ] && [ "$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)" = "$$started" ]; do sleep 1; done; \
-				 echo "local PostgreSQL provisioner stopped"; \
-			else \
-				echo "local PostgreSQL provisioner is not running"; \
-			fi; \
+		state="$(LOCAL_POSTGRES_STATE_DIR)/lifecycle-state.json"; \
+		if [ -e "$$state" ] || [ -L "$$state" ]; then \
+			run_id="$$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["run_id"])' "$$state")" || { \
+				status=$$?; echo "local PostgreSQL lifecycle state read failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
+			"$(LOCAL_POSTGRES_BINARY)" lifecycle --state-dir "$(LOCAL_POSTGRES_STATE_DIR)" destroy "$$run_id" >/dev/null || { \
+				status=$$?; echo "local PostgreSQL destruction failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
 			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; \
+			echo "local PostgreSQL provisioner stopped"; \
 		else \
+			for metadata in "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; do \
+				if [ -e "$$metadata" ] || [ -L "$$metadata" ]; then \
+					echo "local PostgreSQL lifecycle state is missing. Cannot verify cleanup. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit 1; \
+				fi; \
+			done; \
 			echo "local PostgreSQL provisioner is not running"; \
 		fi
 

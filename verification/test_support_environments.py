@@ -14,7 +14,7 @@ def valid_records() -> list[dict[str, object]]:
         {"id": "SUP-PG-LINUX-X64-001", "environment": {
             "architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3",
         }},
-        {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "xcode": "16.4"}},
+        {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}},
         {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
         {"id": "SUP-RN-IOS-CURRENT-001", "environment": {
             "ios": "27.0", "xcode": "27.0", "react_native": "0.83.10",
@@ -35,6 +35,15 @@ def valid_records() -> list[dict[str, object]]:
             "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233",
             "react_native": "0.83.10",
         }},
+        {"id": "SUP-RN-IOS-MIN-001", "environment": {
+            "ios": "27.0", "xcode": "27.0", "react_native": "0.82.1",
+        }},
+        {"id": "SUP-RN-ANDROID-MIN-001", "environment": {
+            "android_api": "37", "os": "ubuntu-24.04",
+            "system_image": "system-images;android-37.0;google_apis;x86_64",
+            "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233",
+            "react_native": "0.82.1",
+        }},
     ]
 
 
@@ -46,7 +55,8 @@ def invalid_collections() -> list[tuple[str, object]]:
         ("SUP-PG-LINUX-X64-001", "postgresql", "18.3.0"),
         ("SUP-PG-LINUX-X64-001", "architecture", "amd64"),
         ("SUP-PG-LINUX-X64-001", "os", "ubuntu-22.04"),
-        ("SUP-IOS-MIN-001", "ios", "17.0"),
+        ("SUP-IOS-MIN-001", "ios", "18.0"),
+        ("SUP-IOS-MIN-001", "ios", "16.4"),
         ("SUP-IOS-CURRENT-001", "ios", "15.9"),
         ("SUP-IOS-CURRENT-001", "ios", "27.0.1"),
         ("SUP-IOS-CURRENT-001", "ios", "027.0"),
@@ -57,6 +67,15 @@ def invalid_collections() -> list[tuple[str, object]]:
         ("SUP-RN-IOS-CURRENT-001", "react_native", "0.84.0"),
         ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.083.10"),
         ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.83"),
+        ("SUP-RN-IOS-CURRENT-001", "react_native", "0.82.1"),
+        ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.82.1"),
+        ("SUP-RN-IOS-MIN-001", "react_native", "0.82.0"),
+        ("SUP-RN-IOS-MIN-001", "react_native", "0.82.2"),
+        ("SUP-RN-IOS-MIN-001", "react_native", "0.83.10"),
+        ("SUP-RN-ANDROID-MIN-001", "react_native", "0.82.0"),
+        ("SUP-RN-ANDROID-MIN-001", "react_native", "0.82.2"),
+        ("SUP-RN-ANDROID-MIN-001", "react_native", "0.83.10"),
+        ("SUP-RN-IOS-MIN-001", "ios", "26.0"),
         ("SUP-ANDROID-MIN-001", "android_api", "25"),
         ("SUP-ANDROID-CURRENT-001", "android_api", "23"),
         ("SUP-ANDROID-CURRENT-001", "android_api", "037"),
@@ -82,10 +101,15 @@ def invalid_collections() -> list[tuple[str, object]]:
         next(record for record in records if record["id"] == cell_id)["environment"][field] = value
         cases.append((f"{cell_id}/{field}/{value}", records))
     records = valid_records()
+    minimum_android = next(record for record in records if record["id"] == "SUP-RN-ANDROID-MIN-001")
+    minimum_android["environment"].update(android_api="36", system_image="system-images;android-36;google_apis;x86_64")
+    cases.append(("minimum React Native Android OS mismatch", records))
+    records = valid_records()
     records.append(copy.deepcopy(records[0]))
     cases.append(("duplicate record", records))
     cases.append(("missing cell", valid_records()[:-1]))
-    for cell_id in ("SUP-MACOS-CURRENT-001", "SUP-PG-014", "SUP-UNKNOWN", 1, []):
+    for cell_id in ("SUP-MACOS-CURRENT-001", "SUP-PG-014", "SUP-UNKNOWN",
+                    "SUP-RN-IOS-MIN-002", "SUP-RN-ANDROID-MIN-002", 1, []):
         records = valid_records()
         records[0]["id"] = cell_id
         cases.append((f"invalid ID {cell_id!r}", records))
@@ -136,7 +160,7 @@ class SupportEnvironmentTests(unittest.TestCase):
     def test_canonical_numeric_and_image_forms(self) -> None:
         records = valid_records()
         records[0]["environment"]["postgresql"] = "18.0"
-        records[1]["environment"].update(ios="16.0.0", xcode="16.4.1")
+        records[1]["environment"].update(ios="17.0.0", xcode="27.0.0")
         for record in records:
             if "system_image" in record["environment"]:
                 api = record["environment"]["android_api"]
@@ -167,12 +191,13 @@ class SupportEnvironmentTests(unittest.TestCase):
     def test_current_consistency_without_claiming_stable_authority(self) -> None:
         records = valid_records()
         for record in records:
-            if record["id"] in {"SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001"}:
-                record["environment"]["ios"] = "16.0"
-            if record["id"] in {"SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"}:
+            if record["id"] in {"SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-IOS-MIN-001"}:
+                record["environment"]["ios"] = "17.0"
+            if record["id"] in {"SUP-ANDROID-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001", "SUP-RN-ANDROID-MIN-001"}:
                 record["environment"].update(android_api="24", system_image="system-images;android-24;google_apis;x86_64")
         environments.validate_records(records)
-        records[-1]["environment"].update(android_api="25", system_image="system-images;android-25;google_apis;x86_64")
+        current_android = next(record for record in records if record["id"] == "SUP-RN-ANDROID-CURRENT-001")
+        current_android["environment"].update(android_api="25", system_image="system-images;android-25;google_apis;x86_64")
         with self.assertRaisesRegex(environments.EnvironmentError, "current android_api versions differ"):
             environments.validate_records(records)
 

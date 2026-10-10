@@ -4,8 +4,11 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 ## Requirements
 
-- React Native `0.83.x`. Use `0.83.5` or later with Xcode `26.4` or later.
-- iOS `16.0+`
+- React Native `>=0.82.1 <0.84.0`, with its compatible React version.
+- React Native `0.82.1` needs the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27.
+- React Native `0.83.10` contains the fmt correction.
+- Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
+- iOS `17.0+`
 - Android `minSdk 24`
 - Node `20.19.4+`
 - Android development and CI should use JDK `17`
@@ -25,7 +28,7 @@ application `ios/Podfile`:
 
 ```ruby
 pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.2'
-pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
 ```
 
 Then install the pods:

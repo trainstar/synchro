@@ -68,7 +68,7 @@ xcodebuild \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$work_dir/device-derived-data" \
-  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 \
   CODE_SIGNING_ALLOWED=NO \
   build
 
@@ -114,7 +114,7 @@ xcodebuild \
   -sdk iphonesimulator \
   -destination "platform=iOS Simulator,id=$simulator_udid" \
   -derivedDataPath "$work_dir/derived-data" \
-  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 \
   CODE_SIGNING_ALLOWED=NO \
   build
 

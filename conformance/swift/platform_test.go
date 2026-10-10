@@ -334,38 +334,61 @@ func TestCaptureRejectsIncompleteOrAmbiguousDurableFacts(t *testing.T) {
 	truncatedValue := true
 	overflowed := false
 	complete := runnerResult{
-		Status:                          &status,
-		PendingChangeCount:              &pending,
-		ApplicationRowCount:             &one,
-		MutationLedgerCount:             &zero,
-		MutationOutcomeCount:            &zero,
-		SealedBatchCount:                &zero,
-		RejectedMutationCount:           &zero,
-		ScopeStateCount:                 &zero,
-		ScopeRowCount:                   &one,
-		ProvenanceCount:                 &one,
-		RowMetadataCount:                &one,
-		RebuildAttemptCount:             &zero,
-		RebuildReceiptCount:             &zero,
-		ApplicationRows:                 []map[string]json.RawMessage{},
-		RetainedMutations:               []retainedMutation{},
-		RejectedMutations:               []retainedRejection{},
-		ScopeStates:                     []scopeStateRecord{},
-		ScopeRows:                       []scopeRowRecord{{ScopeID: "scope-a", TableName: "items", RecordID: "row-a", Checksum: "checksum-a", Generation: 1}},
-		RowMetadataRecords:              []rowMetadataRecord{{TableName: "items", RecordID: "row-a", ServerVersion: "version-a"}},
-		RebuildAttempts:                 []rebuildAttemptRecord{},
-		RebuildReceipts:                 []rebuildReceiptRecord{},
-		ScopeStatesTruncated:            &truncated,
-		ScopeRowsTruncated:              &truncated,
-		RebuildAttemptsTruncated:        &truncated,
-		RebuildReceiptsTruncated:        &truncated,
-		RowMetadataTruncated:            &truncated,
-		CaptureOverflowed:               &overflowed,
-		ProvenanceMaintenanceWorkCursor: &maintenanceCursor,
-		Events:                          []eventRecord{},
+		Status:                            &status,
+		PendingChangeCount:                &pending,
+		ApplicationRowCount:               &one,
+		MutationLedgerCount:               &zero,
+		MutationOutcomeCount:              &zero,
+		SealedBatchCount:                  &zero,
+		RejectedMutationCount:             &zero,
+		ScopeStateCount:                   &zero,
+		ScopeRowCount:                     &one,
+		ProvenanceCount:                   &one,
+		RowMetadataCount:                  &one,
+		RebuildAttemptCount:               &zero,
+		RebuildReceiptCount:               &zero,
+		ApplicationRows:                   []map[string]json.RawMessage{},
+		RetainedMutations:                 []retainedMutation{},
+		RejectedMutations:                 []retainedRejection{},
+		ScopeStates:                       []scopeStateRecord{},
+		ScopeRows:                         []scopeRowRecord{{ScopeID: "scope-a", TableName: "items", RecordID: "row-a", Checksum: "checksum-a", Generation: 1}},
+		RowMetadataRecords:                []rowMetadataRecord{{TableName: "items", RecordID: "row-a", ServerVersion: "version-a"}},
+		RebuildAttempts:                   []rebuildAttemptRecord{},
+		RebuildReceipts:                   []rebuildReceiptRecord{},
+		ScopeStatesTruncated:              &truncated,
+		ScopeRowsTruncated:                &truncated,
+		RebuildAttemptsTruncated:          &truncated,
+		RebuildReceiptsTruncated:          &truncated,
+		RowMetadataTruncated:              &truncated,
+		MigrationJournalTruncated:         &truncated,
+		PhysicalSchemaTruncated:           &truncated,
+		AcceptedMutationOutcomesTruncated: &truncated,
+		CaptureOverflowed:                 &overflowed,
+		ProvenanceMaintenanceWorkCursor:   &maintenanceCursor,
+		Events:                            []eventRecord{},
 	}
 	if err := validateCaptureResult(complete); err != nil {
 		t.Fatalf("complete durable facts were rejected: %v", err)
+	}
+
+	for index, name := range []string{"migration journal", "physical schema", "accepted mutation outcomes"} {
+		t.Run(name, func(t *testing.T) {
+			capture := complete
+			flag := []**bool{&capture.MigrationJournalTruncated, &capture.PhysicalSchemaTruncated, &capture.AcceptedMutationOutcomesTruncated}[index]
+			*flag = nil
+			if err := validateCaptureResult(capture); err == nil {
+				t.Fatal("capture without a required truncation flag was accepted")
+			}
+			*flag = &truncatedValue
+			capture.CaptureOverflowed = &truncatedValue
+			if err := validateCaptureResult(capture); err != nil {
+				t.Fatalf("isolated truncation with overflow was rejected: %v", err)
+			}
+			capture.CaptureOverflowed = &overflowed
+			if err := validateCaptureResult(capture); err == nil {
+				t.Fatal("truncation without overflow was accepted")
+			}
+		})
 	}
 
 	incomplete := complete

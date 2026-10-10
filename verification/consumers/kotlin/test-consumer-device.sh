@@ -103,22 +103,78 @@ ready=0
 for _ in $(seq 1 120); do
   # exec-out reports success even when the remote cat fails, so only the
   # captured content proves the phase result exists.
-  adb_command exec-out run-as "$package" cat files/initial-result.json > "$work_dir/initial.json" 2>/dev/null || true
+  if adb_command exec-out run-as "$package" cat files/initial-result.json > "$work_dir/initial.json" 2> "$work_dir/initial-result.stderr"; then
+    initial_result_status=0
+  else
+    initial_result_status=$?
+  fi
   if grep -q '"phase"' "$work_dir/initial.json" 2>/dev/null; then
     ready=1
     break
   fi
   # kill -0 through run-as is permission-denied against a live process on
   # API 34, so liveness is the process id still being listed.
-  current_pid=$(adb_command shell pidof "$package" 2>/dev/null | tr -d '\r' || true)
+  if adb_command shell pidof "$package" > "$work_dir/initial-liveness.stdout" 2> "$work_dir/initial-liveness.stderr"; then
+    current_pid_status=0
+  else
+    current_pid_status=$?
+  fi
+  current_pid=$(tr -d '\r' < "$work_dir/initial-liveness.stdout")
   if [ "$current_pid" != "$initial_pid" ]; then
     break
   fi
   sleep 1
 done
 if [ "$ready" -ne 1 ]; then
-  # The app names its failure in logcat and nothing else records it.
-  adb_command logcat -d -t 120 AndroidRuntime:E "*:S" >&2 || true
+  if adb_command logcat -d -t 120 AndroidRuntime:E "*:S" > "$work_dir/initial-runtime.log" 2> "$work_dir/initial-runtime.stderr"; then
+    runtime_log_status=0
+  else
+    runtime_log_status=$?
+  fi
+  # Transport output and exception messages can contain application data.
+  python3 - "$work_dir" "$environment_dir/initial-readiness-failure.json" \
+    "$initial_pid" "$initial_result_status" "$current_pid_status" "$runtime_log_status" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+work = Path(sys.argv[1])
+def bounded_text(name):
+    path = work / name
+    with path.open("rb") as stream:
+        return stream.read(8192).decode("utf-8", errors="replace")
+
+def pid(value):
+    return int(value) if re.fullmatch(r"[0-9]{1,20}", value) else None
+
+result_text = bounded_text("initial.json")
+try:
+    result = json.loads(result_text)
+except (ValueError, RecursionError):
+    result = None
+runtime_log = bounded_text("initial-runtime.log")
+report = {
+    "expected_pid": pid(sys.argv[3]),
+    "observed_pid": pid(bounded_text("initial-liveness.stdout").replace("\r", "").rstrip("\n")),
+    "initial_result_returncode": int(sys.argv[4]),
+    "liveness_returncode": int(sys.argv[5]),
+    "runtime_log_returncode": int(sys.argv[6]),
+    "initial_result_bytes": len(result_text.encode("utf-8")),
+    "android_runtime_fatal_exception": "FATAL EXCEPTION" in runtime_log,
+    "exception_classes": sorted(set(re.findall(
+        r"\b(?:java|android|kotlin|kotlinx|com\.trainstar\.synchro)\.[A-Za-z0-9_.$]*(?:Exception|Error)(?:\$[A-Za-z_][A-Za-z_0-9]*)?\b",
+        runtime_log,
+    )))[:8],
+}
+if isinstance(result, dict):
+    report["initial_result_phase"] = result.get("phase") if result.get("phase") in ("initial", "resume") else None
+    report["initial_result_status"] = result.get("status") if result.get("status") in ("passed", "failed") else None
+output = Path(sys.argv[2])
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(report, indent=2) + "\n")
+print(json.dumps(report), file=sys.stderr)
+PY
   printf '%s\n' "Packaged Kotlin initial phase did not become ready" >&2
   exit 1
 fi
