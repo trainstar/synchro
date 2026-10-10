@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -52,6 +53,32 @@ func TestNativeLSNComparisonPreservesWordBoundaries(t *testing.T) {
 		if _, valid := compareNativeLSN("1/0", invalid); valid {
 			t.Fatalf("invalid right position %q was accepted", invalid)
 		}
+	}
+}
+
+func TestAwaitApplicationPushRecordsPreservesAlreadyDoneContext(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want error
+	}{
+		{"canceled", context.Canceled},
+		{"expired", context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if test.want == context.Canceled {
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			} else {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			}
+			defer cancel()
+			controller := &NativeController{waitTimeout: time.Second}
+			if err := controller.awaitApplicationPushRecords(ctx, &nativeTransactionBinding{}); !errors.Is(err, test.want) {
+				t.Fatalf("already-done context error=%v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

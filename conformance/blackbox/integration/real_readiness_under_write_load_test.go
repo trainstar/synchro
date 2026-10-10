@@ -42,8 +42,11 @@ func (sample realReadinessSample) withinLimits(limits realReadinessLimits) bool 
 }
 
 type realReadinessWriteLoad struct {
-	commits []time.Duration
-	err     error
+	commits                       []time.Duration
+	err                           error
+	maximumScheduledStartDelay    time.Duration
+	totalSuccessfulExecDuration   time.Duration
+	maximumSuccessfulExecDuration time.Duration
 }
 
 // TestRealReadinessStaysReadyUnderWriteLoad proves that readiness stays ready while a healthy worker captures writes.
@@ -75,6 +78,8 @@ func TestRealReadinessStaysReadyUnderWriteLoad(t *testing.T) {
 	if load.err != nil {
 		t.Fatalf("readiness write load failed after %d commits: %v", len(load.commits), load.err)
 	}
+	t.Logf("readiness write timing completed=%d final_commit_offset=%s max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
+		len(load.commits), load.commits[len(load.commits)-1], load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration)
 	if commits, want := realReadinessLoadCommitsInWindow(load.commits), realReadinessLoadMinimumRate*int(realReadinessLoadDuration/time.Second); commits < want {
 		t.Fatalf("write load committed %d rows in %s, want at least %d", commits, realReadinessLoadDuration, want)
 	}
@@ -157,22 +162,30 @@ func runRealReadinessWriteLoad(ctx context.Context, database *sql.DB, started ti
 	var load realReadinessWriteLoad
 	commitCount := int(realReadinessLoadDuration / realReadinessLoadCommitInterval)
 	for commit := 0; commit < commitCount; commit++ {
+		scheduled := started.Add(time.Duration(commit) * realReadinessLoadCommitInterval)
 		select {
 		case <-ctx.Done():
 			load.err = ctx.Err()
 			return load
-		case <-time.After(time.Until(started.Add(time.Duration(commit) * realReadinessLoadCommitInterval))):
+		case <-time.After(time.Until(scheduled)):
 		}
 		recordID := fmt.Sprintf("00000000-0000-4000-8239-%012d", commit+1)
-		if _, err := database.ExecContext(
+		queryStart := time.Now()
+		_, err := database.ExecContext(
 			ctx,
 			"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'readiness-write-load')",
 			recordID,
-		); err != nil {
+		)
+		queryEnd := time.Now()
+		if err != nil {
 			load.err = fmt.Errorf("insert write-load row %s: %w", recordID, err)
 			return load
 		}
 		load.commits = append(load.commits, time.Since(started))
+		executionDuration := queryEnd.Sub(queryStart)
+		load.maximumScheduledStartDelay = max(load.maximumScheduledStartDelay, queryStart.Sub(scheduled))
+		load.totalSuccessfulExecDuration += executionDuration
+		load.maximumSuccessfulExecDuration = max(load.maximumSuccessfulExecDuration, executionDuration)
 	}
 	return load
 }
