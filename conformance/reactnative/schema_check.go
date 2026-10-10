@@ -2511,7 +2511,7 @@ func (c *SchemaCheckCoordinator) validateProofCapture(call schemaCheckCall, name
 			wantOutcomes = 1
 		}
 		if validateReadyStatus(capture.Status) != nil || state.SealedBatchCount != 0 || state.RejectedMutationCount != 0 || state.MutationOutcomeCount != wantOutcomes || state.MutationLedgerCount != wantOutcomes || len(mutations) != 0 {
-			return errors.New("schema proof did not finish ordinary reconciliation")
+			return fmt.Errorf("schema proof did not finish ordinary reconciliation: ready_valid=%t sealed_batch_count=%d rejected_mutation_count=%d outcome_count=%d expected_outcome_count=%d mutation_ledger_count=%d retained_mutation_count=%d", validateReadyStatus(capture.Status) == nil, state.SealedBatchCount, state.RejectedMutationCount, state.MutationOutcomeCount, wantOutcomes, state.MutationLedgerCount, len(mutations))
 		}
 		wantPushes := 3
 		if prepared {
