@@ -2008,7 +2008,7 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 	for _, field := range payload.Tables[0].Fields {
 		nextFields[field.FieldID] = field
 	}
-	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored string
+	var removedPhysical, addedPhysical, changedPhysical, changedType, removedAuthored, changedAuthored string
 	var added *nativeAuthoredField
 	for authoredField, physicalField := range current.FieldNames {
 		if _, retained := nextFields[authoredField]; !retained {
@@ -2037,8 +2037,12 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 			if changedPhysical != "" {
 				return nativeTableBinding{}, errors.New("native synced-table transition changes more than one field type")
 			}
+			if runtimeField.Type != "string" || field.Type != "int" {
+				return nativeTableBinding{}, errors.New("native synced-table transition type conversion is unsupported")
+			}
 			changedPhysical = runtimeField.Name
 			changedType = field.Type
+			changedAuthored = field.FieldID
 		}
 	}
 	if (removedPhysical == "" && addedPhysical == "" && changedPhysical == "") ||
@@ -2057,7 +2061,9 @@ func (c *NativeController) transitionNativeSyncedTable(ctx context.Context, payl
 		return nativeTableBinding{}, err
 	}
 	c.retireNativeSchemaField(current.AuthoredID, removedAuthored, current.Fields[removedAuthored])
-	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
+	if err := c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields, changedAuthored); err != nil {
+		return nativeTableBinding{}, err
+	}
 	return current, nil
 }
 
@@ -2113,8 +2119,7 @@ func (c *NativeController) transitionNativeSchemaQueue(ctx context.Context, payl
 	// the removed authored field, and the capture validates every named field
 	// against the runtime row, so the removed field must leave the binding.
 	c.retireNativeSchemaField(authoredTable, removedAuthored, current.Fields[removedAuthored])
-	c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields)
-	return nil
+	return c.rebindNativeTableAfterTransition(current.RuntimeID, nextFields, "")
 }
 
 // retireNativeSchemaField keeps the runtime identity of one removed authored
@@ -2135,29 +2140,54 @@ func (c *NativeController) retireNativeSchemaField(authoredTable, authoredField,
 	c.installation.retiredFields[authoredTable+"\x00"+authoredField] = runtimeField
 }
 
-// rebindNativeTableAfterTransition drops each authored field the transition
-// removed from the table binding and from every record image that names it.
-func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField) {
+// rebindNativeTableAfterTransition stages current images after the server
+// transition without changing the historical images that share their fields.
+func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID string, retained map[string]nativeAuthoredField, changedAuthored string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.installation == nil {
-		return
+		return errors.New("native controller contract is not installed")
+	}
+	if changedAuthored != "" && retained[changedAuthored].Type != "int" {
+		return errors.New("native current-image type conversion is unsupported")
 	}
 	// The table field map is a naming dictionary. A mutation queued under the
 	// earlier schema still names the retired field, so the dictionary keeps it.
 	// Only the row image drops it, because the capture validates every image
 	// field against the runtime row.
+	staged := make(map[*nativeRecordBinding]nativeAuthoredImage, len(c.records))
 	for _, record := range c.records {
 		if record == nil || record.Table.RuntimeID != runtimeTableID {
 			continue
 		}
-		for authoredField := range record.Image.Fields {
+		image := record.Image
+		image.Fields = make(map[string]json.RawMessage, len(record.Image.Fields))
+		for authoredField, value := range record.Image.Fields {
 			if _, keep := retained[authoredField]; keep {
-				continue
+				image.Fields[authoredField] = value
 			}
-			delete(record.Image.Fields, authoredField)
 		}
+		if changedAuthored != "" {
+			var text string
+			if err := json.Unmarshal(image.Fields[changedAuthored], &text); err != nil {
+				return errors.New("native current-image conversion requires a JSON string")
+			}
+			value, err := strconv.ParseInt(text, 10, 32)
+			if err != nil {
+				return errors.New("native current-image conversion requires a 32-bit decimal integer")
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return errors.New("encode native current-image integer failed")
+			}
+			image.Fields[changedAuthored] = encoded
+		}
+		staged[record] = image
 	}
+	for record, image := range staged {
+		record.Image = image
+	}
+	return nil
 }
 
 // RuntimeFieldID returns the runtime field identifier bound to one authored

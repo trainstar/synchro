@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -659,6 +660,77 @@ func TestValidateNativeRuntimeRowMapsSchemaQueueAuthoredMutation(t *testing.T) {
 	authoredRuntimeJSON := []byte(`{"authored_mutation":"pending"}`)
 	if err := validateNativeRuntimeRow(&record, authoredRuntimeJSON); err == nil {
 		t.Fatal("native runtime row accepted an unencoded authored schema-queue value")
+	}
+}
+
+func TestNativeControllerRebindsCurrentImagesWithoutChangingHistory(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		input   json.RawMessage
+		want    json.RawMessage
+		remove  bool
+		wantErr bool
+	}{
+		{name: "string to int", input: []byte(`"42"`), want: []byte(`42`)},
+		{name: "negative", input: []byte(`"-42"`), want: []byte(`-42`)},
+		{name: "zero", input: []byte(`"0"`), want: []byte(`0`)},
+		{name: "minimum integer", input: []byte(`"-2147483648"`), want: []byte(`-2147483648`)},
+		{name: "maximum integer", input: []byte(`"2147483647"`), want: []byte(`2147483647`)},
+		{name: "removal only", input: []byte(`"retained"`), want: []byte(`"retained"`), remove: true},
+		{name: "malformed JSON", input: []byte(`"42`), wantErr: true},
+		{name: "non-string JSON", input: []byte(`42`), wantErr: true},
+		{name: "null", input: []byte(`null`), wantErr: true},
+		{name: "malformed decimal", input: []byte(`"not-an-integer"`), wantErr: true},
+		{name: "fraction", input: []byte(`"1.5"`), wantErr: true},
+		{name: "below minimum", input: []byte(`"-2147483649"`), wantErr: true},
+		{name: "above maximum", input: []byte(`"2147483648"`), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			firstFields := map[string]json.RawMessage{"value": test.input, "retired": []byte(`"old-first"`)}
+			secondFields := map[string]json.RawMessage{"value": []byte(`"7"`), "retired": []byte(`"old-second"`)}
+			wantFirstHistory := map[string]json.RawMessage{"value": test.input, "retired": []byte(`"old-first"`)}
+			wantSecondHistory := map[string]json.RawMessage{"value": []byte(`"7"`), "retired": []byte(`"old-second"`)}
+			before := &nativeAuthoredImage{Fields: firstFields, Version: "first-version", Checksum: "first-checksum"}
+			after := &nativeAuthoredImage{Fields: secondFields, Version: "second-version", Checksum: "second-checksum"}
+			first := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "affected"}, Image: *before}
+			second := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "affected"}, Image: *after}
+			unaffected := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "other"}, Image: *before}
+			transaction := &nativeTransactionBinding{Events: []nativeEventBinding{{Before: before, After: after}}}
+			controller := &NativeController{
+				installation: &nativeInstallationBinding{},
+				records:      map[string]*nativeRecordBinding{"first": first, "second": second, "unaffected": unaffected},
+				transactions: map[string]*nativeTransactionBinding{"historical": transaction},
+			}
+			changed, targetType := "value", "int"
+			if test.remove {
+				changed, targetType = "", "string"
+			}
+			err := controller.rebindNativeTableAfterTransition("affected", map[string]nativeAuthoredField{
+				"value": {FieldID: "value", Type: targetType},
+			}, changed)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("rebind error=%v, want error=%t", err, test.wantErr)
+			}
+			if test.wantErr {
+				if !reflect.DeepEqual(first.Image.Fields, wantFirstHistory) || !reflect.DeepEqual(second.Image.Fields, wantSecondHistory) {
+					t.Fatal("failed conversion partially published a current image")
+				}
+			} else {
+				secondValue := json.RawMessage(`7`)
+				if test.remove {
+					secondValue = json.RawMessage(`"7"`)
+				}
+				if !reflect.DeepEqual(first.Image.Fields, map[string]json.RawMessage{"value": test.want}) || !reflect.DeepEqual(second.Image.Fields, map[string]json.RawMessage{"value": secondValue}) {
+					t.Fatal("current images did not apply the authored conversion and field removal")
+				}
+			}
+			if !reflect.DeepEqual(transaction.Events[0].Before.Fields, wantFirstHistory) || !reflect.DeepEqual(transaction.Events[0].After.Fields, wantSecondHistory) || !reflect.DeepEqual(unaffected.Image.Fields, wantFirstHistory) {
+				t.Fatal("current-image rebinding changed a historical or unaffected field map")
+			}
+			if first.Image.Version != "first-version" || first.Image.Checksum != "first-checksum" || second.Image.Version != "second-version" || second.Image.Checksum != "second-checksum" || before.Version != "first-version" || before.Checksum != "first-checksum" || after.Version != "second-version" || after.Checksum != "second-checksum" {
+				t.Fatal("current-image rebinding changed version or checksum evidence")
+			}
+		})
 	}
 }
 
