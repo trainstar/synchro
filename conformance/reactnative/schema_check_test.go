@@ -1071,7 +1071,7 @@ func TestSchemaProofSingletonPushAndFinalOutcomeBoundaries(t *testing.T) {
 					{TableName: "cf_items", Name: "updated_at", Type: "TEXT", NotNull: true},
 					{TableName: "cf_items", Name: "deleted_at", Type: "TEXT"},
 				}
-				state := inspectedClientState{Schema: &s2, ScopeStates: []clientScopeState{{ScopeID: "scope", Cursor: &cursor}}, ScopeStateCount: 1, ProvenanceMaintenanceWorkCursor: "0", MutationLedgerCount: uint64(len(outcomes)), MutationOutcomeCount: uint64(len(outcomes)), AcceptedMutationOutcomes: outcomes, AcceptedMutationOutcomesTruncated: &notTruncated, MigrationJournal: []byte("null"), MigrationJournalTruncated: &notTruncated, PhysicalSchema: encode(columns), PhysicalSchemaTruncated: &notTruncated, CaptureOverflowed: &notTruncated}
+				state := inspectedClientState{Schema: &s2, ScopeStates: []clientScopeState{{ScopeID: "scope", Cursor: &cursor}}, ScopeStateCount: 1, ProvenanceMaintenanceWorkCursor: "0", MutationLedgerCount: uint64(len(outcomes)), MutationOutcomeCount: uint64(len(outcomes)), SealedBatchCount: uint64(len(pushes)), AcceptedMutationOutcomes: outcomes, AcceptedMutationOutcomesTruncated: &notTruncated, MigrationJournal: []byte("null"), MigrationJournalTruncated: &notTruncated, PhysicalSchema: encode(columns), PhysicalSchemaTruncated: &notTruncated, CaptureOverflowed: &notTruncated}
 				captures[lane+"-RECOVERED-001"] = finalCapture{ClientState: encode(state)}
 				trace := traceSnapshot{Observations: []transportObservation{
 					{Sequence: 1, OperationClass: "connect", StatusCode: http.StatusOK, DurationNanoseconds: 1, CursorFingerprints: []string{hashFingerprint(cursor)}, CursorFingerprintsComplete: &complete,
