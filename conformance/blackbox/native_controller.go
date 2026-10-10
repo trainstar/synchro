@@ -3246,14 +3246,22 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		return err
 	}
 	defer database.Close()
-	if err := c.resolveApplicationPushIdentities(ctx, database, transaction); err != nil {
+	candidate := *transaction
+	candidate.Events = append([]nativeEventBinding(nil), transaction.Events...)
+	for index := range candidate.Events {
+		if candidate.Events[index].After != nil {
+			image := *candidate.Events[index].After
+			candidate.Events[index].After = &image
+		}
+	}
+	if err := c.resolveApplicationPushIdentities(ctx, database, &candidate); err != nil {
 		return err
 	}
-	for index := range transaction.Events {
-		if !transaction.RuntimeAcceptedEvents[index] {
+	for index := range candidate.Events {
+		if !candidate.RuntimeAcceptedEvents[index] {
 			continue
 		}
-		event := &transaction.Events[index]
+		event := &candidate.Events[index]
 		var rowData []byte
 		var version, checksum string
 		var deleted bool
@@ -3284,6 +3292,10 @@ func (c *NativeController) resolveApplicationPushRecords(ctx context.Context, tr
 		event.After.Version = version
 		event.After.Checksum = checksum
 	}
+	transaction.RuntimeBatchID = candidate.RuntimeBatchID
+	transaction.RuntimeMutationIDs = candidate.RuntimeMutationIDs
+	transaction.RuntimeAcceptedEvents = candidate.RuntimeAcceptedEvents
+	transaction.Events = candidate.Events
 	c.bindApplicationPushRecords(transaction)
 	return nil
 }
@@ -3319,8 +3331,9 @@ func (c *NativeController) resolveApplicationPushIdentities(ctx context.Context,
 	// callers hold c.mu, so this reads the bindings as the record update below
 	// does.
 	boundBatches := make(map[string]struct{}, len(c.transactions))
-	for _, other := range c.transactions {
-		if other != transaction && other.RuntimeBatchID != "" {
+	transactionKey := nativeTransactionKey(transaction.AuthoredStream, transaction.AuthoredCommitLSN)
+	for key, other := range c.transactions {
+		if key != transactionKey && other.RuntimeBatchID != "" {
 			boundBatches[other.RuntimeBatchID] = struct{}{}
 		}
 	}

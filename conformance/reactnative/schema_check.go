@@ -1933,6 +1933,11 @@ func (c *SchemaCheckCoordinator) advanceProofLocked(ctx context.Context, sequenc
 			if err := c.config.Controller.BindApplicationPush(operation); err != nil {
 				return exchangeResponse{}, err
 			}
+			if suffix == "COMMITTED-M2-REPLY-001" {
+				if _, err := c.captureProofServer(ctx, call); err != nil {
+					return exchangeResponse{}, err
+				}
+			}
 		}
 		if suffix == "COMMITTED-M1-SEND-001" {
 			c.proofPaused[call.clientKey] = "server_response_loss"
