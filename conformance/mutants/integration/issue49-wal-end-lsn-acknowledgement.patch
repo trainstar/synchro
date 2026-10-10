@@ -25,15 +25,15 @@ diff --git a/extensions/synchro-pg/src/bgworker.rs b/extensions/synchro-pg/src/b
                  }
                  blocked = true;
              }
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
 @@ -2452,7 +2452,7 @@
  /* </end connected objects> */
  
  /* <begin connected objects> */
---- synchro-pg/src/bgworker.rs:858
-+-- synchro-pg/src/bgworker.rs:875
+--- synchro-pg/src/bgworker.rs:859
++-- synchro-pg/src/bgworker.rs:876
  -- synchro_pg::bgworker::synchro_retry_wal_poison
  CREATE  FUNCTION "synchro_retry_wal_poison"() RETURNS bool /* bool */
  STRICT

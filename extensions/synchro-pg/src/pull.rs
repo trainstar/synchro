@@ -736,6 +736,7 @@ pub(crate) fn typed_primary_key_bytes(
     .map_err(|error| format!("encoding row identity: {error}"))
 }
 
+#[cfg(any(test, feature = "pg_test"))]
 pub(crate) fn synced_row_digest(
     client: &SpiClient<'_>,
     table_reg: &TableRegistration,

@@ -149,6 +149,7 @@
 	rn-watchman-reset \
 	rn-ios-pods \
 	android-emulator-prepare \
+	test-android-emulator-prepare \
 	test-rn-e2e-ios-build \
 	test-rn-e2e-ios-run \
 	test-rn-e2e-ios \
@@ -196,6 +197,13 @@ ANDROID_JAVA_HOME ?= $(shell \
 		fi; \
 	fi)
 KOTLIN_ANDROID_SERIAL ?= $(ANDROID_SERIAL)
+ifneq "$(ANDROID_SERIAL)" ""
+ifneq "$(KOTLIN_ANDROID_SERIAL)" ""
+ifneq "$(ANDROID_SERIAL)" "$(KOTLIN_ANDROID_SERIAL)"
+$(error Original ANDROID_SERIAL and KOTLIN_ANDROID_SERIAL values disagree)
+endif
+endif
+endif
 # adb and Detox select the device through ANDROID_SERIAL. Export the one
 # resolved serial, so a Detox run uses only that booted device.
 ifneq ($(KOTLIN_ANDROID_SERIAL),)
@@ -204,6 +212,7 @@ export ANDROID_SERIAL
 endif
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
+RN_POD_UPDATE ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
 # uses every online device, so a device gate requires exactly one serial.
 REQUIRE_ONE_ANDROID_SERIAL = case "$(KOTLIN_ANDROID_SERIAL)" in ''|*[[:space:],]*) echo "Set KOTLIN_ANDROID_SERIAL to exactly one booted Android device." >&2; exit 1 ;; esac
@@ -295,9 +304,9 @@ BLACKBOX_TEST_COUNT ?= $(DECLARED_BLACKBOX_TEST_COUNT)
 SWIFT_TEST_ARGS ?= $(DECLARED_SWIFT_TEST_ARGS)
 DETOX_ARGS ?= $(DECLARED_DETOX_ARGS)
 # A timeout bounds a run but cannot omit a test, so it is not a selector.
-# Each integration test has its own deadline. This package limit only stops a hang,
-# so it is about twice the measured CI runtime of the package.
-BLACKBOX_TIMEOUT ?= 40m
+# Each integration test retains its own deadline.
+# This outer package timeout bounds the complete run.
+BLACKBOX_TIMEOUT ?= 120m
 SWIFT_SCENARIOS_TIMEOUT ?= 30m
 changed_selectors = $(strip $(foreach name,$(1),$(if $(subst x$(DECLARED_$(name)),,x$($(name)))$(subst x$($(name)),,x$(DECLARED_$(name))),$(name))))
 declared_selection = @case "$(PARTIAL)" in \
@@ -309,6 +318,7 @@ CLIENT_ARTIFACT_DIR ?= $(CURDIR)/dist/local-consumer
 LOCAL_CONSUMER_DIR ?= $(CLIENT_ARTIFACT_DIR)
 CURRENT_VERSION := $(shell cat VERSION 2>/dev/null)
 SWIFTPM_GIT_ENV := GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all
+SWIFT_BUILD_ARGS ?=
 PACKAGED_SMOKE_EVIDENCE ?= $(CURDIR)/dist/verification/packaged-smoke-summary.json
 PACKAGED_SMOKE_CELL_DIR ?= $(CURDIR)/dist/verification/packaged-smoke-cells
 PACKAGED_SMOKE_TMP_ROOT ?= $(CURDIR)/.ignore/r2/tmp
@@ -401,7 +411,7 @@ help:
 	@echo "  lint-rust             - Run all Rust fmt and clippy checks"
 	@echo "  test                  - Run the default local validation set"
 	@echo "  ci-source-quality     - Run the tests of the CI source-quality job"
-	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (ADAPTER_TEST_URL, SOAK_ARTIFACT_DIR)"
+	@echo "  ci-candidate-server   - Run the tests of the CI candidate-server job (SOAK_ARTIFACT_DIR)"
 	@echo "  ci-candidate-swift    - Run the tests of the CI candidate-swift job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
 	@echo "  ci-candidate-kotlin   - Run the tests of the CI candidate-kotlin job on KOTLIN_ANDROID_SERIAL (ADAPTER_TEST_URL)"
 	@echo "  ci-candidate-rn-ios   - Run the tests of the CI candidate-rn-ios job (ADAPTER_TEST_URL, WARM_CONNECT_ENV_FILE)"
@@ -466,6 +476,7 @@ help:
 	@echo "  test-rn-e2e-android   - Run React Native Detox tests on Android ($(RN_ANDROID_DETOX_CONFIG))"
 	@echo "  test-rn               - Run React Native Detox tests on both platforms"
 	@echo "  android-emulator-prepare - Keep the booted Android test device awake and focused"
+	@echo "  test-android-emulator-prepare - Test Android preparation without a device"
 	@echo "  synchrod-pg-test-start   - Start the extension-backed test adapter for ADAPTER_TEST_URL"
 	@echo "  synchrod-pg-test-stop    - Stop the extension-backed test adapter"
 	@echo "  synchrod-pg-test-restart - Restart the extension-backed test adapter"
@@ -1019,6 +1030,7 @@ release-run-support-cell:
 			hashes="$$(python3 scripts/release-artifacts.py print-payload-hashes --release-dir "$$release" --version "$(VERSION)" \
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--role pg-extension --role adapter --role seed-tool)"; \
+			PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
 			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--source-commit "$$(git rev-parse --verify HEAD)" -- \
@@ -1030,7 +1042,7 @@ release-run-support-cell:
 					"$$release/artifacts/synchro-seed-linux-x64-$(VERSION)" \
 					"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" "$(SUPPORT_CELL_ID)" \
 					"$(RELEASE_EVIDENCE_DIR)/cells/$(SUPPORT_CELL_ID).json" "$$hashes" ;; \
-		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+		SUP-IOS-MIN-001|SUP-IOS-CURRENT-001|SUP-ANDROID-MIN-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-MIN-001|SUP-RN-ANDROID-MIN-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
 			$(MAKE) --no-print-directory release-consumer-artifacts VERSION="$(VERSION)" RELEASE_DIR="$$release" \
 				RELEASE_CONSUMER_DIR="$(abspath $(RELEASE_CONSUMER_DIR))"; \
 			case "$(SUPPORT_CELL_ID)" in \
@@ -1044,6 +1056,7 @@ release-run-support-cell:
 				SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" \
 				CLIENT_ARTIFACT_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" CLIENT_ARTIFACTS_PREPARED=1 \
 				PACKAGED_SMOKE_CELL_DIR="$(abspath $(RELEASE_EVIDENCE_DIR))/cells" \
+				PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
 				PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$$artifacts" PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
 				SYNCHRO_CONSUMER_RESOLUTION=prepublication \
 				SYNCHRO_PREPUBLICATION_GIT_URL="file://$(abspath $(RELEASE_CONSUMER_DIR))/source.git" ;; \
@@ -1056,10 +1069,13 @@ test-python-runner:
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_run_python_tests
 
 test-release-artifacts: test-python-runner
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts verification.test_support_environments verification.test_probe_support_environment
 
 test-release-publish: test-python-runner
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish
+
+test-android-emulator-prepare: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_android_emulator_prepare scripts.ci.test_run_android_emulator
 
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
@@ -1067,6 +1083,7 @@ test-server-consumer-helper:
 # The same server lifecycle as release-run-support-cell SUP-PG-LINUX-X64-001, with
 # locally built adapter, seed, and provisioner and the conformance extension artifact.
 test-consumer-server: build-local-postgres
+	@test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }
 	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
 	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in PGRX_PG_BIN_DIR" >&2; exit 1; }
 	@set -eu; \
@@ -1078,6 +1095,7 @@ test-consumer-server: build-local-postgres
 		result="$(PACKAGED_SMOKE_CELL_DIR)/SUP-PG-LINUX-X64-001.json"; \
 		python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" --cell SUP-PG-LINUX-X64-001 --output "$$result"; \
 		hashes="$$(shasum -a 256 "$$work/extension.tar.gz" "$$work/synchrod-pg" "$$work/synchro-seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$work/extension.tar.gz" \
 			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$work/synchrod-pg" "$$work/synchro-seed" \
 			"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" SUP-PG-LINUX-X64-001 "$$result" "$$hashes"
@@ -1114,6 +1132,7 @@ ci-source-quality:
 	$(MAKE) test-local-postgres
 	$(MAKE) test-release-artifacts
 	$(MAKE) test-release-publish
+	$(MAKE) test-android-emulator-prepare
 	$(MAKE) test-server-consumer-helper
 	$(MAKE) test-packaged-smoke-structure
 	$(MAKE) test-ci-process-lifecycle
@@ -1134,7 +1153,29 @@ ci-candidate-server: export SYNCHRO_CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACT
 ci-candidate-server:
 	$(MAKE) test-rust-pg
 	$(MAKE) test-rust-mutants
-	$(MAKE) test-adapter
+	@set -eu; \
+		mkdir -p "$(CURDIR)/.ignore/r2/tmp"; \
+		state="$$(mktemp -d "$(CURDIR)/.ignore/r2/tmp/candidate-server-adapter.XXXXXX")"; \
+		set -- LOCAL_POSTGRES_STATE_DIR="$$state" \
+			LOCAL_POSTGRES_PID_FILE="$$state/postgres.pid" \
+			LOCAL_POSTGRES_LOG_FILE="$$state/postgres.log" \
+			LOCAL_POSTGRES_URL_FILE="$$state/postgres.url" \
+			LOCAL_POSTGRES_ATTACH_ENV_FILE="$$state/attach.env"; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT HUP INT TERM; \
+			$(MAKE) --no-print-directory local-postgres-stop "$$@" || { stop_status=$$?; test "$$status" -ne 0 || status=$$stop_status; }; \
+			if [ "$$status" -eq 0 ]; then rm -rf "$$state"; \
+			else echo "API fixture logs retained at $$state" >&2; fi; \
+			exit "$$status"; \
+		}; \
+		trap 'cleanup "$$@"' EXIT; \
+		trap 'exit 129' HUP; \
+		trap 'exit 130' INT; \
+		trap 'exit 143' TERM; \
+		$(MAKE) --no-print-directory local-postgres-start "$$@"; \
+		adapter_url="$$(cat "$$state/postgres.url")"; \
+		$(MAKE) --no-print-directory test-adapter ADAPTER_TEST_URL="$$adapter_url"
 	rm -rf "$(CONFORMANCE_UPDATE_BASELINE_EXTENSION_ARTIFACT)" "$(CONFORMANCE_UPDATE_ORIGIN_EXTENSION_ARTIFACTS)"
 	$(MAKE) conformance-update-baseline-extension-artifact
 	$(MAKE) test-blackbox
@@ -1158,19 +1199,21 @@ ci-candidate-rn-ios:
 	$(MAKE) test-rn-e2e-ios-build
 	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
-	$(MAKE) test-consumer-rn-ios
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.83.10
+	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-ios
 	$(MAKE) test-rn-scenarios-ios
 
 ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
-	$(MAKE) test-consumer-rn-android
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.83.10
+	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.82.1
 	$(MAKE) test-rn-upgrade-android
 	$(MAKE) test-rn-scenarios-android
 
 build-swift-native-runner:
-	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build --product synchro-native-runner
+	cd clients/swift && $(SWIFTPM_GIT_ENV) swift build $(SWIFT_BUILD_ARGS) --product synchro-native-runner
 
 build-kotlin-library:
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
@@ -1901,7 +1944,7 @@ rn-watchman-reset:
 	fi
 
 rn-ios-pods:
-	cd clients/react-native/example/ios && pod install
+	cd clients/react-native/example/ios && pod $(if $(RN_POD_UPDATE),update $(RN_POD_UPDATE) --no-repo-update,install)
 
 .PHONY: rn-ios-build rn-ios-bundle
 # Callers such as test-rn-e2e-ios-build select the seed, so create the pinned seed only when none exists.
@@ -1962,28 +2005,31 @@ android-emulator-prepare:
 	@test -x "$(ANDROID_HOME)/platform-tools/adb" || (echo "adb not found at $(ANDROID_HOME)/platform-tools/adb"; exit 1)
 	@set -eu; \
 		adb="$(ANDROID_HOME)/platform-tools/adb"; \
-		serial="$${ANDROID_SERIAL:-$(KOTLIN_ANDROID_SERIAL)}"; \
-		set -- "$$adb"; \
-		if [ -n "$$serial" ]; then set -- "$$@" -s "$$serial"; fi; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		set -- "$$adb" -L tcp:127.0.0.1:5037 -s "$$serial"; \
 		"$$@" wait-for-device; \
+		"$$@" shell 'for required_command in svc settings input wm am cmd dumpsys; do command -v "$$required_command" >/dev/null 2>&1 || { echo "Required Android command missing: $$required_command" >&2; exit 1; }; done'; \
 		"$$@" shell svc power stayon true; \
 		"$$@" shell settings put system screen_off_timeout 2147483647; \
 		"$$@" shell settings put global hide_error_dialogs 1; \
-		"$$@" shell locksettings set-disabled true >/dev/null; \
 		"$$@" shell input keyevent 224; \
 		"$$@" shell wm dismiss-keyguard; \
 		"$$@" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null; \
 		"$$@" shell input keyevent 3; \
-		home_component="$$("$$@" shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tr -d '\r' | tail -n 1)"; \
-		home_package="$${home_component%%/*}"; \
-		test -n "$$home_package"; \
+		home_resolution="$$("$$@" shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME)"; \
+		home_component="$$(printf '%s\n' "$$home_resolution" | tr -d '\r' | tail -n 1)"; \
+		case "$$home_component" in */*) home_package="$${home_component%%/*}"; home_component="$${home_component#*/}" ;; *) home_package="" ;; esac; \
+		if [ -z "$$home_package" ] || [ -z "$$home_component" ] || [ "$$home_component" != "$${home_component#*/}" ]; then \
+			echo "Android Home resolution must return package/component. Check the device Home activity." >&2; exit 1; \
+		fi; \
 		for _ in $$(seq 1 30); do \
-			if "$$@" shell dumpsys window | grep -F 'mCurrentFocus=' | grep -F "$$home_package" >/dev/null; then exit 0; fi; \
+			window_output="$$("$$@" shell dumpsys window)"; \
+			if printf '%s\n' "$$window_output" | grep -F 'mCurrentFocus=' | grep -F "$$home_package" >/dev/null; then exit 0; fi; \
 			sleep 1; \
 		done; \
 		echo "Android Home did not receive window focus" >&2; \
 		"$$@" shell dumpsys power | grep -E 'mWakefulness=|mStayOn=' >&2 || true; \
-		"$$@" shell dumpsys window | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; \
+		if window_output="$$("$$@" shell dumpsys window)"; then printf '%s\n' "$$window_output" | grep -E 'mCurrentFocus=|mFocusedApp=' >&2 || true; fi; \
 		exit 1
 
 .PHONY: test-rn-e2e-android-smoke
@@ -2162,6 +2208,7 @@ test-consumer-swift: client-consumer-apple-artifact
 
 test-consumer-swift-ios: client-consumer-apple-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -2209,9 +2256,15 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 			:app:connectedDebugAndroidTest
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../verification/consumers/kotlin/app/build/outputs/androidTest-results/connected
 
-test-consumer-kotlin-device-smoke: test-consumer-kotlin
-	PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
-		ANDROID_HOME="$(ANDROID_HOME)" KOTLIN_ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
+test-consumer-kotlin-device-smoke:
+	@set -eu; \
+		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) test-consumer-kotlin ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		ANDROID_HOME="$(ANDROID_HOME)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
 			"$(PACKAGED_SMOKE_CELL_ID)" "$(PACKAGED_SMOKE_CELL_RESULT)" "$(CURRENT_VERSION)"
@@ -2228,13 +2281,22 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
 		sh verification/consumers/react-native/test-consumer.sh ios "$(abspath $(CLIENT_ARTIFACT_DIR))" "$(CURRENT_VERSION)"
 
-test-consumer-rn-android-smoke: android-emulator-prepare client-consumer-kotlin-artifact client-consumer-rn-artifact
-	ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+test-consumer-rn-android-smoke:
+	@set -eu; \
+		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) android-emulator-prepare ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) client-consumer-kotlin-artifact ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		$(MAKE) client-consumer-rn-artifact ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
+		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
@@ -2256,20 +2318,24 @@ test-client-platforms:
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
 		case "$(SUPPORT_CELL_ID)" in \
 		SUP-IOS-MIN-001) \
-			test "$(SUPPORT_PLATFORM_VERSION)" = "16" || { echo "SUPPORT_PLATFORM_VERSION must be 16" >&2; exit 1; }; \
+			test "$(SUPPORT_PLATFORM_VERSION)" = "17" || { echo "SUPPORT_PLATFORM_VERSION must be 17" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-IOS-CURRENT-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			PACKAGED_SMOKE_CELL_ID="$$PACKAGED_SMOKE_CELL_ID" PACKAGED_SMOKE_CELL_RESULT="$$PACKAGED_SMOKE_CELL_RESULT" $(MAKE) test-consumer-swift-ios ;; \
 		SUP-ANDROID-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "24" || { echo "SUPPORT_PLATFORM_VERSION must be 24" >&2; exit 1; }; \
-			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
-			$(MAKE) test-consumer-kotlin-device-smoke ;; \
-		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "24" || { echo "Android API 24 is required" >&2; exit 1; }; \
+			$(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial" ;; \
+		SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001|SUP-RN-ANDROID-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
-			test "$$($(ANDROID_HOME)/platform-tools/adb shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
-			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke; else $(MAKE) test-consumer-rn-android-smoke; fi ;; \
-		SUP-RN-IOS-CURRENT-001) \
+			serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
+			export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
+			test "$$("$(ANDROID_HOME)/platform-tools/adb" -L tcp:127.0.0.1:5037 -s "$$serial" shell getprop ro.build.version.sdk | tr -d '\r')" = "$(SUPPORT_PLATFORM_VERSION)" || { echo "Android runtime does not match SUPPORT_PLATFORM_VERSION" >&2; exit 1; }; \
+			if [ "$(SUPPORT_CELL_ID)" = "SUP-ANDROID-CURRENT-001" ]; then $(MAKE) test-consumer-kotlin-device-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; else $(MAKE) test-consumer-rn-android-smoke ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; fi ;; \
+		SUP-RN-IOS-CURRENT-001|SUP-RN-IOS-MIN-001) \
 			test -n "$(SUPPORT_PLATFORM_VERSION)" || { echo "SUPPORT_PLATFORM_VERSION is required" >&2; exit 1; }; \
 			$(MAKE) test-consumer-rn-ios-smoke ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
@@ -2471,23 +2537,26 @@ local-postgres-start: build-local-postgres
 		rm -f "$(LOCAL_POSTGRES_PID_FILE)"; \
 		exit 1
 
-# Each provisioner cleanup stage has its own deadline, so the stop waits for
-# exit. A forced kill would skip cluster removal and extension restoration.
-# The start time distinguishes the provisioner from a process that reuses its PID.
+# The owned lifecycle command verifies destruction after cluster removal and
+# extension restoration. Retain metadata and logs if cleanup cannot be verified.
 local-postgres-stop:
 	@set -eu; \
-		if [ -f "$(LOCAL_POSTGRES_PID_FILE)" ]; then \
-			pid="$$(cat "$(LOCAL_POSTGRES_PID_FILE)")"; \
-			if kill -0 "$$pid" 2>/dev/null; then \
-				started="$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)"; \
-				kill "$$pid"; \
-				while [ -n "$$started" ] && [ "$$(ps -o lstart= -p "$$pid" 2>/dev/null || true)" = "$$started" ]; do sleep 1; done; \
-				 echo "local PostgreSQL provisioner stopped"; \
-			else \
-				echo "local PostgreSQL provisioner is not running"; \
-			fi; \
+		state="$(LOCAL_POSTGRES_STATE_DIR)/lifecycle-state.json"; \
+		if [ -e "$$state" ] || [ -L "$$state" ]; then \
+			run_id="$$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["run_id"])' "$$state")" || { \
+				status=$$?; echo "local PostgreSQL lifecycle state read failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
+			"$(LOCAL_POSTGRES_BINARY)" lifecycle --state-dir "$(LOCAL_POSTGRES_STATE_DIR)" destroy "$$run_id" >/dev/null || { \
+				status=$$?; echo "local PostgreSQL destruction failed. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit "$$status"; \
+			}; \
 			rm -f "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; \
+			echo "local PostgreSQL provisioner stopped"; \
 		else \
+			for metadata in "$(LOCAL_POSTGRES_PID_FILE)" "$(LOCAL_POSTGRES_URL_FILE)" "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)"; do \
+				if [ -e "$$metadata" ] || [ -L "$$metadata" ]; then \
+					echo "local PostgreSQL lifecycle state is missing. Cannot verify cleanup. Logs remain at $(LOCAL_POSTGRES_LOG_FILE)" >&2; exit 1; \
+				fi; \
+			done; \
 			echo "local PostgreSQL provisioner is not running"; \
 		fi
 

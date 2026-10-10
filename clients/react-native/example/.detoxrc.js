@@ -46,9 +46,9 @@ module.exports = {
   devices: {
     simulator: {
       type: 'ios.simulator',
-      device: {
-        type: 'iPhone SE (3rd generation)',
-      },
+      device: process.env.IOS_SIMULATOR_UDID
+        ? { id: process.env.IOS_SIMULATOR_UDID }
+        : { type: 'iPhone SE (3rd generation)' },
     },
     // A run uses only the booted device that ANDROID_SERIAL names. Two gates on
     // one host can then never share, boot, or stop each other's emulator.

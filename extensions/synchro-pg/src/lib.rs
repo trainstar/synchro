@@ -716,7 +716,7 @@ CREATE TABLE IF NOT EXISTS sync_assignment_function (
     function_oid OID NOT NULL,
     function_schema TEXT NOT NULL,
     function_name TEXT NOT NULL,
-    max_scopes INTEGER NOT NULL CHECK (max_scopes BETWEEN 1 AND 1000),
+    max_scopes INTEGER CHECK (max_scopes BETWEEN 1 AND 1000),
     definition_sha256 TEXT NOT NULL CHECK (definition_sha256 ~ '^[0-9a-f]{64}$'),
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

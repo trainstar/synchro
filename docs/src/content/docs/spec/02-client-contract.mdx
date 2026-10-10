@@ -237,8 +237,8 @@ has no resurrection.
 
 When a predecessor is already sealed or transmitted, a later update or delete
 without a usable server version remains a durable dependent intent and is not
-sent. If the predecessor is accepted, the client creates a new normal mutation
-using the returned opaque version. If the predecessor conflicts, is rejected,
+sent. If the predecessor is accepted, the client makes the unsealed dependent intent
+sendable with the returned opaque version. If the predecessor conflicts, is rejected,
 or exceeds a push limit, the dependent intent becomes inspectable
 `blocked_by_predecessor`. These local
 states are never encoded as push operations and never fabricate a base version.

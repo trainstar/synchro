@@ -24,7 +24,7 @@ It connects a client, changes a note offline, and verifies the change on the ser
 - [Install and initialize a client](https://trainstar.github.io/synchro/clients/consumption/)
 - [Configure authentication](https://trainstar.github.io/synchro/architecture/auth-integration/)
 
-These guides describe the Synchro `0.4.0-rc.1` source and package interfaces.
+These guides describe the Synchro `0.4.0-rc.2` source and package interfaces.
 Before that version is published, use the documented local-consumer installation.
 Do not substitute an older published package into the current tutorial.
 
@@ -33,9 +33,9 @@ Do not substitute an older published package into the current tutorial.
 | Component | Supported environment |
 | --- | --- |
 | PostgreSQL extension and Go tools | PostgreSQL 18, Ubuntu 24.04, Linux x64 |
-| Swift client | iOS 16 and current stable iOS, Swift 6 toolchain |
+| Swift client | iOS 17 and current stable iOS, Swift 6 toolchain |
 | Kotlin client | Android API 24 and current stable Android |
-| React Native bridge | React Native 0.83.x, current stable iOS and Android |
+| React Native bridge | React Native 0.82.1 through 0.83.x, current stable iOS and Android |
 
 macOS hosts Apple development and validation. It is not a supported PostgreSQL deployment target.
 See the [support policy](https://trainstar.github.io/synchro/reference/support-policy/) for dependency constraints and support boundaries.

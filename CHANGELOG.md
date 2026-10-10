@@ -9,6 +9,27 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+## [0.4.0-rc.2] - 2026-10-09
+
+This release candidate is for consumer validation of `0.4.0`.
+Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
+
+### Added
+
+- Operators can register an assignment function with a SQL NULL bound to return all distinct assigned scopes. ([#300](https://github.com/trainstar/synchro/issues/300))
+
+### Changed
+
+- Swift Package Manager and CocoaPods integrations require GRDB 7.8 or later consistently for native inspection APIs. ([#303](https://github.com/trainstar/synchro/issues/303))
+- React Native applications can use RN 0.82.1 through 0.83.x. RN 0.82.1 iOS applications require the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27. ([#303](https://github.com/trainstar/synchro/issues/303))
+- Breaking: Apple clients require iOS 17 or later. Increase the application deployment target before upgrading. See [client requirements](https://trainstar.github.io/synchro/clients/consumption/). ([#303](https://github.com/trainstar/synchro/issues/303))
+
+### Fixed
+
+- Native clients reject inconsistent migration journals and retain unfinished scope rebuild work during schema changes. Native clients preserve pending local edits and deletes when compatible schema changes replace cursors. Native clients rebuild only the affected scope after a local checksum mismatch. ([#331](https://github.com/trainstar/synchro/issues/331))
+- Swift clients apply remote changes after a later accepted or conflict outcome replaces a terminal rejection. ([#331](https://github.com/trainstar/synchro/issues/331))
+- Kotlin clients preserve rows when fields become nullable and support required-field additions without invented defaults. ([#331](https://github.com/trainstar/synchro/issues/331))
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.
@@ -84,5 +105,6 @@ Clients:
 - Parser and rebuild diagnostics do not include submitted or record-owned values. ([#210](https://github.com/trainstar/synchro/issues/210))
 - The React Native lock file does not contain vulnerable `brace-expansion` versions. ([#279](https://github.com/trainstar/synchro/issues/279))
 
-[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...HEAD
+[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.2...HEAD
+[0.4.0-rc.2]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/trainstar/synchro/compare/v0.3.2...v0.4.0-rc.1

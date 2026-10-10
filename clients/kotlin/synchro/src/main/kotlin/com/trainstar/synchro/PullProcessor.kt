@@ -15,17 +15,12 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import java.util.UUID
 
-internal class RebuildChecksumMismatchException(val scopeID: String) : Exception("rebuild checksum mismatch")
+internal class ScopeChecksumMismatchException(val scopeID: String) : Exception("scope checksum mismatch")
 
-/**
- * Selects each record ID of one table whose application row holds unresolved
- * local intent. A rebuild or reset must keep that row. Argument: the table name.
- */
-internal val PROTECTED_RECORD_IDS_SQL = """
-    SELECT DISTINCT pending.record_id
+private val PROTECTED_APPLICATION_ROWS_SQL = """
+    SELECT pending.table_name, pending.record_id, pending.operation, pending.local_order
     FROM _synchro_pending_changes AS pending
-    WHERE pending.table_name = ?
-      AND (
+    WHERE (
         pending.lifecycle_state IN ('captured', 'sealed', 'blocked_by_predecessor', 'legacy_blocked')
         OR (
             pending.lifecycle_state IN ('rejected_terminal', 'exceeds_push_limit')
@@ -38,8 +33,21 @@ internal val PROTECTED_RECORD_IDS_SQL = """
                   AND replacement.lifecycle_state IN ('accepted', 'conflict')
             )
         )
-      )
+    )
 """.trimIndent()
+
+/** Selects protected record IDs for one table. Argument: the table name. */
+internal val PROTECTED_RECORD_IDS_SQL =
+    "SELECT DISTINCT record_id FROM ($PROTECTED_APPLICATION_ROWS_SQL) WHERE table_name = ?"
+
+internal fun isApplicationRowProtected(
+    db: SQLiteDatabase,
+    tableName: String,
+    recordId: String,
+): Boolean = db.rawQuery(
+    "SELECT 1 FROM ($PROTECTED_RECORD_IDS_SQL) WHERE record_id = ? LIMIT 1",
+    arrayOf(tableName, recordId),
+).use { it.moveToFirst() }
 
 internal class PullProcessor(private val database: SynchroDatabase) {
     @OptIn(ExperimentalSerializationApi::class)
@@ -116,7 +124,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         val checksumMap = checksums ?: emptyMap()
         if (changes.isEmpty() && scopeCursors.isEmpty() && checksumMap.isEmpty() &&
             scopeUpdates.add.isEmpty() && scopeUpdates.remove.isEmpty() && scopeSetVersion == null &&
-            resolvedRequestJSON == null
+            rebuildScopes.isEmpty() && resolvedRequestJSON == null
         ) return
         val tablesByID = syncedTables.associateBy { it.tableID }
         val tablesByName = syncedTables.associateBy { it.tableName }
@@ -198,11 +206,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                 )
             }
 
-            val scopeIds = (scopeCursors.keys + checksumMap.keys).toSet()
+            val scopeIds = (scopeCursors.keys + checksumMap.keys + rebuildScopes).toSet()
             for (scopeId in scopeIds) {
                 val existingScope = SynchroMeta.getScope(db, scopeId) ?: continue
-                val nextCursor = scopeCursors[scopeId] ?: existingScope.cursor
-                val localChecksum = computeScopeChecksum(db, scopeId, schemaHash, tablesByName)
                 if (scopeId in rebuildScopes) {
                     SynchroMeta.upsertScope(
                         db,
@@ -210,13 +216,24 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                         cursor = null,
                         checksum = null,
                         generation = existingScope.generation,
-                        localChecksum = checksumJSON(localChecksum),
+                        localChecksum = "",
                     )
                     continue
                 }
+                val nextCursor = scopeCursors[scopeId] ?: existingScope.cursor
                 val serverChecksum = checksumMap[scopeId]
+                serverChecksum?.validate()
+                if (serverChecksum == null && existingScope.localChecksum.isEmpty()) {
+                    SynchroMeta.upsertScope(db, scopeId, nextCursor, null, existingScope.generation, "")
+                    continue
+                }
+                val localChecksum = try {
+                    computeScopeChecksum(db, scopeId, schemaHash, tablesByName)
+                } catch (_: ScopeChecksumMismatchException) {
+                    SynchroMeta.upsertScope(db, scopeId, null, null, existingScope.generation, "")
+                    continue
+                }
                 if (serverChecksum != null) {
-                    serverChecksum.validate()
                     val localChecksumJSON = checksumJSON(localChecksum)
                     val serverChecksumJSON = checksumJSON(serverChecksum)
                     if (localChecksum == serverChecksum) {
@@ -399,10 +416,26 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                 throw SynchroError.InvalidResponse("rebuild attempt is no longer active")
             }
 
-            for (record in response.records) {
+            val protectedOperations = mutableMapOf<Pair<String, String>, String>()
+            val pageRecords = response.records.map { record ->
                 val schema = tableMap[record.table]
                     ?: throw SynchroError.InvalidResponse("unknown logical table ${record.table}")
-                val recordId = scopeRecordID(record.pk, schema)
+                Triple(record, schema, scopeRecordID(record.pk, schema))
+            }
+            // Two bindings per key keep each query below API 24's 999-variable limit.
+            pageRecords.map { it.second.tableName to it.third }.distinct().chunked(400).forEach { keys ->
+                val conditions = keys.joinToString(" OR ") { "(table_name = ? AND record_id = ?)" }
+                db.rawQuery(
+                    "SELECT table_name, record_id, operation FROM ($PROTECTED_APPLICATION_ROWS_SQL) " +
+                        "WHERE $conditions ORDER BY local_order",
+                    keys.flatMap { (tableName, recordId) -> listOf(tableName, recordId) }.toTypedArray(),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        protectedOperations[cursor.getString(0) to cursor.getString(1)] = cursor.getString(2)
+                    }
+                }
+            }
+            for ((record, schema, recordId) in pageRecords) {
                 val localRow = validatedLocalRow(
                     record.table,
                     recordId,
@@ -413,9 +446,11 @@ internal class PullProcessor(private val database: SynchroDatabase) {
                     attempt.schemaHash,
                     schema,
                 )
-                // Protection keeps an existing local row. A protected record without
-                // a local row, such as one a reset could not keep, gets the server row.
-                if (!isApplicationRowProtected(db, schema.tableName, recordId) || !hasLocalRow(db, schema, recordId)) {
+                val protectedOperation = protectedOperations[schema.tableName to recordId]
+                // A protected delete keeps absence. Reset-dropped insert or update intent can restore the server row.
+                if (protectedOperation == null ||
+                    (protectedOperation != "delete" && !hasLocalRow(db, schema, recordId))
+                ) {
                     upsertRecord(db, recordId, localRow, schema)
                 }
                 SynchroMeta.upsertRowVersion(
@@ -527,7 +562,7 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         android.util.Log.i("SynchroMemory", "finalize after checksum heap=${android.os.Debug.getNativeHeapAllocatedSize()}")
         checksum.validate()
         if (localChecksum != checksum) {
-            throw RebuildChecksumMismatchException(attempt.scopeID)
+            throw ScopeChecksumMismatchException(attempt.scopeID)
         }
 
         SynchroMeta.upsertScope(
@@ -691,6 +726,8 @@ internal class PullProcessor(private val database: SynchroDatabase) {
 
         val computed = try {
             computeScopeChecksum(db, receipt.scopeID, schemaHash, tablesByName)
+        } catch (_: ScopeChecksumMismatchException) {
+            return false
         } catch (_: SynchroError.InvalidResponse) {
             return false
         } catch (_: IllegalArgumentException) {
@@ -1005,16 +1042,21 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         val entries = SynchroMeta.getScopeRowChecksums(db, scopeId).map { scopeRow ->
             val table = tablesByName[scopeRow.tableName]
                 ?: throw SynchroError.InvalidResponse("scope references unknown table ${scopeRow.tableName}")
+            val storedChecksum = try {
+                ChecksumObject("sha256", 1, "hex", scopeRow.checksum).also { it.validate() }
+            } catch (_: IllegalArgumentException) {
+                throw SynchroError.InvalidResponse("scope row checksum is invalid")
+            }
             if (isApplicationRowProtected(db, scopeRow.tableName, scopeRow.recordID)) {
                 return@map scopeRowIdentity(table, scopeRow.recordID) to
-                    ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
+                    storedChecksum
             }
             val row = loadWireRow(db, table, scopeRow.recordID)
             val rowVersion = SynchroMeta.getRowVersionWithChecksum(db, table.tableName, scopeRow.recordID)
             if (row == null) {
                 if (rowVersion != null && rowVersion.rowChecksum == null) {
                     return@map scopeRowIdentity(table, scopeRow.recordID) to
-                        ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
+                        storedChecksum
                 }
                 throw SynchroError.InvalidResponse("scope provenance references a missing row")
             }
@@ -1025,9 +1067,9 @@ internal class PullProcessor(private val database: SynchroDatabase) {
             if (computed.checksum.digest != scopeRow.checksum) {
                 if (computed.checksum.digest == rowVersion.rowChecksum?.digest) {
                     return@map scopeRowIdentity(table, scopeRow.recordID) to
-                        ChecksumObject("sha256", 1, "hex", scopeRow.checksum)
+                        storedChecksum
                 }
-                throw SynchroError.InvalidResponse("scope row checksum does not match local row")
+                throw ScopeChecksumMismatchException(scopeId)
             }
             computed.identity to computed.checksum
         }
@@ -1085,15 +1127,6 @@ internal class PullProcessor(private val database: SynchroDatabase) {
         if (canonical != value) throw SynchroError.InvalidResponse("invalid bytes value for $fieldID")
         return decoded
     }
-
-    private fun isApplicationRowProtected(
-        db: SQLiteDatabase,
-        tableName: String,
-        recordId: String,
-    ): Boolean = db.rawQuery(
-        "SELECT 1 FROM ($PROTECTED_RECORD_IDS_SQL) WHERE record_id = ? LIMIT 1",
-        arrayOf(tableName, recordId),
-    ).use { it.moveToFirst() }
 
     private fun scopeRowIdentity(table: LocalSchemaTable, recordId: String): ByteArray {
         val primaryKey = table.columns.singleOrNull { it.fieldID == table.primaryKeyFieldID }

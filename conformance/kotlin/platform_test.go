@@ -250,6 +250,46 @@ func TestResponseLossGapMarksHostPeersUnavailable(t *testing.T) {
 	}
 }
 
+func TestPlatformClientAvailabilityAllowsOnlyPausedApply(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		operation     string
+		session       bool
+		terminated    bool
+		pendingLoss   bool
+		activeCall    *pausedCall
+		wantAvailable bool
+	}{
+		{name: "idle apply", operation: "apply", session: true, wantAvailable: true},
+		{name: "idle synchronization", operation: "synchronization", session: true, wantAvailable: true},
+		{name: "paused apply", operation: "apply", session: true, activeCall: &pausedCall{id: "recovery", paused: true}, wantAvailable: true},
+		{name: "running apply", operation: "apply", session: true, activeCall: &pausedCall{id: "running"}},
+		{name: "paused synchronization", operation: "synchronization", session: true, activeCall: &pausedCall{paused: true}},
+		{name: "paused lifecycle", operation: "lifecycle", session: true, activeCall: &pausedCall{paused: true}},
+		{name: "paused begin-call", operation: "begin-call", session: true, activeCall: &pausedCall{paused: true}},
+		{name: "terminated paused apply", operation: "apply", session: true, terminated: true, activeCall: &pausedCall{paused: true}},
+		{name: "no session paused apply", operation: "apply", activeCall: &pausedCall{paused: true}},
+		{name: "pending loss paused apply", operation: "apply", session: true, pendingLoss: true, activeCall: &pausedCall{paused: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &platformClient{terminated: test.terminated, activeCall: test.activeCall}
+			if test.session {
+				state.session = &clientSession{}
+			}
+			if test.pendingLoss {
+				state.pendingLoss = &pendingResponseLoss{}
+			}
+			paused := state.activeCall != nil && state.activeCall.paused
+			if err := state.available(test.operation); (err == nil) != test.wantAvailable {
+				t.Fatalf("availability for %s = %v, want available=%t", test.operation, err, test.wantAvailable)
+			}
+			if state.activeCall != test.activeCall || state.activeCall != nil && state.activeCall.paused != paused {
+				t.Fatal("availability check changed the active call or its pause")
+			}
+		})
+	}
+}
+
 func TestInstallRejectsPendingHostReplacement(t *testing.T) {
 	pending := &platformClient{client: Client{Key: "pending"}}
 	platform := &Platform{

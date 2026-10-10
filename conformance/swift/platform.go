@@ -73,6 +73,8 @@ type SynchronizationResult struct {
 	ProvenanceMaintenanceWork uint64            `json:"provenance_maintenance_work,omitempty"`
 	ReplayedMutationCount     uint64            `json:"replayed_mutation_count,omitempty"`
 	transportObservations     []transportObservation
+	before                    *runnerResult
+	after                     *runnerResult
 }
 
 // CallResult records one paused or completed public call.
@@ -117,6 +119,15 @@ type Platform struct {
 	rebuildCursorOverride         string
 	rebuildCursorOverrideClientID string
 	rebuildResponseCursors        map[string]string
+	schemaProofRequests           uint64
+	schemaProofPushes             []schemaProofPush
+}
+
+type schemaProofRequestKey struct{}
+type schemaProofPush struct {
+	ClientID          string
+	Request, Response []byte
+	Status            int
 }
 
 type sealedRetryPushFault struct {
@@ -164,6 +175,8 @@ type pendingResponseLoss struct {
 
 type operationWindow struct {
 	observations              []transportObservation
+	before                    *runnerResult
+	after                     *runnerResult
 	duration                  time.Duration
 	provenanceMaintenanceWork uint64
 	replayedMutationCount     uint64
@@ -190,6 +203,19 @@ func (p *Platform) startResponseProxy() error {
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.ModifyResponse = p.modifyProxiedResponse
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		p.mu.Lock()
+		p.schemaProofRequests++
+		p.mu.Unlock()
+		if strings.HasSuffix(request.URL.Path, "/sync/push") && request.Body != nil {
+			body, err := io.ReadAll(io.LimitReader(request.Body, maximumMutatedResponseBytes+1))
+			request.Body.Close()
+			if err != nil || len(body) > maximumMutatedResponseBytes {
+				http.Error(response, "bounded push required", http.StatusBadRequest)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request = request.WithContext(context.WithValue(request.Context(), schemaProofRequestKey{}, body))
+		}
 		if strings.HasSuffix(request.URL.Path, "/sync/push") {
 			p.countProxiedPush()
 		}
@@ -480,6 +506,27 @@ func temporaryUnavailablePushTargetForOperations(operations RequestOperations) (
 }
 
 func (p *Platform) modifyProxiedResponse(response *http.Response) error {
+	if strings.HasSuffix(response.Request.URL.Path, "/sync/push") {
+		request, _ := response.Request.Context().Value(schemaProofRequestKey{}).([]byte)
+		var identity struct {
+			ClientID string `json:"client_id"`
+		}
+		if json.Unmarshal(request, &identity) == nil && (identity.ClientID == "client-schema-proof-prepared" || identity.ClientID == "client-schema-proof-committed") {
+			body, err := io.ReadAll(io.LimitReader(response.Body, maximumMutatedResponseBytes+1))
+			response.Body.Close()
+			if err != nil || len(body) > maximumMutatedResponseBytes {
+				return errors.New("bounded proof push response required")
+			}
+			response.Body = io.NopCloser(bytes.NewReader(body))
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if len(p.schemaProofPushes) >= 8 {
+				return errors.New("proof push observation overflow")
+			}
+			p.schemaProofPushes = append(p.schemaProofPushes, schemaProofPush{ClientID: identity.ClientID, Request: append([]byte(nil), request...), Response: body, Status: response.StatusCode})
+		}
+		return nil
+	}
 	if response.StatusCode != http.StatusOK || !strings.HasSuffix(response.Request.URL.Path, "/sync/rebuild") {
 		return nil
 	}
@@ -606,7 +653,10 @@ func prepareApplicationDatabaseDirectory(path string) (string, error) {
 }
 
 // Install starts one empty, current, or seeded durable client database.
-func (p *Platform) Install(ctx context.Context, client Client, initialization, seedPath string) error {
+func (p *Platform) Install(ctx context.Context, client Client, initialization, seedPath string, fixtures ...*scenarios.NativeLocalFixture) error {
+	if len(fixtures) > 1 || len(fixtures) != 0 && initialization != "empty" {
+		return errors.New("local fixture requires one empty installation")
+	}
 	if err := p.context(ctx); err != nil {
 		return err
 	}
@@ -634,7 +684,7 @@ func (p *Platform) Install(ctx context.Context, client Client, initialization, s
 		databasePath: databasePath,
 		selectors:    make(map[string]runnerRowSelector),
 	}
-	if err := p.startClient(ctx, state, seedPath); err != nil {
+	if err := p.startClient(ctx, state, seedPath, fixtures...); err != nil {
 		return err
 	}
 	if initialization == "current" {
@@ -733,7 +783,11 @@ func verifyRestartIdentity(priorProcessID, priorFingerprint, processID, fingerpr
 	return nil
 }
 
-func (p *Platform) startClient(ctx context.Context, state *platformClient, seedPath string) error {
+func (p *Platform) startClient(ctx context.Context, state *platformClient, seedPath string, fixtures ...*scenarios.NativeLocalFixture) error {
+	var fixture *scenarios.NativeLocalFixture
+	if len(fixtures) == 1 {
+		fixture = fixtures[0]
+	}
 	session, err := StartSession(ctx, Config{RunnerPath: p.config.RunnerPath})
 	if err != nil {
 		return err
@@ -750,6 +804,7 @@ func (p *Platform) startClient(ctx context.Context, state *platformClient, seedP
 		AuthToken:        token,
 		ClientID:         state.client.ClientID,
 		SeedDatabasePath: seedPath,
+		LocalFixture:     fixture,
 		Platform:         p.config.Platform,
 		AppVersion:       p.config.AppVersion,
 		PullPageSize:     p.config.PullPageSize,
@@ -1025,7 +1080,7 @@ func (p *Platform) synchronizeWithResponseLoss(ctx context.Context, state *platf
 	if err != nil || inFlight.CallID != callID || inFlight.State != "in_flight" || inFlight.Completion != "" {
 		return SynchronizationResult{}, errors.New("Swift public call did not enter flight")
 	}
-	if !state.started {
+	if !state.started && operationClass != "connect" {
 		if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "connect"}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("await Swift response-loss connect: %w", err)
 		}
@@ -1226,6 +1281,8 @@ func synchronizationResult(completion string, callErrorCategory string, steps []
 		ProvenanceMaintenanceWork: window.provenanceMaintenanceWork,
 		ReplayedMutationCount:     window.replayedMutationCount,
 		transportObservations:     cloneTransportObservations(window.observations),
+		before:                    window.before,
+		after:                     window.after,
 	}
 	if window.duration > 0 {
 		result.DurationNanoseconds = uint64(window.duration)
@@ -1908,7 +1965,8 @@ func (p *Platform) relaunchPendingResponseLoss(ctx context.Context, state *platf
 	}
 	state.restarted = true
 	state.pendingLoss = nil
-	window, err := windowFromResults(loss.started, loss.before, after, loss.observations)
+	// The maintenance cursor resets at relaunch. Measure the interrupted process through its last capture.
+	window, err := windowFromResults(loss.started, loss.before, loss.restartCapture, loss.observations)
 	if err != nil {
 		return StepObservation{}, err
 	}
@@ -2114,10 +2172,10 @@ func selectorKey(selector runnerRowSelector) string {
 }
 
 func validateCaptureResult(result runnerResult) error {
-	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil || result.ScopeStatesTruncated == nil || result.ScopeRowsTruncated == nil || result.RebuildAttemptsTruncated == nil || result.RebuildReceiptsTruncated == nil || result.RowMetadataTruncated == nil || result.CaptureOverflowed == nil {
+	if result.Status == nil || *result.Status == "" || result.PendingChangeCount == nil || *result.PendingChangeCount < 0 || result.ApplicationRowCount == nil || result.MutationLedgerCount == nil || result.MutationOutcomeCount == nil || result.SealedBatchCount == nil || result.RejectedMutationCount == nil || result.ScopeStateCount == nil || result.ScopeRowCount == nil || result.ProvenanceCount == nil || result.RowMetadataCount == nil || result.RebuildAttemptCount == nil || result.RebuildReceiptCount == nil || result.ProvenanceMaintenanceWorkCursor == nil || *result.ProvenanceMaintenanceWorkCursor < 0 || result.Events == nil || result.ScopeStatesTruncated == nil || result.ScopeRowsTruncated == nil || result.RebuildAttemptsTruncated == nil || result.RebuildReceiptsTruncated == nil || result.RowMetadataTruncated == nil || result.MigrationJournalTruncated == nil || result.PhysicalSchemaTruncated == nil || result.AcceptedMutationOutcomesTruncated == nil || result.CaptureOverflowed == nil {
 		return errors.New("Swift runner capture facts are incomplete")
 	}
-	truncated := *result.ScopeStatesTruncated || *result.ScopeRowsTruncated || *result.RebuildAttemptsTruncated || *result.RebuildReceiptsTruncated || *result.RowMetadataTruncated
+	truncated := *result.ScopeStatesTruncated || *result.ScopeRowsTruncated || *result.RebuildAttemptsTruncated || *result.RebuildReceiptsTruncated || *result.RowMetadataTruncated || *result.MigrationJournalTruncated || *result.PhysicalSchemaTruncated || *result.AcceptedMutationOutcomesTruncated
 	if (*result.ApplicationRowCount <= maximumRunnerRows) != (result.ApplicationRows != nil) ||
 		(*result.MutationLedgerCount <= maximumRunnerRecords) != (result.RetainedMutations != nil) ||
 		(*result.RejectedMutationCount <= maximumRunnerRecords) != (result.RejectedMutations != nil) ||
@@ -2133,7 +2191,25 @@ func validateCaptureResult(result runnerResult) error {
 		*result.RebuildReceiptsTruncated != (result.RebuildReceipts == nil) ||
 		(*result.RebuildReceiptsTruncated && *result.RebuildReceiptCount <= maximumRunnerRecords) ||
 		*result.CaptureOverflowed != truncated {
-		return errors.New("Swift runner capture detail bounds are inconsistent")
+		return fmt.Errorf("Swift runner capture detail bounds are inconsistent: "+
+			"application_rows(count=%d,present=%t) retained_mutations(ledger_count=%d,present=%t) rejected_mutations(count=%d,present=%t) "+
+			"scope_states(count=%d,present=%t,truncated=%t) scope_rows(count=%d,present=%t,truncated=%t) "+
+			"row_metadata(count=%d,present=%t,truncated=%t) rebuild_attempts(count=%d,present=%t,truncated=%t) "+
+			"rebuild_receipts(page_count=%d,present=%t,truncated=%t) migration_journal(present=%t,truncated=%t) "+
+			"physical_schema(present=%t,truncated=%t) accepted_mutation_outcomes(detail_count=%d,present=%t,truncated=%t) "+
+			"capture_overflowed=%t expected_overflowed=%t",
+			*result.ApplicationRowCount, result.ApplicationRows != nil,
+			*result.MutationLedgerCount, result.RetainedMutations != nil,
+			*result.RejectedMutationCount, result.RejectedMutations != nil,
+			*result.ScopeStateCount, result.ScopeStates != nil, *result.ScopeStatesTruncated,
+			*result.ScopeRowCount, result.ScopeRows != nil, *result.ScopeRowsTruncated,
+			*result.RowMetadataCount, result.RowMetadataRecords != nil, *result.RowMetadataTruncated,
+			*result.RebuildAttemptCount, result.RebuildAttempts != nil, *result.RebuildAttemptsTruncated,
+			*result.RebuildReceiptCount, result.RebuildReceipts != nil, *result.RebuildReceiptsTruncated,
+			len(result.MigrationJournal) != 0, *result.MigrationJournalTruncated,
+			len(result.PhysicalSchema) != 0, *result.PhysicalSchemaTruncated,
+			len(result.AcceptedMutationOutcomes), result.AcceptedMutationOutcomes != nil, *result.AcceptedMutationOutcomesTruncated,
+			*result.CaptureOverflowed, truncated)
 	}
 	if len(result.ScopeStates) != boundedDetailCount(*result.ScopeStateCount, maximumRunnerRecords) || len(result.ScopeRows) != boundedDetailCount(*result.ScopeRowCount, maximumRunnerRecords) || len(result.RejectedMutations) != boundedDetailCount(*result.RejectedMutationCount, maximumRunnerRecords) || len(result.RebuildAttempts) != boundedDetailCount(*result.RebuildAttemptCount, maximumRunnerRecords) || len(result.RowMetadataRecords) != boundedDetailCount(*result.RowMetadataCount, maximumRunnerRecords) {
 		return errors.New("Swift runner capture counts do not match detail")
@@ -2619,6 +2695,8 @@ func windowFromResults(started time.Time, before, after runnerResult, observatio
 	}
 	return operationWindow{
 		observations:              cloneTransportObservations(observations),
+		before:                    &before,
+		after:                     &after,
 		duration:                  time.Since(started),
 		provenanceMaintenanceWork: work,
 	}, nil

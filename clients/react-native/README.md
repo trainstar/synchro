@@ -4,28 +4,31 @@ React Native TurboModule bridge for Synchro. The package wraps the native Swift 
 
 ## Requirements
 
-- React Native `0.83.x`. Use `0.83.5` or later with Xcode `26.4` or later.
-- iOS `16.0+`
+- React Native `>=0.82.1 <0.84.0`, with its compatible React version.
+- React Native `0.82.1` needs the [fmt 12.1.0 backport](https://trainstar.github.io/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27.
+- React Native `0.83.10` contains the fmt correction.
+- Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
+- iOS `17.0+`
 - Android `minSdk 24`
 - Node `20.19.4+`
 - Android development and CI should use JDK `17`
 
 ## Installation
 
-Install the published package only after Synchro `0.4.0-rc.1` is available. Before that,
+Install the published package only after Synchro `0.4.0-rc.2` is available. Before that,
 use the local artifact flow in
 [Client Consumption](https://trainstar.github.io/synchro/clients/consumption/).
 
 ```sh
-npm install @trainstar/synchro-react-native@0.4.0-rc.1
+npm install @trainstar/synchro-react-native@0.4.0-rc.2
 ```
 
-Before you run `pod install`, add these published Synchro `0.4.0-rc.1` dependencies to the
+Before you run `pod install`, add these published Synchro `0.4.0-rc.2` dependencies to the
 application `ios/Podfile`:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.1'
-pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.2'
+pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
 ```
 
 Then install the pods:
@@ -214,7 +217,7 @@ When one mutation in a group does not apply, the server applies no mutation of t
 
 After a failed group with a conflict, local state holds the server row for the conflicting member. It holds local values for every other member. The SDK does not revert those local values. Use `inspectRejectedMutations()` to find them and write new intent.
 
-The atomic API requires the Synchro `0.4.0-rc.1` extension and adapter. Use this deployment order:
+The atomic API requires the Synchro `0.4.0-rc.2` extension and adapter. Use this deployment order:
 
 1. Install the `0.4.0` extension and adapter on the server.
 2. Release the client code that calls `atomicWriteTransaction()`.

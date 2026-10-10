@@ -491,18 +491,19 @@ pub(crate) fn evaluate_source_requirement(
         .unwrap_or_else(|| pgrx::error!("pending registry generation has no parent"));
     // The live catalog can differ from the stored parent. The pending target
     // must still match the live catalog before validation records it.
-    let parent_tables = manifest_tables(crate::registry::load_registry_generation_entries(
-        client,
-        parent_generation,
-        true,
-        false,
-    )?);
-    let tables = manifest_tables(crate::registry::load_registry_generation_entries(
-        client,
-        registry_generation,
-        false,
-        true,
-    )?);
+    let parent_tables = manifest_tables(
+        crate::registry::load_registry_generation_entries(client, parent_generation, true, false)?
+            .registrations,
+    );
+    let tables = manifest_tables(
+        crate::registry::load_registry_generation_entries(
+            client,
+            registry_generation,
+            false,
+            true,
+        )?
+        .registrations,
+    );
     let client_class =
         (parent_tables != tables).then(|| classify_tables(&parent_tables, &tables, false));
     let rows = client.select(

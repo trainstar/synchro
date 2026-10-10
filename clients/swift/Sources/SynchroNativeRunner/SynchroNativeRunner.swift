@@ -26,6 +26,7 @@ private struct RunnerCommand: Decodable {
     let callID: String?
     let method: String?
     let rowSelectors: [RowSelector]?
+    let localFixture: LocalFixture?
     private let suppliedKeys: Set<String>
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -47,6 +48,7 @@ private struct RunnerCommand: Decodable {
         case callID = "call_id"
         case method
         case rowSelectors = "row_selectors"
+        case localFixture = "local_fixture"
     }
 
     init(from decoder: Decoder) throws {
@@ -78,10 +80,34 @@ private struct RunnerCommand: Decodable {
         callID = try container.decodeIfPresent(String.self, forKey: .callID)
         method = try container.decodeIfPresent(String.self, forKey: .method)
         rowSelectors = try container.decodeIfPresent([RowSelector].self, forKey: .rowSelectors)
+        localFixture = try container.decodeIfPresent(LocalFixture.self, forKey: .localFixture)
     }
 
     func containsOnly(_ allowed: [CodingKeys]) -> Bool {
         suppliedKeys.isSubset(of: Set(allowed.map(\.rawValue)))
+    }
+}
+
+private struct LocalFixture: Decodable {
+    let tableName: String
+    let id: String
+    let value: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: RunnerCodingKey.self)
+        guard Set(container.allKeys.map(\.stringValue)) == Set(["table_name", "id", "value"]) else {
+            throw RunnerError.invalidCommand
+        }
+        tableName = try container.decode(String.self, forKey: RunnerCodingKey(stringValue: "table_name")!)
+        id = try container.decode(String.self, forKey: RunnerCodingKey(stringValue: "id")!)
+        value = try container.decode(String.self, forKey: RunnerCodingKey(stringValue: "value")!)
+        _ = try quoteIdentifier(tableName)
+        guard tableName.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }),
+              !isReservedTable(tableName),
+              !id.isEmpty, id.utf8.count <= 256,
+              !value.isEmpty, value.utf8.count <= 1024 else {
+            throw RunnerError.invalidCommand
+        }
     }
 }
 
@@ -361,6 +387,13 @@ private struct RunnerResult: Encodable {
     var rowMetadataRecords: [RowMetadataRecord]? = nil
     var rebuildAttempts: [RebuildAttemptRecord]? = nil
     var rebuildReceipts: [RebuildReceiptRecord]? = nil
+    // The outer optional omits control results. The inner optional encodes journal absence as null.
+    var migrationJournal: MigrationJournalInspection?? = nil
+    var migrationJournalTruncated: Bool? = nil
+    var physicalSchema: [PhysicalSchemaColumnInspection]? = nil
+    var physicalSchemaTruncated: Bool? = nil
+    var acceptedMutationOutcomes: [String: String]? = nil
+    var acceptedMutationOutcomesTruncated: Bool? = nil
     var scopeStatesTruncated: Bool? = nil
     var scopeRowsTruncated: Bool? = nil
     var rebuildAttemptsTruncated: Bool? = nil
@@ -405,6 +438,12 @@ private struct RunnerResult: Encodable {
         case rowMetadataRecords = "row_metadata_records"
         case rebuildAttempts = "rebuild_attempts"
         case rebuildReceipts = "rebuild_receipts"
+        case migrationJournal = "migration_journal"
+        case migrationJournalTruncated = "migration_journal_truncated"
+        case physicalSchema = "physical_schema"
+        case physicalSchemaTruncated = "physical_schema_truncated"
+        case acceptedMutationOutcomes = "accepted_mutation_outcomes"
+        case acceptedMutationOutcomesTruncated = "accepted_mutation_outcomes_truncated"
         case scopeStatesTruncated = "scope_states_truncated"
         case scopeRowsTruncated = "scope_rows_truncated"
         case rebuildAttemptsTruncated = "rebuild_attempts_truncated"
@@ -450,6 +489,7 @@ private struct RunnerTransportObservation: Encodable {
     let requestFacts: TransportRequestFacts?
     let rebuildResponseFacts: TransportRebuildResponseFacts?
     let pullResponseFacts: TransportPullResponseFacts?
+    let connectResponseFacts: TransportConnectResponseFacts?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -463,6 +503,7 @@ private struct RunnerTransportObservation: Encodable {
         case requestFacts = "request_facts"
         case rebuildResponseFacts = "rebuild_response_facts"
         case pullResponseFacts = "pull_response_facts"
+        case connectResponseFacts = "connect_response_facts"
     }
 
     init(_ observation: TransportObservation) {
@@ -477,6 +518,7 @@ private struct RunnerTransportObservation: Encodable {
         requestFacts = observation.requestFacts
         rebuildResponseFacts = observation.rebuildResponseFacts
         pullResponseFacts = observation.pullResponseFacts
+        connectResponseFacts = observation.connectResponseFacts
     }
 
     func encode(to encoder: Encoder) throws {
@@ -492,6 +534,7 @@ private struct RunnerTransportObservation: Encodable {
         try container.encodeIfPresent(requestFacts, forKey: .requestFacts)
         try container.encodeIfPresent(rebuildResponseFacts, forKey: .rebuildResponseFacts)
         try container.encodeIfPresent(pullResponseFacts, forKey: .pullResponseFacts)
+        try container.encodeIfPresent(connectResponseFacts, forKey: .connectResponseFacts)
     }
 }
 
@@ -927,7 +970,7 @@ private final class Runner: @unchecked Sendable {
         guard commandOnly(command, allowed: [
             .schemaVersion, .operation, .databasePath, .serverURL, .authToken, .clientID,
             .seedDatabasePath, .platform, .appVersion, .pullPageSize, .pushBatchSize,
-            .transportCapacity
+            .transportCapacity, .localFixture
         ]),
         client == nil,
         let databasePath = command.databasePath,
@@ -952,6 +995,12 @@ private final class Runner: @unchecked Sendable {
               !appVersion.isEmpty, appVersion.count <= 128 else {
             throw RunnerError.invalidCommand
         }
+        if command.localFixture != nil {
+            guard command.seedDatabasePath == nil,
+                  !FileManager.default.fileExists(atPath: databasePath) else {
+                throw RunnerError.invalidCommand
+            }
+        }
         let collector = TransportObservationCollector(
             capacity: command.transportCapacity ?? Self.defaultTransportCapacity
         )
@@ -973,6 +1022,14 @@ private final class Runner: @unchecked Sendable {
         self.client = client
         self.databasePath = databasePath
         transportObservations = collector
+        if let fixture = command.localFixture {
+            try client.createTable(fixture.tableName, columns: [
+                ColumnDef(name: "id", type: "TEXT", nullable: false, primaryKey: true),
+                ColumnDef(name: "value", type: "TEXT", nullable: false)
+            ], options: TableOptions(ifNotExists: false))
+            let table = try quoteIdentifier(fixture.tableName)
+            _ = try client.execute("INSERT INTO \(table) (id, value) VALUES (?, ?)", params: [fixture.id, fixture.value])
+        }
         eventSubscription = client.onSyncEvent { [events] event in
             events.append(event)
         }
@@ -1117,26 +1174,35 @@ private final class Runner: @unchecked Sendable {
 
     private func armTransportPause(_ command: RunnerCommand) throws -> RunnerResult {
         guard commandOnly(command, allowed: [.schemaVersion, .operation, .transportOperation]),
-              let operation = command.transportOperation,
-              let operationClass = TransportOperationClass(rawValue: operation) else {
+              let operation = command.transportOperation else {
             throw RunnerError.invalidCommand
         }
         let client = try requireClient()
-        try requireTransportObservations().armPause(for: operationClass)
+        let collector = try requireTransportObservations()
+        if let checkpoint = MigrationCheckpoint(rawValue: operation) {
+            try collector.armPause(for: checkpoint)
+        } else if let operationClass = TransportOperationClass(rawValue: operation) {
+            try collector.armPause(for: operationClass)
+        } else {
+            throw RunnerError.invalidCommand
+        }
         return RunnerResult(status: client.getSyncStatus().rawValue)
     }
 
     private func awaitTransportPause(_ command: RunnerCommand) async throws -> RunnerResult {
         guard commandOnly(command, allowed: [.schemaVersion, .operation, .transportOperation]),
-              let operation = command.transportOperation,
-              let operationClass = TransportOperationClass(rawValue: operation) else {
+              let operation = command.transportOperation else {
             throw RunnerError.invalidCommand
         }
         let client = try requireClient()
-        try await requireTransportObservations().awaitPause(
-            for: operationClass,
-            timeout: Self.transportPauseTimeout
-        )
+        let collector = try requireTransportObservations()
+        if let checkpoint = MigrationCheckpoint(rawValue: operation) {
+            try await collector.awaitPause(for: checkpoint, timeout: Self.transportPauseTimeout)
+        } else if let operationClass = TransportOperationClass(rawValue: operation) {
+            try await collector.awaitPause(for: operationClass, timeout: Self.transportPauseTimeout)
+        } else {
+            throw RunnerError.invalidCommand
+        }
         return RunnerResult(status: client.getSyncStatus().rawValue)
     }
 
@@ -1156,9 +1222,10 @@ private final class Runner: @unchecked Sendable {
               command.rowSelectors.map({ $0.count <= Self.maximumSelectors }) ?? true else {
             throw RunnerError.invalidCommand
         }
-        // Direct inspection does not normalize. Normalize first, so the one
-        // snapshot below reports normalized counts and details together.
-        _ = try client.pendingChangeCount()
+        // Migration cuts must preserve the captured intent exactly.
+        if transportObservations?.isMigrationCheckpointPaused != true {
+            _ = try client.pendingChangeCount()
+        }
         var capturedApplicationRows: [[String: AnyCodable]] = []
         var capturedStorageClasses: [[String: String]] = []
         var captureValueBytes = 0
@@ -1249,6 +1316,12 @@ private final class Runner: @unchecked Sendable {
                 rowMetadataRecords: metadataRecords,
                 rebuildAttempts: rebuildAttemptRecords,
                 rebuildReceipts: rebuildReceiptRecords,
+                migrationJournal: .some(counts.migrationJournal),
+                migrationJournalTruncated: counts.migrationJournalTruncated,
+                physicalSchema: counts.physicalSchema,
+                physicalSchemaTruncated: counts.physicalSchemaTruncated,
+                acceptedMutationOutcomes: counts.acceptedMutationOutcomes,
+                acceptedMutationOutcomesTruncated: counts.acceptedMutationOutcomesTruncated,
                 scopeStatesTruncated: counts.scopeStatesTruncated,
                 scopeRowsTruncated: counts.scopeRowsTruncated,
                 rebuildAttemptsTruncated: counts.rebuildAttemptsTruncated,

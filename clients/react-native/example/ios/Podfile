@@ -7,7 +7,7 @@ require Pod::Executable.execute_command('node', ['-p',
     {paths: [process.argv[1]]},
   )', __dir__]).strip
 
-platform :ios, '16.0'
+platform :ios, '17.0'
 prepare_react_native_project!
 
 linkage = ENV['USE_FRAMEWORKS']
@@ -19,8 +19,8 @@ end
 target 'SynchroReactNativeExample' do
   # Local path to the Synchro podspec at the repository root
   pod 'Synchro', :path => '../../../..'
-  # GRDB 7.0 is only available via git (not published to CocoaPods trunk)
-  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'
+  # Use the GRDB Git distribution at the tested release tag.
+  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
   # Autolinking skips a pod that this target already declares.
   pod 'SynchroReactNative', :path => '../..', :testspecs => ['Tests']
 

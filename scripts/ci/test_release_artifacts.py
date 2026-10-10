@@ -15,6 +15,8 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from verification.test_support_environments import invalid_collections, valid_records
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).parents[1] / "release-artifacts.py"
@@ -200,9 +202,12 @@ class ReleaseArtifactsTests(unittest.TestCase):
     ) -> dict[str, object]:
         inventory = self.write_inventory(root)
         matrix = root / "support-matrix.json"
-        matrix.write_text(json.dumps({"cells": [{"id": "SUP-PG-001", "policy": "required"}, {"id": "SUP-OLD-001", "policy": "excluded"}]}), encoding="utf-8")
+        matrix.write_text(json.dumps({"cells": [
+            *({"id": record["id"], "policy": "required"} for record in valid_records()),
+            {"id": "SUP-OLD-001", "policy": "excluded"},
+        ]}), encoding="utf-8")
         support = root / "support.json"
-        support.write_text(json.dumps([{"id": "SUP-PG-001", "environment": {"postgresql": "18.3", "ubuntu": "24.04", "architecture": "amd64"}}]), encoding="utf-8")
+        support.write_text(json.dumps(valid_records()), encoding="utf-8")
         repo = root / "repo"
         for relative in release_artifacts.DEPENDENCY_INPUTS:
             path = repo / relative
@@ -291,6 +296,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             self.assertEqual(manifest["build"]["workflow_path"], ".github/workflows/release.yml")
             self.assertEqual(manifest["build"]["run_id"], "67890")
             self.assertEqual(manifest["provenance"]["workflow_path"], ".github/workflows/release.yml")
+            self.assertEqual(manifest["resolved_support_cells"], sorted(valid_records(), key=lambda record: record["id"]))
             dependencies = {record["path"] for record in manifest["dependency_inputs"]}
             self.assertNotIn("Package.resolved", dependencies)
             self.assertIn("clients/kotlin/settings.gradle.kts", dependencies)
@@ -298,6 +304,77 @@ class ReleaseArtifactsTests(unittest.TestCase):
             sums = (release_dir / release_artifacts.CHECKSUMS_NAME).read_text(encoding="utf-8")
             self.assertIn("  release-manifest.json\n", sums)
             self.assertNotIn("  SHA256SUMS\n", sums)
+
+    def test_environment_mutations_fail_staging_and_sealed_verification(self) -> None:
+        for label, records in invalid_collections():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                arguments = self.make_fixture(Path(directory))
+                support = arguments["support_resolution"]
+                support.write_text(json.dumps(records), encoding="utf-8")
+                with self.assertRaises(release_artifacts.ReleaseError):
+                    release_artifacts.stage_release(**arguments)
+                self.assertFalse(arguments["release_dir"].exists())
+                support.write_text(json.dumps(valid_records()), encoding="utf-8")
+                release_artifacts.stage_release(**arguments)
+                manifest_path = arguments["release_dir"] / release_artifacts.MANIFEST_NAME
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["resolved_support_cells"] = records
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                self.rewrite_sums(arguments["release_dir"])
+                with self.assertRaises(release_artifacts.ReleaseError):
+                    release_artifacts.verify_release(arguments["release_dir"], VERSION, arguments["inventory_path"], arguments["support_matrix"])
+
+    def test_duplicate_json_members_fail_support_input_matrix_and_manifest(self) -> None:
+        for source, original, duplicate in (
+            ("support_resolution", '"postgresql": "18.3"', '"postgresql": "18.3", "postgresql": "18.3"'),
+            ("support_matrix", '"cells":', '"cells": [], "cells":'),
+            ("support_matrix", '"policy": "required"', '"policy": "required", "policy": "required"'),
+            ("manifest", '"postgresql": "18.3"', '"postgresql": "18.3", "postgresql": "18.3"'),
+            ("manifest", '"resolved_support_cells":', '"resolved_support_cells": [], "resolved_support_cells":'),
+        ):
+            with self.subTest(source=source, member=original), tempfile.TemporaryDirectory() as directory:
+                arguments = self.make_fixture(Path(directory))
+                if source == "manifest":
+                    release_artifacts.stage_release(**arguments)
+                    path = arguments["release_dir"] / release_artifacts.MANIFEST_NAME
+                else:
+                    path = arguments[source]
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(original, text)
+                path.write_text(text.replace(original, duplicate, 1), encoding="utf-8")
+                if source == "manifest":
+                    self.rewrite_sums(arguments["release_dir"])
+                    with self.assertRaisesRegex(release_artifacts.ReleaseError, "duplicate JSON member"):
+                        release_artifacts.verify_release(arguments["release_dir"], VERSION, arguments["inventory_path"], arguments["support_matrix"])
+                else:
+                    with self.assertRaisesRegex(release_artifacts.ReleaseError, "duplicate JSON member"):
+                        release_artifacts.stage_release(**arguments)
+
+    def test_duplicate_matrix_ids_fail_before_required_set_conversion(self) -> None:
+        for index in (0, -1):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                release_dir, arguments = self.seal(Path(directory))
+                matrix_path = arguments["support_matrix"]
+                matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+                matrix["cells"].append(dict(matrix["cells"][index]))
+                matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+                with self.assertRaisesRegex(release_artifacts.ReleaseError, "duplicate cell"):
+                    release_artifacts.load_support_resolution(arguments["support_resolution"], matrix_path)
+                with self.assertRaisesRegex(release_artifacts.ReleaseError, "duplicate cell"):
+                    release_artifacts.verify_release(release_dir, VERSION, arguments["inventory_path"], matrix_path)
+
+    def test_direct_script_uses_repository_validator_from_other_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # An installed or PYTHONPATH module with the same name must not supply validation.
+            (root / "support_environments.py").write_text("raise AssertionError('wrong validator')\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT.resolve()), "--help"], cwd=root,
+                env={**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Assemble, seal, and verify", result.stdout)
 
     def test_server_metadata_rejects_nonexecutable_build_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

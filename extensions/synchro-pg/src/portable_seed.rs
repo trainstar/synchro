@@ -291,10 +291,16 @@ fn validate_revoked_scope_identity(user_id: &str, scope_id: &str) {
 /// registration. The function derives scopes from application data, so a data
 /// change takes effect at the user's next pull or connect.
 #[pg_extern]
-fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!(i32, "1000")) {
+fn synchro_register_assignment_function(
+    p_function: Option<&str>,
+    p_max_scopes: default!(Option<i32>, "1000"),
+) -> Option<()> {
+    let p_function = p_function?;
     let actor = unsafe { pg_sys::GetOuterUserId() };
-    if !(1..=1000).contains(&p_max_scopes) {
-        pgrx::error!("assignment function max_scopes must be from 1 through 1000");
+    if let Some(max_scopes) = p_max_scopes {
+        if !(1..=1000).contains(&max_scopes) {
+            pgrx::error!("assignment function max_scopes must be from 1 through 1000");
+        }
     }
 
     Spi::connect_mut(|client| {
@@ -324,6 +330,7 @@ fn synchro_register_assignment_function(p_function: &str, p_max_scopes: default!
         Ok::<_, pgrx::spi::Error>(())
     })
     .unwrap_or_else(|error| pgrx::error!("registering assignment function: {}", error));
+    Some(())
 }
 
 #[pg_extern]
@@ -334,7 +341,7 @@ fn synchro_unregister_assignment_function() {
 
 struct AssignmentRegistration {
     function: RegisteredFunction,
-    max_scopes: i32,
+    max_scopes: Option<i32>,
     definition_sha256: String,
 }
 
@@ -367,9 +374,7 @@ fn load_assignment_registration(
             schema: text("function_schema")?,
             name: text("function_name")?,
         },
-        max_scopes: row
-            .get_by_name::<i32, &str>("max_scopes")?
-            .unwrap_or_else(|| pgrx::error!("registered assignment function bound is missing")),
+        max_scopes: row.get_by_name::<i32, &str>("max_scopes")?,
         definition_sha256: text("definition_sha256")?,
     }))
 }
@@ -431,8 +436,10 @@ pub(crate) fn load_assigned_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec
         if !assignment_definition_is_current(client, &registration)? {
             pgrx::error!("registered assignment function definition has drifted");
         }
-        let maximum = usize::try_from(registration.max_scopes)
-            .unwrap_or_else(|_| pgrx::error!("registered assignment function bound is invalid"));
+        let maximum = registration.max_scopes.map(|bound| {
+            usize::try_from(bound)
+                .unwrap_or_else(|_| pgrx::error!("registered assignment function bound is invalid"))
+        });
         // One row past the bound is enough to detect an exceeded bound.
         let query = format!(
             "SELECT assigned.scope_id
@@ -447,12 +454,15 @@ pub(crate) fn load_assigned_scopes(client: &SpiClient<'_>, user_id: &str) -> Vec
             client.select(
                 &query,
                 None,
-                &[user_id.into(), (registration.max_scopes + 1).into()],
+                &[
+                    user_id.into(),
+                    registration.max_scopes.map(|bound| bound + 1).into(),
+                ],
             )
         })?;
         let mut scopes = Vec::new();
         for row in rows {
-            if scopes.len() == maximum {
+            if maximum == Some(scopes.len()) {
                 pgrx::error!("assignment function exceeded its registered scope bound");
             }
             let scope_id = row

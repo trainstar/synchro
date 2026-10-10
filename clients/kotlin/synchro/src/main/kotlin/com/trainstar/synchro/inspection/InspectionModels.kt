@@ -4,6 +4,28 @@ import com.trainstar.synchro.RetainedMutationInspection
 import com.trainstar.synchro.RetainedRejectionInspection
 import com.trainstar.synchro.SchemaRef
 import com.trainstar.synchro.SyncFailure
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+@Serializable
+@SynchroProofApi
+data class MigrationJournalInspection(
+    val source: SchemaRef,
+    val target: SchemaRef,
+    val action: String,
+    val phase: String,
+    val stored: Map<String, String>,
+)
+
+@Serializable
+@SynchroProofApi
+data class PhysicalSchemaColumnInspection(
+    @SerialName("table_name") val tableName: String,
+    val name: String,
+    val type: String,
+    @SerialName("not_null") val notNull: Boolean,
+    @SerialName("primary_key_position") val primaryKeyPosition: Int,
+)
 
 /** A bounded read-only view of one durable server scope. */
 @SynchroProofApi
@@ -61,6 +83,12 @@ data class ClientStateCaptureInspection(
     val rebuildAttemptCount: Int,
     val rebuildReceiptCount: Int,
     val provenanceMaintenanceWorkCursor: Long,
+    val migrationJournal: MigrationJournalInspection? = null,
+    val migrationJournalTruncated: Boolean = false,
+    val physicalSchema: List<PhysicalSchemaColumnInspection> = emptyList(),
+    val physicalSchemaTruncated: Boolean = false,
+    val acceptedMutationOutcomes: Map<String, String> = emptyMap(),
+    val acceptedMutationOutcomesTruncated: Boolean = false,
 )
 
 /**

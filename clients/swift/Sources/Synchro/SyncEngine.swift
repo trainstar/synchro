@@ -234,21 +234,35 @@ final class SyncEngine: @unchecked Sendable {
                 throw SynchroError.blocked(failure)
             }
             if let existingFailure {
-                if getSyncStatus() != .error {
-                    try transition(to: .error, lifecycleGeneration: generation)
+                guard existingFailure.operation == .schema,
+                      existingFailure.code == .unsupportedSchema,
+                      existingFailure.recoveryAction == .schemaReset else {
+                    if getSyncStatus() != .error {
+                        try transition(to: .error, lifecycleGeneration: generation)
+                    }
+                    throw SynchroError.blocked(existingFailure)
                 }
-                throw SynchroError.blocked(existingFailure)
-            }
-            guard getSyncStatus() == .localReady else {
+            } else if getSyncStatus() != .localReady {
                 throw SynchroError.notStarted
             }
 
+            let recoveredMigration: Bool
             do {
-                _ = try schemaManager.recoverMigrationIfNeeded()
+                recoveredMigration = try schemaManager.recoverMigrationIfNeeded(requiringSchemaResetFor: existingFailure) != nil
                 try ensureLifecycleActive(generation)
+                if existingFailure != nil && getSyncStatus() != .localReady {
+                    try transition(to: .localReady, lifecycleGeneration: generation)
+                }
+            } catch let SynchroError.blocked(failure) {
+                try ensureLifecycleActive(generation)
+                if getSyncStatus() != .error {
+                    try transition(to: .error, lifecycleGeneration: generation)
+                }
+                throw SynchroError.blocked(failure)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try ensureLifecycleActive(generation)
                 let failure = blockingFailure(
                     for: error,
                     operation: .schema,
@@ -263,7 +277,8 @@ final class SyncEngine: @unchecked Sendable {
             try await launchReservedStart(
                 options: options,
                 generation: generation,
-                schemaReset: false
+                schemaReset: false,
+                recoveredMigration: recoveredMigration
             )
         } catch {
             teardownAfterFailedStart(generation)
@@ -274,7 +289,8 @@ final class SyncEngine: @unchecked Sendable {
     private func launchReservedStart(
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool = false
     ) async throws {
         // Clear sync lock in case of prior crash
         try database.writeTransaction { db in
@@ -299,7 +315,8 @@ final class SyncEngine: @unchecked Sendable {
                     startupGate: startupGate,
                     options: options,
                     generation: generation,
-                    schemaReset: schemaReset
+                    schemaReset: schemaReset,
+                    recoveredMigration: recoveredMigration
                 )
             }
             return true
@@ -485,7 +502,8 @@ final class SyncEngine: @unchecked Sendable {
         startupGate: StartupGate,
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool
     ) async {
         guard beginManagedOperation(generation: generation) else {
             await startupGate.succeed()
@@ -496,7 +514,8 @@ final class SyncEngine: @unchecked Sendable {
             startupGate: startupGate,
             options: options,
             generation: generation,
-            schemaReset: schemaReset
+            schemaReset: schemaReset,
+            recoveredMigration: recoveredMigration
         )
         guard startupCompleted else { return }
         await syncLoop(generation: generation)
@@ -506,7 +525,8 @@ final class SyncEngine: @unchecked Sendable {
         startupGate: StartupGate,
         options: SyncOptions?,
         generation: Int64,
-        schemaReset: Bool
+        schemaReset: Bool,
+        recoveredMigration: Bool
     ) async -> Bool {
         var gateResolved = false
         var deferredCycles = 0
@@ -515,6 +535,9 @@ final class SyncEngine: @unchecked Sendable {
         var replayCycleBackoff: LocalBackoffRecord?
 
         do {
+            if recoveredMigration {
+                try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.committed)
+            }
             if let recoveredBackoff = try loadPersistedBackoff() {
                 if isFutureDeadline(recoveredBackoff) {
                     emitBackoffEvent(recoveredBackoff)
@@ -1244,7 +1267,7 @@ final class SyncEngine: @unchecked Sendable {
                     rebuildID: attempt.rebuildID
                 )))
                 return
-            } catch is RebuildChecksumMismatchError {
+            } catch is ScopeChecksumMismatchError {
                 attempt = try restartScopeRebuild(scopeID: scopeID)
                 replayRequestBody = nil
             } catch let error as RebuildRestartRequiredError {
@@ -1379,6 +1402,7 @@ final class SyncEngine: @unchecked Sendable {
                 scopeCursorUpdates: response.scopeCursorUpdates,
                 schemaReset: try loadBlockingFailure()?.recoveryAction == .schemaReset
             )
+            try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.prepared)
         } else {
             schemaEvent = nil
         }
@@ -1421,6 +1445,9 @@ final class SyncEngine: @unchecked Sendable {
                     workIdentity: completedConnectRequestJSON
                 )
             }
+        }
+        if schemaChanged {
+            try await config.transportObservationCollector?.pauseIfArmed(for: MigrationCheckpoint.committed)
         }
         database.updateApplicationSyncedTables(connectSchema.tables)
         if let schemaEvent {

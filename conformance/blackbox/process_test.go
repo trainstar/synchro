@@ -538,20 +538,24 @@ func TestNormalizeHarnessConfigValidatesUpdateBaseline(t *testing.T) {
 	if _, err := normalizeHarnessConfig(HarnessConfig{Environment: attached}); err != nil {
 		t.Fatalf("attached environment without update baseline was rejected: %v", err)
 	}
-	normalized, err := normalizeHarnessConfig(HarnessConfig{
-		Environment:                     owned,
-		UpdateBaselineExtensionArtifact: filepath.Join("relative", "baseline"),
-		UpdateBaselineExtensionVersion:  updateBaselineVersionFixture,
-	})
-	if err != nil {
-		t.Fatalf("valid update baseline configuration was rejected: %v", err)
-	}
 	expectedArtifact, err := filepath.Abs(filepath.Join("relative", "baseline"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if normalized.UpdateBaselineExtensionArtifact != expectedArtifact || normalized.UpdateBaselineExtensionVersion != updateBaselineVersionFixture {
-		t.Fatalf("normalized update baseline = %q %q", normalized.UpdateBaselineExtensionArtifact, normalized.UpdateBaselineExtensionVersion)
+	for _, version := range []string{updateBaselineVersionFixture, "0.4.0-rc.1", "0.4.0-rc.12"} {
+		t.Run(version, func(t *testing.T) {
+			normalized, err := normalizeHarnessConfig(HarnessConfig{
+				Environment:                     owned,
+				UpdateBaselineExtensionArtifact: filepath.Join("relative", "baseline"),
+				UpdateBaselineExtensionVersion:  version,
+			})
+			if err != nil {
+				t.Fatalf("valid update baseline configuration was rejected: %v", err)
+			}
+			if normalized.UpdateBaselineExtensionArtifact != expectedArtifact || normalized.UpdateBaselineExtensionVersion != version {
+				t.Fatalf("normalized update baseline = %q %q", normalized.UpdateBaselineExtensionArtifact, normalized.UpdateBaselineExtensionVersion)
+			}
+		})
 	}
 	for _, test := range []struct {
 		name        string
@@ -565,6 +569,11 @@ func TestNormalizeHarnessConfigValidatesUpdateBaseline(t *testing.T) {
 		{name: "leading zero version", environment: owned, artifact: "/baseline", version: "0.0.01"},
 		{name: "prefixed version", environment: owned, artifact: "/baseline", version: "v0.0.1"},
 		{name: "partial version", environment: owned, artifact: "/baseline", version: "0.1"},
+		{name: "zero candidate", environment: owned, artifact: "/baseline", version: "0.4.0-rc.0"},
+		{name: "leading zero candidate", environment: owned, artifact: "/baseline", version: "0.4.0-rc.01"},
+		{name: "candidate without dot", environment: owned, artifact: "/baseline", version: "0.4.0-rc1"},
+		{name: "beta candidate", environment: owned, artifact: "/baseline", version: "0.4.0-beta.1"},
+		{name: "candidate build suffix", environment: owned, artifact: "/baseline", version: "0.4.0-rc.1+build"},
 		{name: "release version", environment: owned, artifact: "/baseline", version: release.Version},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 const (
@@ -31,27 +32,28 @@ const (
 // Request is one Kotlin instrumentation command.
 // Execute always sets SchemaVersion to the current value.
 type Request struct {
-	SchemaVersion         int            `json:"schema_version"`
-	Operation             string         `json:"operation"`
-	SessionID             string         `json:"session_id"`
-	DatabaseKey           string         `json:"database_key,omitempty"`
-	DatabaseMode          string         `json:"database_mode,omitempty"`
-	ServerURL             string         `json:"server_url,omitempty"`
-	AuthToken             string         `json:"auth_token,omitempty"`
-	ClientID              string         `json:"client_id,omitempty"`
-	SeedDatabaseName      string         `json:"seed_database_name,omitempty"`
-	Platform              string         `json:"platform,omitempty"`
-	AppVersion            string         `json:"app_version,omitempty"`
-	PullPageSize          int            `json:"pull_page_size,omitempty"`
-	PushBatchSize         int            `json:"push_batch_size,omitempty"`
-	TransportCapacity     int            `json:"transport_capacity,omitempty"`
-	LocalAction           *LocalAction   `json:"local_action,omitempty"`
-	LifecycleOperation    string         `json:"lifecycle_operation,omitempty"`
-	TransportOperation    string         `json:"transport_operation,omitempty"`
-	RebuildCursorOverride string         `json:"rebuild_cursor_override,omitempty"`
-	CallID                string         `json:"call_id,omitempty"`
-	Method                string         `json:"method,omitempty"`
-	RowSelectors          *[]RowSelector `json:"row_selectors,omitempty"`
+	SchemaVersion         int                           `json:"schema_version"`
+	Operation             string                        `json:"operation"`
+	SessionID             string                        `json:"session_id"`
+	DatabaseKey           string                        `json:"database_key,omitempty"`
+	DatabaseMode          string                        `json:"database_mode,omitempty"`
+	ServerURL             string                        `json:"server_url,omitempty"`
+	AuthToken             string                        `json:"auth_token,omitempty"`
+	ClientID              string                        `json:"client_id,omitempty"`
+	SeedDatabaseName      string                        `json:"seed_database_name,omitempty"`
+	LocalFixture          *scenarios.NativeLocalFixture `json:"local_fixture,omitempty"`
+	Platform              string                        `json:"platform,omitempty"`
+	AppVersion            string                        `json:"app_version,omitempty"`
+	PullPageSize          int                           `json:"pull_page_size,omitempty"`
+	PushBatchSize         int                           `json:"push_batch_size,omitempty"`
+	TransportCapacity     int                           `json:"transport_capacity,omitempty"`
+	LocalAction           *LocalAction                  `json:"local_action,omitempty"`
+	LifecycleOperation    string                        `json:"lifecycle_operation,omitempty"`
+	TransportOperation    string                        `json:"transport_operation,omitempty"`
+	RebuildCursorOverride string                        `json:"rebuild_cursor_override,omitempty"`
+	CallID                string                        `json:"call_id,omitempty"`
+	Method                string                        `json:"method,omitempty"`
+	RowSelectors          *[]RowSelector                `json:"row_selectors,omitempty"`
 }
 
 // LocalAction is one direct application write through Kotlin instrumentation.
@@ -84,48 +86,55 @@ type TypedValue struct {
 // Inspection payloads stay raw until a semantic test requests their shape.
 // Failures are validated when the result is decoded.
 type Result struct {
-	Status                          *string                       `json:"status"`
-	RowsAffected                    *int                          `json:"rows_affected"`
-	RetainedDeleteCaptured          *bool                         `json:"retained_delete_captured"`
-	PendingChangeCount              *int                          `json:"pending_change_count"`
-	ApplicationRowCount             *int                          `json:"application_row_count"`
-	MutationLedgerCount             *int                          `json:"mutation_ledger_count"`
-	RetainedMutationCount           *int                          `json:"retained_mutation_count"`
-	MutationOutcomeCount            *int                          `json:"mutation_outcome_count"`
-	SealedBatchCount                *int                          `json:"sealed_batch_count"`
-	RejectedMutationCount           *int                          `json:"rejected_mutation_count"`
-	ScopeStateCount                 *int                          `json:"scope_state_count"`
-	ScopeRowCount                   *int                          `json:"scope_row_count"`
-	ProvenanceCount                 *int                          `json:"provenance_count"`
-	RowMetadataCount                *int                          `json:"row_metadata_count"`
-	RebuildAttemptCount             *int                          `json:"rebuild_attempt_count"`
-	RebuildReceiptCount             *int                          `json:"rebuild_receipt_count"`
-	DurableStateFingerprint         string                        `json:"durable_state_fingerprint"`
-	Schema                          json.RawMessage               `json:"schema"`
-	ApplicationRows                 json.RawMessage               `json:"application_rows"`
-	ApplicationRowStorageClasses    json.RawMessage               `json:"application_row_storage_classes"`
-	RetainedMutations               json.RawMessage               `json:"retained_mutations"`
-	RejectedMutations               json.RawMessage               `json:"rejected_mutations"`
-	ScopeStates                     json.RawMessage               `json:"scope_states"`
-	ScopeRows                       json.RawMessage               `json:"scope_rows"`
-	RowMetadata                     json.RawMessage               `json:"row_metadata"`
-	Checkpoints                     json.RawMessage               `json:"checkpoints"`
-	Provenance                      json.RawMessage               `json:"provenance"`
-	RebuildAttempts                 json.RawMessage               `json:"rebuild_attempts"`
-	RebuildReceipts                 json.RawMessage               `json:"rebuild_receipts"`
-	RebuildReceiptProofs            json.RawMessage               `json:"rebuild_receipt_proofs"`
-	ProvenanceMaintenanceWorkCursor *int64                        `json:"provenance_maintenance_work_cursor"`
-	Events                          json.RawMessage               `json:"events"`
-	EventsOverflowed                bool                          `json:"events_overflowed"`
-	Failure                         *runnerFailure                `json:"failure"`
-	TransportMilestone              json.RawMessage               `json:"transport_milestone"`
-	TransportObservations           *TransportObservationSnapshot `json:"transport_observations"`
-	CallID                          *string                       `json:"call_id"`
-	State                           *string                       `json:"state"`
-	Completion                      *string                       `json:"completion"`
-	CallErrorCategory               *string                       `json:"call_error_category"`
-	ProcessID                       string                        `json:"process_id"`
-	DatabaseIdentityFingerprint     string                        `json:"database_identity_fingerprint"`
+	Status                            *string                       `json:"status"`
+	RowsAffected                      *int                          `json:"rows_affected"`
+	RetainedDeleteCaptured            *bool                         `json:"retained_delete_captured"`
+	PendingChangeCount                *int                          `json:"pending_change_count"`
+	ApplicationRowCount               *int                          `json:"application_row_count"`
+	MutationLedgerCount               *int                          `json:"mutation_ledger_count"`
+	RetainedMutationCount             *int                          `json:"retained_mutation_count"`
+	MutationOutcomeCount              *int                          `json:"mutation_outcome_count"`
+	SealedBatchCount                  *int                          `json:"sealed_batch_count"`
+	RejectedMutationCount             *int                          `json:"rejected_mutation_count"`
+	ScopeStateCount                   *int                          `json:"scope_state_count"`
+	ScopeRowCount                     *int                          `json:"scope_row_count"`
+	ProvenanceCount                   *int                          `json:"provenance_count"`
+	RowMetadataCount                  *int                          `json:"row_metadata_count"`
+	RebuildAttemptCount               *int                          `json:"rebuild_attempt_count"`
+	RebuildReceiptCount               *int                          `json:"rebuild_receipt_count"`
+	DurableStateFingerprint           string                        `json:"durable_state_fingerprint"`
+	Schema                            json.RawMessage               `json:"schema"`
+	ApplicationRows                   json.RawMessage               `json:"application_rows"`
+	ApplicationRowStorageClasses      json.RawMessage               `json:"application_row_storage_classes"`
+	RetainedMutations                 json.RawMessage               `json:"retained_mutations"`
+	AcceptedMutationOutcomes          acceptedMutationOutcomes      `json:"accepted_mutation_outcomes,omitempty"`
+	AcceptedMutationOutcomesTruncated *bool                         `json:"accepted_mutation_outcomes_truncated,omitempty"`
+	RejectedMutations                 json.RawMessage               `json:"rejected_mutations"`
+	ScopeStates                       json.RawMessage               `json:"scope_states"`
+	ScopeRows                         json.RawMessage               `json:"scope_rows"`
+	RowMetadata                       json.RawMessage               `json:"row_metadata"`
+	Checkpoints                       json.RawMessage               `json:"checkpoints"`
+	Provenance                        json.RawMessage               `json:"provenance"`
+	RebuildAttempts                   json.RawMessage               `json:"rebuild_attempts"`
+	RebuildReceipts                   json.RawMessage               `json:"rebuild_receipts"`
+	RebuildReceiptProofs              json.RawMessage               `json:"rebuild_receipt_proofs"`
+	ProvenanceMaintenanceWorkCursor   *int64                        `json:"provenance_maintenance_work_cursor"`
+	Events                            json.RawMessage               `json:"events"`
+	EventsOverflowed                  bool                          `json:"events_overflowed"`
+	CaptureOverflowed                 *bool                         `json:"capture_overflowed,omitempty"`
+	MigrationJournal                  json.RawMessage               `json:"migration_journal,omitempty"`
+	MigrationJournalTruncated         *bool                         `json:"migration_journal_truncated,omitempty"`
+	PhysicalSchema                    json.RawMessage               `json:"physical_schema,omitempty"`
+	PhysicalSchemaTruncated           *bool                         `json:"physical_schema_truncated,omitempty"`
+	Failure                           *runnerFailure                `json:"failure"`
+	TransportMilestone                json.RawMessage               `json:"transport_milestone"`
+	TransportObservations             *TransportObservationSnapshot `json:"transport_observations"`
+	CallID                            *string                       `json:"call_id"`
+	State                             *string                       `json:"state"`
+	Completion                        *string                       `json:"completion"`
+	CallErrorCategory                 *string                       `json:"call_error_category"`
+	ProcessID                         string                        `json:"process_id"`
+	DatabaseIdentityFingerprint       string                        `json:"database_identity_fingerprint"`
 }
 
 type runnerFailure struct {
@@ -220,6 +229,57 @@ type TransportObservation struct {
 	RequestFacts               *TransportRequestFacts         `json:"request_facts"`
 	RebuildResponseFacts       *TransportRebuildResponseFacts `json:"rebuild_response_facts"`
 	PullResponseFacts          *TransportPullResponseFacts    `json:"pull_response_facts"`
+	ConnectResponseFacts       *TransportConnectResponseFacts `json:"connect_response_facts"`
+}
+
+type TransportConnectResponseFacts struct {
+	Action                     string             `json:"action"`
+	SchemaVersion              int64              `json:"schema_version"`
+	SchemaHash                 string             `json:"schema_hash"`
+	AffectedScopeFingerprints  []string           `json:"affected_scope_fingerprints"`
+	AffectedScopesComplete     bool               `json:"affected_scopes_complete"`
+	ScopeCursorUpdates         map[string]*string `json:"scope_cursor_updates"`
+	ScopeCursorUpdatesComplete bool               `json:"scope_cursor_updates_complete"`
+}
+
+func (f *TransportConnectResponseFacts) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *int64              `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	if jsonstrict.ValidateValue(data) != nil || decodeStrict(data, &raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return errors.New("decode Kotlin connect response facts failed")
+	}
+	f.Action = *raw.Action
+	f.SchemaVersion = *raw.SchemaVersion
+	f.SchemaHash = *raw.SchemaHash
+	f.AffectedScopeFingerprints = *raw.AffectedScopeFingerprints
+	f.AffectedScopesComplete = *raw.AffectedScopesComplete
+	f.ScopeCursorUpdates = *raw.ScopeCursorUpdates
+	f.ScopeCursorUpdatesComplete = *raw.ScopeCursorUpdatesComplete
+	return f.validate()
+}
+
+func (f *TransportConnectResponseFacts) validate() error {
+	switch f.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return errors.New("Kotlin connect response action is invalid")
+	}
+	if f.SchemaVersion <= 0 || !validLowerHexDigest(f.SchemaHash) || f.AffectedScopeFingerprints == nil || !validCursorFingerprintSet(f.AffectedScopeFingerprints) || f.ScopeCursorUpdates == nil || len(f.ScopeCursorUpdates) > 16 {
+		return errors.New("Kotlin connect response facts are invalid")
+	}
+	for scope, cursor := range f.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return errors.New("Kotlin connect cursor updates are invalid")
+		}
+	}
+	return nil
 }
 
 type TransportRequestFacts struct {
@@ -401,6 +461,12 @@ func writeAll(writer io.Writer, data []byte) error {
 }
 
 func validateRequest(request Request) error {
+	if err := scenarios.ValidateNativeLocalFixture(request.LocalFixture); err != nil {
+		return err
+	}
+	if request.LocalFixture != nil && (request.Operation != "open" || request.DatabaseMode != "create" || request.SeedDatabaseName != "") {
+		return errors.New("local fixture requires an initial empty open")
+	}
 	if request.SchemaVersion != 1 || request.Operation == "" || !validSessionID(request.SessionID) {
 		return errors.New("Kotlin instrumentation command is invalid")
 	}
@@ -433,7 +499,7 @@ func validateRequest(request Request) error {
 			return errors.New("Kotlin lifecycle command is invalid")
 		}
 	case "arm-transport-pause", "await-transport-pause":
-		if request.LocalAction != nil || request.LifecycleOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil || !validTransportOperation(request.TransportOperation) {
+		if request.LocalAction != nil || request.LifecycleOperation != "" || request.CallID != "" || request.Method != "" || request.RowSelectors != nil || (!validTransportOperation(request.TransportOperation) && request.TransportOperation != "migration_prepared" && request.TransportOperation != "migration_committed") {
 			return errors.New("Kotlin transport pause command is invalid")
 		}
 	case "resume-transport-pause", "transport-snapshot":
@@ -765,7 +831,182 @@ func decodeResult(data []byte) (Result, error) {
 	if err := validateTransportSnapshot(result.TransportObservations); err != nil {
 		return Result{}, err
 	}
+	if err := result.validateMigrationCapture(); err != nil {
+		return Result{}, err
+	}
+	if err := result.validateAcceptedMutationOutcomes(); err != nil {
+		return Result{}, err
+	}
 	return result, nil
+}
+
+type acceptedMutationOutcomes map[string]string
+
+func (values *acceptedMutationOutcomes) UnmarshalJSON(raw []byte) error {
+	var decoded map[string]*string
+	wrapped := append(append([]byte(`{"outcomes":`), raw...), '}')
+	if jsonstrict.ValidateValue(wrapped) != nil || json.Unmarshal(raw, &decoded) != nil || decoded == nil || len(decoded) > maximumRecords {
+		return errors.New("accepted mutation outcomes map is invalid or out of bounds")
+	}
+	result := make(acceptedMutationOutcomes, len(decoded))
+	size := 0
+	for id, outcome := range decoded {
+		if id == "" || len(id) > 256 || outcome == nil {
+			return errors.New("accepted mutation outcome entry is invalid")
+		}
+		size += len(id) + len(*outcome)
+		if size > 65_536 {
+			return errors.New("accepted mutation outcomes bytes are out of bounds")
+		}
+		var identity struct {
+			MutationID    string    `json:"mutation_id"`
+			Status        string    `json:"status"`
+			Schema        schemaRef `json:"outcome_schema"`
+			ServerVersion string    `json:"server_version"`
+		}
+		if jsonstrict.ValidateValue([]byte(*outcome)) != nil || json.Unmarshal([]byte(*outcome), &identity) != nil || identity.MutationID != id || identity.Status != "applied" || identity.ServerVersion == "" || identity.Schema.Version <= 0 || !validLowerHexDigest(identity.Schema.Hash) {
+			return errors.New("stored accepted outcome identity is invalid")
+		}
+		result[id] = *outcome
+	}
+	*values = result
+	return nil
+}
+
+func (result Result) validateAcceptedMutationOutcomes() error {
+	if result.AcceptedMutationOutcomes == nil && result.AcceptedMutationOutcomesTruncated == nil {
+		return nil
+	}
+	if result.AcceptedMutationOutcomes == nil || result.AcceptedMutationOutcomesTruncated == nil {
+		return errors.New("accepted outcome capture fields are incomplete")
+	}
+	encoded, err := json.Marshal(result.AcceptedMutationOutcomes)
+	if err != nil {
+		return err
+	}
+	var checked acceptedMutationOutcomes
+	return json.Unmarshal(encoded, &checked)
+}
+
+func (result Result) requireCompleteAcceptedMutationOutcomes() error {
+	var retained []retainedMutation
+	if json.Unmarshal(result.RetainedMutations, &retained) != nil || retained == nil || result.AcceptedMutationOutcomes == nil || result.AcceptedMutationOutcomesTruncated == nil || *result.AcceptedMutationOutcomesTruncated || result.MutationLedgerCount == nil || len(retained)+len(result.AcceptedMutationOutcomes) != *result.MutationLedgerCount {
+		return errors.New("accepted outcome capture is incomplete or does not close the ledger")
+	}
+	return result.validateAcceptedMutationOutcomes()
+}
+
+type migrationJournalCapture struct {
+	Source schemaRef         `json:"source"`
+	Target schemaRef         `json:"target"`
+	Action string            `json:"action"`
+	Phase  string            `json:"phase"`
+	Stored map[string]string `json:"stored"`
+}
+
+func decodeMigrationJournal(raw json.RawMessage) (*migrationJournalCapture, error) {
+	if isJSONNull(raw) {
+		return nil, nil
+	}
+	var value struct {
+		Source *struct {
+			Version *int64  `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"source"`
+		Target *struct {
+			Version *int64  `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"target"`
+		Action *string             `json:"action"`
+		Phase  *string             `json:"phase"`
+		Stored *map[string]*string `json:"stored"`
+	}
+	if jsonstrict.ValidateValue(raw) != nil || decodeStrict(raw, &value) != nil || value.Source == nil || value.Target == nil || value.Source.Version == nil || value.Source.Hash == nil || value.Target.Version == nil || value.Target.Hash == nil || value.Action == nil || value.Phase == nil || value.Stored == nil {
+		return nil, errors.New("migration journal capture is incomplete or invalid")
+	}
+	if *value.Source.Version < 0 || (*value.Source.Version == 0) != (*value.Source.Hash == "") || *value.Source.Version > 0 && !validLowerHexDigest(*value.Source.Hash) || *value.Target.Version <= 0 || !validLowerHexDigest(*value.Target.Hash) || (*value.Action != "replace" && *value.Action != "rebuild_local") || (*value.Phase != "prepared" && *value.Phase != "ddl_applied" && *value.Phase != "awaiting_rebuild") {
+		return nil, errors.New("migration journal capture header is invalid")
+	}
+	keys := []string{"journal_version", "target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json", "target_tables_json", "migration_plan_version", "migration_plan_json", "migration_plan_hash", "reset_materialization"}
+	if len(*value.Stored) != len(keys) {
+		return nil, errors.New("migration journal stored fields are invalid")
+	}
+	stored := make(map[string]string, len(keys))
+	size := len(*value.Action) + len(*value.Phase) + len(*value.Source.Hash) + len(*value.Target.Hash)
+	for _, key := range keys {
+		text, found := (*value.Stored)[key]
+		if !found || text == nil {
+			return nil, errors.New("migration journal stored field is absent or invalid")
+		}
+		size += len(*text)
+		stored[key] = *text
+	}
+	if size > 65_536 {
+		return nil, errors.New("migration journal capture is out of bounds")
+	}
+	return &migrationJournalCapture{Source: schemaRef{Version: *value.Source.Version, Hash: *value.Source.Hash}, Target: schemaRef{Version: *value.Target.Version, Hash: *value.Target.Hash}, Action: *value.Action, Phase: *value.Phase, Stored: stored}, nil
+}
+
+type physicalSchemaColumn struct {
+	TableName          string `json:"table_name"`
+	Name               string `json:"name"`
+	Type               string `json:"type"`
+	NotNull            bool   `json:"not_null"`
+	PrimaryKeyPosition int    `json:"primary_key_position"`
+}
+
+func decodePhysicalSchema(raw json.RawMessage) ([]physicalSchemaColumn, error) {
+	var values []struct {
+		TableName          *string `json:"table_name"`
+		Name               *string `json:"name"`
+		Type               *string `json:"type"`
+		NotNull            *bool   `json:"not_null"`
+		PrimaryKeyPosition *int    `json:"primary_key_position"`
+	}
+	wrapped := append(append([]byte(`{"columns":`), raw...), '}')
+	if jsonstrict.ValidateValue(wrapped) != nil || decodeStrict(raw, &values) != nil || values == nil || len(values) > maximumRecords {
+		return nil, errors.New("physical schema capture is absent or out of bounds")
+	}
+	columns := make([]physicalSchemaColumn, 0, len(values))
+	seen := make(map[[2]string]bool, len(values))
+	size := 0
+	for _, value := range values {
+		if value.TableName == nil || value.Name == nil || value.Type == nil || value.NotNull == nil || value.PrimaryKeyPosition == nil || *value.TableName == "" || *value.Name == "" || *value.PrimaryKeyPosition < 0 || *value.PrimaryKeyPosition > maximumRecords {
+			return nil, errors.New("physical schema column is incomplete or invalid")
+		}
+		key := [2]string{*value.TableName, *value.Name}
+		if seen[key] {
+			return nil, errors.New("physical schema column is duplicated")
+		}
+		seen[key] = true
+		size += len(*value.TableName) + len(*value.Name) + len(*value.Type)
+		columns = append(columns, physicalSchemaColumn{TableName: *value.TableName, Name: *value.Name, Type: *value.Type, NotNull: *value.NotNull, PrimaryKeyPosition: *value.PrimaryKeyPosition})
+	}
+	if size > 65_536 {
+		return nil, errors.New("physical schema capture is out of bounds")
+	}
+	return columns, nil
+}
+
+func (result Result) validateMigrationCapture() error {
+	if len(result.MigrationJournal) == 0 && result.MigrationJournalTruncated == nil && len(result.PhysicalSchema) == 0 && result.PhysicalSchemaTruncated == nil {
+		return nil
+	}
+	if len(result.MigrationJournal) == 0 || result.MigrationJournalTruncated == nil || len(result.PhysicalSchema) == 0 || result.PhysicalSchemaTruncated == nil {
+		return errors.New("migration capture fields are incomplete")
+	}
+	if _, err := decodeMigrationJournal(result.MigrationJournal); err != nil {
+		return err
+	}
+	_, err := decodePhysicalSchema(result.PhysicalSchema)
+	return err
+}
+
+func (result Result) requireCompleteMigrationCapture() error {
+	if result.CaptureOverflowed == nil || *result.CaptureOverflowed || len(result.MigrationJournal) == 0 || result.MigrationJournalTruncated == nil || *result.MigrationJournalTruncated || len(result.PhysicalSchema) == 0 || result.PhysicalSchemaTruncated == nil || *result.PhysicalSchemaTruncated {
+		return errors.New("migration capture is missing or truncated")
+	}
+	return result.validateMigrationCapture()
 }
 
 func decodeStrict(data []byte, target any) error {
@@ -809,6 +1050,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 		RequestFacts               *TransportRequestFacts         `json:"request_facts"`
 		RebuildResponseFacts       *TransportRebuildResponseFacts `json:"rebuild_response_facts"`
 		PullResponseFacts          *TransportPullResponseFacts    `json:"pull_response_facts"`
+		ConnectResponseFacts       *TransportConnectResponseFacts `json:"connect_response_facts"`
 	}
 	if err := decodeStrict(data, &raw); err != nil || raw.Sequence == nil || raw.OperationClass == nil || raw.StatusCode == nil || len(raw.ErrorCode) == 0 || len(raw.Retryable) == 0 || raw.DurationNanoseconds == nil {
 		return errors.New("decode Kotlin transport observation failed")
@@ -838,6 +1080,7 @@ func (o *TransportObservation) UnmarshalJSON(data []byte) error {
 	o.RequestFacts = raw.RequestFacts
 	o.RebuildResponseFacts = raw.RebuildResponseFacts
 	o.PullResponseFacts = raw.PullResponseFacts
+	o.ConnectResponseFacts = raw.ConnectResponseFacts
 	return nil
 }
 
@@ -952,6 +1195,15 @@ func validateTransportObservation(observation TransportObservation) error {
 	if err := validateTransportRequestAndResponseFacts(observation); err != nil {
 		return err
 	}
+	if observation.OperationClass == "connect" {
+		if observation.CursorFingerprints == nil && observation.CursorFingerprintsComplete == nil {
+			return nil
+		}
+		if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+			return errors.New("Kotlin connect cursor fingerprints are invalid")
+		}
+		return nil
+	}
 	if observation.OperationClass != "pull" {
 		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 			return errors.New("Kotlin transport cursor fingerprints are not pull evidence")
@@ -990,6 +1242,11 @@ func transportErrorRetryable(code string) bool {
 }
 
 func validateTransportRequestAndResponseFacts(observation TransportObservation) error {
+	if response := observation.ConnectResponseFacts; response != nil {
+		if observation.OperationClass != "connect" || observation.StatusCode != 200 || response.validate() != nil {
+			return errors.New("Kotlin connect response facts are invalid")
+		}
+	}
 	facts := observation.RequestFacts
 	switch observation.OperationClass {
 	case "connect":
@@ -1145,6 +1402,15 @@ func cloneObservation(value TransportObservation) TransportObservation {
 		response := *value.PullResponseFacts
 		response.ScopeCursorFingerprints = append([]string(nil), value.PullResponseFacts.ScopeCursorFingerprints...)
 		copy.PullResponseFacts = &response
+	}
+	if value.ConnectResponseFacts != nil {
+		response := *value.ConnectResponseFacts
+		response.AffectedScopeFingerprints = cloneFingerprintSet(response.AffectedScopeFingerprints)
+		response.ScopeCursorUpdates = make(map[string]*string, len(value.ConnectResponseFacts.ScopeCursorUpdates))
+		for scope, cursor := range value.ConnectResponseFacts.ScopeCursorUpdates {
+			response.ScopeCursorUpdates[scope] = clonePointer(cursor)
+		}
+		copy.ConnectResponseFacts = &response
 	}
 	if value.RequestFacts != nil {
 		facts := *value.RequestFacts

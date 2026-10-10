@@ -212,6 +212,80 @@ func TestRunLifecycleUsesOwnedControlProtocolAndSameRunDestroyIsIdempotent(t *te
 	}
 }
 
+func TestRunLifecycleRejectsUnsuccessfulDestroyResponses(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response lifecycleResponse
+	}{
+		{"destroy error", lifecycleResponse{Destroyed: true, Error: "lifecycle destroy failed"}},
+		{"destruction not confirmed", lifecycleResponse{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stateDir := filepath.Join(t.TempDir(), "state")
+			if err := ensurePrivateDirectory(stateDir); err != nil {
+				t.Fatal(err)
+			}
+			runID := strings.Repeat("e", 32)
+			listener, err := openLifecycleListener()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeLifecycleState(stateDir, lifecycleState{
+				RunID:          runID,
+				ControlAddress: listener.Addr().String(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			peerResult := make(chan error, 1)
+			go func() {
+				connection, err := listener.AcceptTCP()
+				if err != nil {
+					peerResult <- err
+					return
+				}
+				defer connection.Close()
+				if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					peerResult <- err
+					return
+				}
+				data, err := io.ReadAll(connection)
+				if err != nil {
+					peerResult <- err
+					return
+				}
+				var request lifecycleRequest
+				if err := json.Unmarshal(data, &request); err != nil {
+					peerResult <- err
+					return
+				}
+				if request.Operation != "destroy" || request.RunID != runID {
+					peerResult <- errors.New("unexpected lifecycle destroy request")
+					return
+				}
+				response := tt.response
+				response.RunID = runID
+				peerResult <- writeLifecycleWireResponse(connection, response)
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = runLifecycle(ctx, []string{"--state-dir", stateDir, "destroy", runID})
+			if peerErr := <-peerResult; peerErr != nil {
+				t.Fatalf("lifecycle peer failed: %v", peerErr)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("lifecycle context failed: %v", ctx.Err())
+			}
+			if err == nil {
+				t.Fatal("destroy accepted an unsuccessful response")
+			}
+		})
+	}
+}
+
 func TestRunLifecycleCancellationUnblocksStalledPeer(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	if err := ensurePrivateDirectory(stateDir); err != nil {
