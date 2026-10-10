@@ -3251,15 +3251,27 @@ func (c *NativeController) materializeSourceTransaction(ctx context.Context, ope
 func (c *NativeController) awaitApplicationPushRecords(ctx context.Context, transaction *nativeTransactionBinding) error {
 	deadline, cancel := context.WithTimeout(ctx, c.waitTimeout)
 	defer cancel()
+	var lastErr error
 	for {
+		if deadline.Err() != nil {
+			break
+		}
 		resolveErr := c.resolveApplicationPushRecords(deadline, transaction)
 		if resolveErr == nil {
 			return nil
 		}
+		if deadline.Err() != nil {
+			break
+		}
+		lastErr = resolveErr
 		if err := waitNativePoll(deadline); err != nil {
-			return fmt.Errorf("native application push records did not resolve: %w", resolveErr)
+			break
 		}
 	}
+	if lastErr != nil {
+		return fmt.Errorf("native application push records did not resolve: %w (context: %w)", lastErr, deadline.Err())
+	}
+	return fmt.Errorf("native application push records did not resolve: %w", deadline.Err())
 }
 
 // resolveApplicationPushRecords binds an application push to the current
