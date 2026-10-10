@@ -3431,6 +3431,7 @@ func (c *NativeController) bindApplicationPushRecords(transaction *nativeTransac
 			// The accepted write replaced the source row that the image models,
 			// unless a later source change already replaced that image.
 			if event.Before != nil && reflect.DeepEqual(record.Image, *event.Before) {
+				record.Table = event.Table
 				record.Image = *event.After
 			}
 			continue

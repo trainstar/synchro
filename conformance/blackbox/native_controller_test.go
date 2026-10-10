@@ -793,6 +793,9 @@ func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T)
 
 func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.T) {
 	controller := nativeApplicationPushChangeController("deleted_at")
+	currentTable := controller.installation.tables["items"]
+	currentTable.Fields = map[string]string{"id": "runtime-id", "owner": "runtime-owner", "value": "runtime-value", "note": "runtime-note"}
+	controller.installation.tables["items"] = currentTable
 	operation := scenarios.Operation{
 		ContractOperation: "push",
 		Name:              "submit",
@@ -811,7 +814,7 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 					"op":"update",
 					"base_version":"server-version",
 					"client_version":"2026-08-11T00:00:01.000000Z",
-					"columns":{"value":"pending-updated"}
+					"columns":{"value":"pending-updated","note":"added-note"}
 				}]
 			},
 			"delivery":"apply",
@@ -834,7 +837,7 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 	if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
 		t.Fatalf("application update before image = %#v, want materialized prior image", event.Before)
 	}
-	if string(event.After.Fields["value"]) != `"pending-updated"` || string(event.After.Fields["owner"]) != `"user-a"` || event.After.Version != "" || event.After.Checksum != "" {
+	if string(event.After.Fields["value"]) != `"pending-updated"` || string(event.After.Fields["note"]) != `"added-note"` || string(event.After.Fields["owner"]) != `"user-a"` || event.After.Version != "" || event.After.Checksum != "" {
 		t.Fatalf("application update after image = %#v, want merged unmaterialized image", event.After)
 	}
 	if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
@@ -843,6 +846,14 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 	record := controller.records[nativeRecordKey("items", `"pending-row"`)]
 	if record == nil || string(record.Image.Fields["value"]) != `"pending"` {
 		t.Fatalf("application update changed the materialized prior record: %#v", record)
+	}
+	if _, found := record.Table.Fields["note"]; found {
+		t.Fatal("application update changed the prior record's table before acceptance")
+	}
+	transaction.RuntimeAcceptedEvents = []bool{true}
+	controller.bindApplicationPushRecords(transaction)
+	if !reflect.DeepEqual(record.Table, currentTable) || !reflect.DeepEqual(record.Image, *event.After) {
+		t.Fatalf("accepted application update did not bind the current table and image: %#v", record)
 	}
 }
 
