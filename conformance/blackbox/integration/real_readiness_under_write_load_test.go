@@ -78,10 +78,9 @@ func TestRealReadinessStaysReadyUnderWriteLoad(t *testing.T) {
 	if load.err != nil {
 		t.Fatalf("readiness write load failed after %d commits: %v", len(load.commits), load.err)
 	}
-	t.Logf("readiness write timing completed=%d final_commit_offset=%s max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
-		len(load.commits), load.commits[len(load.commits)-1], load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration)
 	if commits, want := realReadinessLoadCommitsInWindow(load.commits), realReadinessLoadMinimumRate*int(realReadinessLoadDuration/time.Second); commits < want {
-		t.Fatalf("write load committed %d rows in %s, want at least %d", commits, realReadinessLoadDuration, want)
+		t.Fatalf("write load committed %d rows in %s, want at least %d: max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
+			commits, realReadinessLoadDuration, want, load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration)
 	}
 	if last := samples[len(samples)-1].at; last > load.commits[len(load.commits)-1] {
 		t.Fatalf("readiness sample at %s started after the last write at %s", last, load.commits[len(load.commits)-1])
@@ -110,8 +109,9 @@ func TestRealReadinessStaysReadyUnderWriteLoad(t *testing.T) {
 	// The mutation gate treats output of the parent test as a setup failure, so the summary is in the assertion.
 	t.Run("assertion", func(t *testing.T) {
 		t.Logf(
-			"readiness write load commits=%d samples=%d max_heartbeat_age=%.3fs max_wal_lag_bytes=%.0f max_commit_lag=%.3fs",
+			"readiness write load commits=%d samples=%d max_heartbeat_age=%.3fs max_wal_lag_bytes=%.0f max_commit_lag=%.3fs max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
 			len(load.commits), len(samples), maximum.heartbeatSeconds, maximum.walLagBytes, maximum.walLagSeconds,
+			load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration,
 		)
 		notReady := 0
 		unhealthy := make(map[string]int)
