@@ -348,12 +348,15 @@ class Runner:
         check_active_emulator(directory, self.command)
         check_ports()
         cache = sdk / ".synchro-cache" / BUILD / "emulator.zip"
-        if cache.is_symlink() or (cache.exists() and not cache.is_file()):
+        cached = cache.exists()
+        if cache.is_symlink() or (cached and not cache.is_file()):
             raise RunnerError("The cached emulator archive must be a regular file")
         with tempfile.TemporaryDirectory(prefix=".synchro-emulator-", dir=sdk) as work:
             work = Path(work)
-            archive = cache if cache.exists() else work / "emulator.zip"
-            if archive != cache:
+            archive = work / "emulator.zip"
+            if cached:
+                shutil.copyfile(cache, archive)
+            else:
                 self.command([
                     "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
                     "--retry", "3", "--retry-all-errors",
@@ -371,7 +374,7 @@ class Runner:
             image = f"system-images;android-{selected.image_api};google_apis;x86_64"
             self.command([str(manager), f"--sdk_root={sdk}", f"platforms;android-{selected.image_api}", image], timeout=900)
             verify_installation(sdk, members, metadata)
-            if archive != cache:
+            if not cached:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 archive.replace(cache)
         version = self.command([str(directory / "emulator"), "-version"])

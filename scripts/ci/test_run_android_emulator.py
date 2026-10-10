@@ -473,6 +473,29 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual((self.sdk / "emulator/emulator").read_bytes(), b"fixture executable")
         self.assertEqual(cache.read_bytes(), self.source_archive.read_bytes())
 
+    def test_cache_replacement_after_hashing_installs_private_snapshot(self):
+        cache = self.sdk / ".synchro-cache" / runner.BUILD / "emulator.zip"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(self.source_archive.read_bytes())
+        self.write_archive([
+            archive_member("emulator/", mode=stat.S_IFDIR | 0o755),
+            archive_member("emulator/emulator", b"replacement executable", stat.S_IFREG | 0o755),
+            archive_member("emulator/source.properties", self.properties),
+        ])
+        replacement_bytes = self.source_archive.read_bytes()
+        extract = runner.extract_archive
+
+        def replace_cache_then_extract(archive, destination):
+            self.source_archive.replace(cache)
+            return extract(archive, destination)
+
+        with self.boundaries(), mock.patch.object(runner, "extract_archive", side_effect=replace_cache_then_extract) as extraction:
+            self.assertEqual(runner.Runner(self.selected()).run(), 0)
+        extraction.assert_called_once()
+        self.assertEqual(self.commands("curl"), [])
+        self.assertEqual(cache.read_bytes(), replacement_bytes)
+        self.assertEqual((self.sdk / "emulator/emulator").read_bytes(), b"fixture executable")
+
     def test_corrupt_cached_archive_preserves_previous_emulator(self):
         previous = self.sdk / "emulator"
         previous.mkdir()
