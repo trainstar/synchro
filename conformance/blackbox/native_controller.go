@@ -2176,11 +2176,7 @@ func (c *NativeController) rebindNativeTableAfterTransition(runtimeTableID strin
 			if err != nil {
 				return errors.New("native current-image conversion requires a 32-bit decimal integer")
 			}
-			encoded, err := json.Marshal(value)
-			if err != nil {
-				return errors.New("encode native current-image integer failed")
-			}
-			image.Fields[changedAuthored] = encoded
+			image.Fields[changedAuthored] = json.RawMessage(strconv.FormatInt(value, 10))
 		}
 		staged[record] = image
 	}
