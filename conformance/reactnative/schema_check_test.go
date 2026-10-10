@@ -615,6 +615,9 @@ func TestSchemaProofHistoricalReplayRejectsChangedIntentAndInventedOutcome(t *te
 		return schemaCheckPush{Request: encode(schemaProofPushRequest{ClientID: "client", BatchID: "successor", Schema: s2, Mutations: []json.RawMessage{encode(mutation)}}), Response: append([]byte(nil), response...), Status: http.StatusOK}
 	}
 	coordinator := &SchemaCheckCoordinator{}
+	if err := coordinator.validateProofReplay(initial, initial, s1, s2); err != nil {
+		t.Fatalf("byte-identical same-batch replay rejected: %v", err)
+	}
 	if err := coordinator.validateProofReplay(initial, newReplay(), s1, s2); err != nil {
 		t.Fatalf("current S2 successor rejected: %v", err)
 	}
