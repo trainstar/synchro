@@ -29,8 +29,10 @@ func TestModulePolicyCancellationKillsDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	// Fd puts the reader in blocking mode, so reads wait for the descendant.
-	_ = reader.Fd()
+	// OpenFile preserves explicit O_NONBLOCK for FIFOs on Darwin.
+	if err := syscall.SetNonblock(int(reader.Fd()), false); err != nil {
+		t.Fatal(err)
+	}
 
 	goPath := filepath.Join(bin, "go")
 	script := "#!/bin/sh\n(printf x >&9; exec sleep 30) 9>\"$SYNCHRO_DESCENDANT_FIFO\" </dev/null >/dev/null 2>&1 &\nwait\n"
