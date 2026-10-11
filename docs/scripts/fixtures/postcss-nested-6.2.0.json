@@ -1,0 +1,84 @@
+{
+  "source": "https://github.com/postcss/postcss-nested/blob/2abd928a713f94dfd48bf957e8a6647a11382450/index.test.js",
+  "license": "postcss-nested-LICENSE",
+  "provenance": "Upstream case names, inputs, outputs, error substrings, and whitespace normalization remain unchanged. The two additional selector boundaries are independently authored, not implementation-derived.",
+  "upstream_cases": [
+    {
+      "name": "unwraps rule inside rule",
+      "input": "a { a: 1 } a { a: 1; b { b: 2; c { c: 3 } } }",
+      "output": "a { a: 1 } a { a: 1; } a b { b: 2; } a b c { c: 3 }"
+    },
+    {
+      "name": "replaces ampersand",
+      "input": "a { body &:hover b {} }",
+      "output": "body a:hover b {}"
+    },
+    {
+      "name": "replaces ampersands",
+      "input": "a { &:hover, &:active {} }",
+      "output": "a:hover, a:active {}"
+    },
+    {
+      "name": "replaces ampersand in string",
+      "input": ".block { &_elem {} }",
+      "output": ".block_elem {}"
+    },
+    {
+      "name": "processes comma inside",
+      "input": "a, b { .one, .two {} }",
+      "output": "a .one, a .two, b .one, b .two {}"
+    },
+    {
+      "name": "moves comment with rule",
+      "input": "a { /*B*/ /*B2*/ b {} }",
+      "output": "/*B*/ /*B2*/ a b {}"
+    },
+    {
+      "name": "does not replace ampersand inside string",
+      "input": "div { &[data-category=\"sound & vision\"] {} }",
+      "output": "div[data-category=\"sound & vision\"] {}"
+    },
+    {
+      "name": "replaces ampersand in adjacent sibling selector",
+      "input": "div { & + & {} }",
+      "output": "div + div {}"
+    },
+    {
+      "name": "replaces ampersands in not selector",
+      "input": ".a { &:not(&.no) {} }",
+      "output": ".a:not(.a.no) {}"
+    },
+    {
+      "name": "correctly replaces tail ampersands that are nested inside ampersand rules",
+      "input": ".a { &:hover { .b { .c & {} } } }",
+      "output": ".c .a:hover .b {}"
+    },
+    {
+      "name": "handles :host selector case",
+      "input": ":host { &(:focus) {} }",
+      "output": ":host(:focus) {}"
+    },
+    {
+      "name": "third level dependencies",
+      "input": ".text {&:hover{border-color: red;&:before{color: red;}}}",
+      "output": ".text:hover{border-color: red;}.text:hover:before{color: red;}"
+    },
+    {
+      "name": "shows clear errors on other errors",
+      "input": "a{\n  -Option/root { }\n}\n",
+      "error": ":2:3: Unexpected"
+    }
+  ],
+  "authored_boundaries": [
+    {
+      "name": "preserves escaping when interpolating a parent selector",
+      "input": ".a\\:b { &:hover {} }",
+      "output": ".a\\:b:hover {}"
+    },
+    {
+      "name": "preserves namespaces when replacing repeated ampersands",
+      "input": "svg|a { & + & {} }",
+      "output": "svg|a + svg|a {}"
+    }
+  ]
+}
