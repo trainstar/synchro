@@ -297,11 +297,20 @@ func TestRunRejectsInvalidInvocationWithoutOpeningJournal(t *testing.T) {
 
 func openDescriptorCount(t *testing.T) int {
 	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
+	directory, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatalf("open descriptor directory: %v", err)
+	}
+	defer func() {
+		if err := directory.Close(); err != nil {
+			t.Errorf("close descriptor directory: %v", err)
+		}
+	}()
+	names, err := directory.Readdirnames(-1)
 	if err != nil {
 		t.Fatalf("list open descriptors: %v", err)
 	}
-	return len(entries)
+	return len(names)
 }
 
 func TestRunRejectsNoopExchangeBeforeCheckers(t *testing.T) {

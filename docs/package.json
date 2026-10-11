@@ -18,5 +18,12 @@
   "devDependencies": {
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1"
+  },
+  "overrides": {
+    "@expressive-code/core@0.44.2": {
+      "postcss-nested@6.2.0": {
+        "postcss-selector-parser": "7.1.6"
+      }
+    }
   }
 }

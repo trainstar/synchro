@@ -542,10 +542,19 @@ test-docs-links: test-python-runner
 docs-dev:
 	cd docs && npm run dev
 
+audit-docs:
+	cd docs && npm audit --json --audit-level=info
+
 # This target validates the JavaScript-authored contract.
 verify-contract:
 	cd docs && npm ci
+	$(MAKE) --no-print-directory audit-docs
+	$(MAKE) --no-print-directory test-docs-postcss-nested
 	$(MAKE) --no-print-directory test-docs-contract
+
+.PHONY: test-docs-postcss-nested
+test-docs-postcss-nested: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests docs.scripts.test_postcss_nested
 
 .PHONY: test-docs-contract
 test-docs-contract:
