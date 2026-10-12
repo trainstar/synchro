@@ -39,12 +39,12 @@ if (process.env.SYNCHRO_TOOLING_ERROR_RECORD) {
 }
 
 async function main() {
-  const [mode, root, work] = process.argv.slice(2);
+  const [mode, root, work, packageAssets] = process.argv.slice(2);
   assert.ok(['cli', 'assembler', 'delivery', 'directories'].includes(mode), 'unknown tooling proof selection');
   const rn = createRequire(path.join(root, 'clients/react-native/package.json'));
   const example = createRequire(path.join(root, 'clients/react-native/example/package.json'));
   const cases = mode === 'cli' ? cliProof(root, work, rn, example)
-    : mode === 'delivery' ? deliveryProof(root, work, rn, example)
+    : mode === 'delivery' ? deliveryProof(root, work, rn, example, packageAssets)
     : mode === 'directories' ? directoryProof(work, rn, example)
     : await assemblerProof(work, example);
   process.stdout.write(JSON.stringify({ cases }) + '\n');
@@ -198,12 +198,12 @@ async function assemblerProof(work, example) {
   return cases + 1;
 }
 
-function deliveryProof(root, work, rn, example) {
+function deliveryProof(root, work, rn, example, packageAssets) {
   const base = path.join(work, 'installed');
   const modules = path.join(base, 'node_modules');
   const assets = path.join(modules, '@trainstar/synchro-react-native/tooling-patches');
   fs.mkdirSync(modules, { recursive: true });
-  fs.cpSync(path.join(root, 'clients/react-native/tooling-patches'), assets, { recursive: true });
+  fs.cpSync(packageAssets || path.join(root, 'clients/react-native/tooling-patches'), assets, { recursive: true });
   const configName = '@react-native-community/cli-config-android';
   const packages = [
     ['@react-native-community/cli', example],
