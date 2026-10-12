@@ -1132,6 +1132,7 @@ ci-source-quality:
 	$(MAKE) test-version-contract
 	$(MAKE) version-check
 	$(MAKE) release-npm-dry-run
+	$(MAKE) test-rn-tooling-security
 	$(MAKE) build-check
 	$(MAKE) build-seed
 	$(MAKE) build-conformance
@@ -1547,6 +1548,10 @@ test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact cli
 			$(UPGRADE_ENV) $(UPGRADE_TEST)) || status=$$?; \
 		xcrun simctl uninstall "$$udid" dev.synchro.upgrade >/dev/null 2>&1 || true; \
 		exit "$$status"
+
+.PHONY: test-rn-tooling-security
+test-rn-tooling-security: test-python-runner
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_rn_tooling_security
 
 test-rn-unit:
 	rm -f clients/react-native/example/artifacts/unit-test-results.json
