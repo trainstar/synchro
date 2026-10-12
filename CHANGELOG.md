@@ -13,6 +13,10 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 - Embedded Go hosts can set transaction-local context before canonical push with `Config.PreparePush`. ([#343](https://github.com/trainstar/synchro/issues/343))
 
+### Security
+
+- Go modules use the corrected `golang.org/x/text` dependency for `GO-2026-6629`. ([#344](https://github.com/trainstar/synchro/issues/344))
+
 ## [0.4.0-rc.2] - 2026-10-09
 
 This release candidate is for consumer validation of `0.4.0`.
