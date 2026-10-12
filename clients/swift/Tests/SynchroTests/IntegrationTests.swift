@@ -143,6 +143,11 @@ final class IntegrationTests: XCTestCase {
     }
 
     private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 15_000_000_000
+        try await syncAndWaitForScheduledRetry(client, deadline: deadline)
+    }
+
+    private func syncAndWaitForScheduledRetry(_ client: SynchroClient, deadline: UInt64) async throws {
         do {
             try await client.syncNow()
         } catch let error as RetryableError where error.classification == .http503 {
@@ -153,6 +158,25 @@ final class IntegrationTests: XCTestCase {
             try await waitForCondition(timeoutNanoseconds: 15_000_000_000) {
                 client.getSyncStatus() == .ready
             }
+        } catch SynchroError.notStarted {
+            guard client.getSyncStatus() == .backoff else {
+                throw SynchroError.notStarted
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else {
+                XCTFail("timed out waiting for scheduled sync retry")
+                throw SynchroError.notStarted
+            }
+            var reachedReady = false
+            try await waitForCondition(timeoutNanoseconds: deadline - now) {
+                let ready = client.getSyncStatus() == .ready
+                reachedReady = ready
+                return ready
+            }
+            guard reachedReady else {
+                throw SynchroError.notStarted
+            }
+            try await syncAndWaitForScheduledRetry(client, deadline: deadline)
         }
     }
 
@@ -190,6 +214,27 @@ final class IntegrationTests: XCTestCase {
                 XCTFail("Expected authRequired protocol error, got \(error)")
             }
         }
+    }
+
+    func testScheduledRetryHelperPropagatesStoppedClient() async throws {
+        let client = try SynchroClient(config: makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath()
+        ))
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        await client.stop()
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
+
+        do {
+            try await syncAndWaitForScheduledRetry(client)
+            XCTFail("Expected stopped client to reject syncNow")
+        } catch SynchroError.notStarted {
+        } catch {
+            XCTFail("Expected notStarted, got \(error)")
+        }
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
     }
 
     func testPushPullBetweenTwoClients() async throws {
