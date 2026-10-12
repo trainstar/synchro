@@ -56,7 +56,7 @@ const repairs = {
     }, {
       path: 'lib/targets/typescript.js',
       preimage: '451fe8050e20bc1c4724564b2c33fb819f815848f5ad2eb529be5915bf62f2bb',
-      postimage: 'c0985d3627eb44d5c09e6b7711de0f6679ca73289588a7012c15c10a335b7000'
+      postimage: 'acf316d47964c16b47c9e1fcd7af59438fb51237cb4fb5446f3f1c15d33b681a'
     }]
   }]
 };

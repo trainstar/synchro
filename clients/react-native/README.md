@@ -66,9 +66,9 @@ after each fresh npm installation and before they build:
 node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
 ```
 
-The correction replaces Bob's glob-based removal of its resolved output
-directories with its installed `fs-extra` literal directory operation. It does
-not change compilation or TypeScript generation.
+The correction replaces Bob's glob-based removal of its resolved output and
+TypeScript build-info paths with its installed `fs-extra` literal operation.
+It does not change compilation or TypeScript generation.
 
 Before you run `pod install`, add these published Synchro `0.4.0-rc.2` dependencies to the
 application `ios/Podfile`:
