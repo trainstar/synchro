@@ -32,7 +32,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 ### Security
 
-- React Native CLI setup preserves literal Codegen source-directory names. Apply the [delivered tooling correction](https://trainstar.github.io/synchro/reference/support-policy/#react-native-tooling-corrections) after dependency installation. ([#312](https://github.com/trainstar/synchro/issues/312))
+- React Native tooling preserves literal Codegen, cache, and build-directory names. Apply the [delivered tooling corrections](https://trainstar.github.io/synchro/reference/support-policy/#react-native-tooling-corrections) after dependency installation. ([#312](https://github.com/trainstar/synchro/issues/312))
 - Trace tooling retains prototype-named JSON data without changing object prototypes or thread remapping. The package delivers the stream-json 1.9.1 upstream backport. ([#330](https://github.com/trainstar/synchro/issues/330))
 
 ## [0.4.0-rc.1] - 2026-10-01

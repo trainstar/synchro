@@ -26,3 +26,9 @@ class ReactNativeToolingSecurityTests(unittest.TestCase):
 
     def test_assembler_preserves_json_properties_and_trace_threads(self):
         self.run_probe("assembler")
+
+    def test_delivered_helper_applies_and_rejects_unverified_targets(self):
+        self.run_probe("delivery")
+
+    def test_cleanup_and_bob_use_literal_filesystem_directories(self):
+        self.run_probe("directories")
