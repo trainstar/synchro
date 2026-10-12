@@ -195,6 +195,7 @@ fi
   test "$(node -p "require('@trainstar/synchro-react-native/package.json').version")" = "$version"
   test "$(node -p "require('react-native/package.json').version")" = "$rn_version"
   test "$(node -p "require('react/package.json').version")" = "$react_version"
+  node "$package_root/tooling-patches/apply.cjs" cli
   npx tsc --noEmit
 )
 

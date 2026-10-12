@@ -2267,6 +2267,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@react-native-community/cli-config-android@patch:@react-native-community/cli-config-android@npm%3A20.2.0#./tooling-patches/cli-config-android-20.2.0.patch::locator=%40trainstar%2Fsynchro-react-native%40workspace%3A.":
+  version: 20.2.0
+  resolution: "@react-native-community/cli-config-android@patch:@react-native-community/cli-config-android@npm%3A20.2.0#./tooling-patches/cli-config-android-20.2.0.patch::version=20.2.0&hash=2f2cd2&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
+  dependencies:
+    "@react-native-community/cli-tools": "npm:20.2.0"
+    fast-glob: "npm:^3.3.2"
+    fast-xml-parser: "npm:^5.3.6"
+    picocolors: "npm:^1.1.1"
+  checksum: 10c0/158724e5a2873a7333133146594c75c7832cd4bc2deb721ccd0c28eba088973f9d0f5cda50b54479980546f0eec4d00907561203242bec96a368be461856442e
+  languageName: node
+  linkType: hard
+
 "@react-native-community/cli-config-apple@npm:20.2.0":
   version: 20.2.0
   resolution: "@react-native-community/cli-config-apple@npm:20.2.0"
@@ -8721,12 +8733,21 @@ __metadata:
   languageName: node
   linkType: hard
 
-"stream-json@npm:^1.7.4, stream-json@npm:^1.7.5":
+"stream-json@npm:1.9.1":
   version: 1.9.1
   resolution: "stream-json@npm:1.9.1"
   dependencies:
     stream-chain: "npm:^2.2.5"
   checksum: 10c0/0521e5cb3fb6b0e2561d715975e891bd81fa77d0239c8d0b1756846392bc3c7cdd7f1ddb0fe7ed77e6fdef58daab9e665d3b39f7d677bd0859e65a2bff59b92c
+  languageName: node
+  linkType: hard
+
+"stream-json@patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch::locator=%40trainstar%2Fsynchro-react-native%40workspace%3A.":
+  version: 1.9.1
+  resolution: "stream-json@patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch::version=1.9.1&hash=1cd514&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
+  dependencies:
+    stream-chain: "npm:^2.2.5"
+  checksum: 10c0/448a105ac2db95ca8376a716d918490303051c97342a67cb325c793ee6562c233d848cba148d72534890dd1a0e174fe2586e6f534bcd78fa041b8b2a619d1868
   languageName: node
   linkType: hard
 
