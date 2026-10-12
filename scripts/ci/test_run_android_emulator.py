@@ -826,6 +826,31 @@ class EmulatorRunnerTests(unittest.TestCase):
             self.assertIn("status 9", errors.getvalue())
             self.assertIn("cleanup failed", errors.getvalue())
 
+    def test_identity_failure_diagnostic_retains_only_a_bounded_utf8_tail(self):
+        output = "private-prefix\n" + "é" * 5000 + "\nloader-error-marker\n"
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.log = io.StringIO()
+            with mock.patch.object(runner.subprocess, "Popen", return_value=Process(100, output=output, status=127)):
+                with self.assertRaises(runner.RunnerError) as failure:
+                    execution.command([str(self.sdk / "emulator/emulator"), "-no-window", "-version"], public_failure_output=True)
+            diagnostic = str(failure.exception).split("\n", 1)[1]
+            self.assertLessEqual(len(diagnostic.encode("utf-8")), 4096)
+            self.assertNotIn("private-prefix", diagnostic)
+            self.assertTrue(diagnostic.endswith("loader-error-marker"))
+            self.assertEqual(execution.log.getvalue(), output)
+
+    def test_generic_command_failure_keeps_output_private(self):
+        output = "fixture-private-output\n"
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.log = io.StringIO()
+            with mock.patch.object(runner.subprocess, "Popen", return_value=Process(100, output=output, status=127)):
+                with self.assertRaises(runner.RunnerError) as failure:
+                    execution.command(["fixture"])
+            self.assertNotIn("fixture-private-output", str(failure.exception))
+            self.assertEqual(execution.log.getvalue(), output)
+
     def test_cancellation_and_previous_signal_handlers(self):
         previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
         for number in previous:

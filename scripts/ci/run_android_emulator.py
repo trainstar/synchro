@@ -238,7 +238,7 @@ class Runner:
         if not self.cleaning:
             raise Cancelled()
 
-    def command(self, command: list[str], *, timeout: float = 180, input: str | None = None) -> str:
+    def command(self, command: list[str], *, timeout: float = 180, input: str | None = None, public_failure_output: bool = False) -> str:
         cleaning = self.cleaning
         self.command_process = subprocess.Popen(
             command, env=self.environment, start_new_session=True,
@@ -267,8 +267,8 @@ class Runner:
             status = self.command_process.returncode
             if status:
                 diagnostic = ""
-                if Path(command[0]).name == "emulator" and "-version" in command:
-                    diagnostic = "\n" + output[-4096:].rstrip()
+                if public_failure_output:
+                    diagnostic = "\n" + output.encode("utf-8")[-4096:].decode("utf-8", errors="ignore").rstrip()
                 raise RunnerError(f"Command failed with status {status}: {shlex.join(command)}{diagnostic}")
         except BaseException as error:
             failure = error
@@ -380,7 +380,7 @@ class Runner:
             if not cached:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 archive.replace(cache)
-        version = self.command([str(directory / "emulator"), "-no-window", "-version"])
+        version = self.command([str(directory / "emulator"), "-no-window", "-version"], public_failure_output=True)
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
             raise RunnerError("The emulator executable version or build does not match the pin")
         identity = f"Emulator SHA-256 {ARCHIVE_SHA256}, version {VERSION}, build {BUILD}"
