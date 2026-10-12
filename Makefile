@@ -1551,12 +1551,12 @@ test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact cli
 
 .PHONY: test-rn-tooling-security
 test-rn-tooling-security: test-python-runner
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_rn_tooling_security
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_rn_tooling_security.ReactNativeToolingSecurityTests
 
 .PHONY: test-rn-tooling-package
 test-rn-tooling-package: client-consumer-rn-artifact test-python-runner
 	@SYNCHRO_TOOLING_PACKAGE="$(abspath $(CLIENT_ARTIFACT_DIR))/npm/trainstar-synchro-react-native-$(CURRENT_VERSION).tgz" \
-		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_rn_tooling_security
+		PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_rn_tooling_security.PackagedReactNativeToolingTests.test_package_delivers_verified_tooling_corrections
 
 test-rn-unit:
 	rm -f clients/react-native/example/artifacts/unit-test-results.json
