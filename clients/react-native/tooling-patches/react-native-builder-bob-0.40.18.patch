@@ -1,0 +1,74 @@
+diff --git a/lib/targets/module.js b/lib/targets/module.js
+--- a/lib/targets/module.js
++++ b/lib/targets/module.js
+@@ -6,7 +6,7 @@
+ exports.default = build;
+ var _path = _interopRequireDefault(require("path"));
+ var _kleur = _interopRequireDefault(require("kleur"));
+-var _del = _interopRequireDefault(require("del"));
++var _fsExtra = _interopRequireDefault(require("fs-extra"));
+ var _compile = _interopRequireDefault(require("../utils/compile"));
+ function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }
+ async function build({
+@@ -19,7 +19,11 @@
+   report
+ }) {
+   report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
+-  await (0, _del.default)([output]);
++  const outputRelative = _path.default.relative(process.cwd(), output);
++  if (outputRelative === '' || outputRelative === '..' || outputRelative.startsWith(`..${_path.default.sep}`) || _path.default.isAbsolute(outputRelative)) {
++    throw new Error('Refusing to remove build output outside the current working directory.');
++  }
++  await _fsExtra.default.remove(output);
+   await (0, _compile.default)({
+     ...options,
+     variants,
+diff --git a/lib/targets/typescript.js b/lib/targets/typescript.js
+--- a/lib/targets/typescript.js
++++ b/lib/targets/typescript.js
+@@ -4,7 +4,6 @@
+   value: true
+ });
+ exports.default = build;
+-var _del = _interopRequireDefault(require("del"));
+ var _fsExtra = _interopRequireDefault(require("fs-extra"));
+ var _json = _interopRequireDefault(require("json5"));
+ var _kleur = _interopRequireDefault(require("kleur"));
+@@ -23,7 +22,11 @@
+   esm
+ }) {
+   report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
+-  await (0, _del.default)([output]);
++  const outputRelative = _path.default.relative(process.cwd(), output);
++  if (outputRelative === '' || outputRelative === '..' || outputRelative.startsWith(`..${_path.default.sep}`) || _path.default.isAbsolute(outputRelative)) {
++    throw new Error('Refusing to remove build output outside the current working directory.');
++  }
++  await _fsExtra.default.remove(output);
+   report.info(`Generating type definitions with ${_kleur.default.blue('tsc')}`);
+   const project = options?.project ? options.project : 'tsconfig.json';
+   const tsconfig = _path.default.join(root, project);
+@@ -101,8 +104,12 @@
+       throw new Error('Neither commonjs nor module output is enabled.');
+     }
+     const tsbuildinfo = _path.default.join(outDir, project.replace(/\.json$/, '.tsbuildinfo'));
++    const buildInfoRelative = _path.default.relative(process.cwd(), tsbuildinfo);
++    const tsbuildinfoIsOwned = buildInfoRelative !== '' && buildInfoRelative !== '..' && !buildInfoRelative.startsWith(`..${_path.default.sep}`) && !_path.default.isAbsolute(buildInfoRelative);
+     try {
+-      await (0, _del.default)([tsbuildinfo]);
++      if (tsbuildinfoIsOwned) {
++        await _fsExtra.default.remove(tsbuildinfo);
++      }
+     } catch (e) {
+       // Ignore
+     }
+@@ -110,7 +117,9 @@
+       cwd: root
+     });
+     try {
+-      await (0, _del.default)([tsbuildinfo]);
++      if (tsbuildinfoIsOwned) {
++        await _fsExtra.default.remove(tsbuildinfo);
++      }
+     } catch (e) {
+       // Ignore
+     }

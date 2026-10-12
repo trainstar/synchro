@@ -15,12 +15,18 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
+
+
+# Direct execution must load the repository's validator, independent of PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "verification"))
+import support_environments
 
 
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?$")
@@ -63,8 +69,8 @@ class ReleaseError(ValueError):
 
 def load_json(path: Path, description: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=support_environments.reject_duplicate_members)
+    except (OSError, json.JSONDecodeError, support_environments.EnvironmentError) as error:
         raise ReleaseError(f"{description} is missing or malformed: {error}") from error
 
 
@@ -544,26 +550,29 @@ def required_support_cells(path: Path) -> set[str]:
     cells = value.get("cells") if isinstance(value, dict) else None
     if not isinstance(cells, list):
         raise ReleaseError("support matrix does not contain cells")
-    return {str(cell["id"]) for cell in cells if isinstance(cell, dict) and cell.get("policy") == "required"}
+    seen: set[str] = set()
+    required: set[str] = set()
+    for cell in cells:
+        if not isinstance(cell, dict) or not isinstance(cell.get("id"), str) or not cell["id"]:
+            raise ReleaseError("support matrix contains a malformed cell")
+        if cell["id"] in seen:
+            raise ReleaseError(f"support matrix contains a duplicate cell: {cell['id']}")
+        seen.add(cell["id"])
+        if cell.get("policy") == "required":
+            required.add(cell["id"])
+    try:
+        support_environments.validate_required_ids(required)
+    except support_environments.EnvironmentError as error:
+        raise ReleaseError(str(error)) from error
+    return required
 
 
 def load_support_resolution(path: Path, matrix_path: Path) -> list[dict[str, Any]]:
     value = load_json(path, "resolved support environments")
-    if not isinstance(value, list):
-        raise ReleaseError("resolved support environments must be an array")
-    required = required_support_cells(matrix_path)
-    seen: set[str] = set()
-    for record in value:
-        if not isinstance(record, dict) or set(record) != {"id", "environment"} or not isinstance(record["environment"], dict) or not record["environment"]:
-            raise ReleaseError("resolved support environments contain a malformed record")
-        if record["id"] in seen or not all(isinstance(key, str) and isinstance(item, str) and item for key, item in record["environment"].items()):
-            raise ReleaseError("resolved support environments contain a duplicate or empty value")
-        if any(re.search(r"(?:current|latest|stable|(?:^|\.)x(?:\.|$)|\*)", item, re.IGNORECASE) for item in record["environment"].values()):
-            raise ReleaseError("resolved support environments contain an unresolved selector")
-        seen.add(record["id"])
-    if seen != required:
-        raise ReleaseError("resolved support environments do not match the support matrix")
-    return sorted(value, key=lambda record: record["id"])
+    try:
+        return support_environments.validate_records(value, required_support_cells(matrix_path))
+    except support_environments.EnvironmentError as error:
+        raise ReleaseError(str(error)) from error
 
 
 def validate_sbom(path: Path, payload_hashes: set[str]) -> None:
@@ -820,16 +829,10 @@ def verify_release(release_dir: Path, version: str, inventory_path: Path, suppor
             source_tags.add(record["source_tag"])
     if source.get("source_tags") != sorted(source_tags) or source_tags != {f"v{version}", f"api/go/v{version}"}:
         raise ReleaseError("release source tags are incomplete or wrong")
-    support_records = manifest.get("resolved_support_cells")
-    if not isinstance(support_records, list) or {record.get("id") for record in support_records if isinstance(record, dict)} != required_support_cells(support_matrix):
-        raise ReleaseError("release manifest support cells do not match the support matrix")
-    for record in support_records:
-        if set(record) != {"id", "environment"} or not isinstance(record["environment"], dict) or not record["environment"]:
-            raise ReleaseError("release manifest contains malformed support resolution")
-        if not all(isinstance(key, str) and isinstance(item, str) and item for key, item in record["environment"].items()):
-            raise ReleaseError("release manifest contains an empty support resolution")
-        if any(re.search(r"(?:current|latest|stable|(?:^|\.)x(?:\.|$)|\*)", item, re.IGNORECASE) for item in record["environment"].values()):
-            raise ReleaseError("release manifest contains an unresolved support selector")
+    try:
+        support_environments.validate_records(manifest.get("resolved_support_cells"), required_support_cells(support_matrix))
+    except support_environments.EnvironmentError as error:
+        raise ReleaseError(str(error)) from error
     dependencies = manifest.get("dependency_inputs")
     if not isinstance(dependencies, list) or [record.get("path") for record in dependencies if isinstance(record, dict)] != list(DEPENDENCY_INPUTS):
         raise ReleaseError("release manifest dependency inputs are incomplete")

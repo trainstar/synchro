@@ -346,12 +346,14 @@ jobs:
           from pathlib import Path
           cells = [
               {"id": "SUP-PG-LINUX-X64-001", "environment": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"}},
-              {"id": "SUP-IOS-MIN-001", "environment": {"ios": "16.4", "xcode": "16.4"}},
-              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "26.5", "xcode": "26.6"}},
-              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04"}},
-              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04"}},
-              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "26.5", "react_native": "0.83.10", "xcode": "26.6"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "36", "os": "ubuntu-24.04", "react_native": "0.83.10"}},
+              {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}},
+              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
+              {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.83.10", "xcode": "27.0"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.83.10", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-IOS-MIN-001", "environment": {"ios": "27.0", "react_native": "0.82.1", "xcode": "27.0"}},
+              {"id": "SUP-RN-ANDROID-MIN-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.82.1", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
           PY
@@ -499,6 +501,7 @@ jobs:
     if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
+    timeout-minutes: 240
     permissions:
       actions: read
       contents: read
@@ -507,11 +510,17 @@ jobs:
       matrix:
         include:
           - cell: SUP-ANDROID-MIN-001
-            api: 24
+            api: '24'
+            support_api: '24'
           - cell: SUP-ANDROID-CURRENT-001
-            api: 36
+            api: '37.0'
+            support_api: '37'
           - cell: SUP-RN-ANDROID-CURRENT-001
-            api: 36
+            api: '37.0'
+            support_api: '37'
+          - cell: SUP-RN-ANDROID-MIN-001
+            api: '37.0'
+            support_api: '37'
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -521,6 +530,17 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.candidate.outputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Load immutable dispatch emulator runner
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/synchro-dispatch-emulator"
+          mkdir -p "$runtime"
+          git show "$GITHUB_SHA:scripts/ci/run_android_emulator.py" > "$runtime/run_android_emulator.py"
+          git show "$GITHUB_SHA:scripts/ci/android-emulator-package.xml" > "$runtime/android-emulator-package.xml"
+          printf 'Android emulator runner dispatch commit: %s\n' "$GITHUB_SHA"
+          shasum -a 256 "$runtime/run_android_emulator.py" "$runtime/android-emulator-package.xml"
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -639,20 +659,26 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Check original Android serial selection
+        run: |
+          set -eu
+          original_android_serial=${ANDROID_SERIAL:-}
+          original_kotlin_android_serial=${KOTLIN_ANDROID_SERIAL:-}
+          if [ -n "$original_android_serial" ] && [ -n "$original_kotlin_android_serial" ] && [ "$original_android_serial" != "$original_kotlin_android_serial" ]; then
+            echo "Original ANDROID_SERIAL and KOTLIN_ANDROID_SERIAL values disagree" >&2
+            exit 1
+          fi
+
       - name: Run Android package cell
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
-        with:
-          api-level: ${{ matrix.api }}
-          arch: x86_64
-          target: google_apis
-          profile: pixel_2
-          avd-name: Synchro_Release_API_${{ matrix.api }}
-          force-avd-creation: true
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.api }}"
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          python3 "$RUNNER_TEMP/synchro-dispatch-emulator/run_android_emulator.py" \
+            --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
+            --api "${{ matrix.support_api }}" --image-api "${{ matrix.api }}" \
+            --avd-name "Synchro_Release_API_${{ matrix.api }}" --profile pixel_2 \
+            --log-dir "$RUNNER_TEMP/synchro-release-emulator-${{ matrix.cell }}" -- \
+            make release-run-support-cell VERSION="${{ needs.candidate.outputs.version }}" RELEASE_DIR="dist/releases/${{ needs.candidate.outputs.release_dir_name }}" RELEASE_EVIDENCE_DIR="dist/package-evidence" RELEASE_CONSUMER_DIR="dist/release-consumer" SUPPORT_CELL_ID="${{ matrix.cell }}" SUPPORT_PLATFORM_VERSION="${{ matrix.support_api }}"
 
       - name: Stop local fixture
         if: always()
@@ -686,20 +712,25 @@ jobs:
       matrix:
         include:
           - cell: SUP-IOS-MIN-001
-            ios: '16.4'
-            support: '16'
-            xcode: '16.4'
-            runner: macos-15
+            ios: '17.0'
+            support: '17'
+            xcode: '27.0'
+            runner: xcode-27
           - cell: SUP-IOS-CURRENT-001
-            ios: '26.5'
-            support: '26.5'
-            xcode: '26.6'
-            runner: macos-26
+            ios: '27.0'
+            support: '27.0'
+            xcode: '27.0'
+            runner: xcode-27
           - cell: SUP-RN-IOS-CURRENT-001
-            ios: '26.5'
-            support: '26.5'
-            xcode: '26.6'
-            runner: macos-26
+            ios: '27.0'
+            support: '27.0'
+            xcode: '27.0'
+            runner: xcode-27
+          - cell: SUP-RN-IOS-MIN-001
+            ios: '27.0'
+            support: '27.0'
+            xcode: '27.0'
+            runner: xcode-27
     steps:
       - name: Checkout candidate
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -742,7 +773,22 @@ jobs:
           test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "$XCODE_VERSION"
           swift --version | grep -E 'Swift version 6[.]' >/dev/null
           if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == wanted } ? 0 : 1)' "$IOS_VERSION"; then
-            sudo xcodebuild -downloadPlatform iOS -buildVersion "$IOS_VERSION"
+            if [ "$IOS_VERSION" = '17.0' ]; then
+              umask 077
+              runtime_dir="$(mktemp -d)"
+              trap 'rm -rf "$runtime_dir"' EXIT
+              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                --get --data-urlencode 'path=/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg' \
+                --cookie-jar "$runtime_dir/cookies" --output /dev/null \
+                'https://developerservices2.apple.com/services/download'
+              test -s "$runtime_dir/cookies"
+              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                --cookie "$runtime_dir/cookies" --output "$runtime_dir/iOS_17_Simulator_Runtime.dmg" \
+                'https://download.developer.apple.com/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg'
+              sudo xcodebuild -importPlatform "$runtime_dir/iOS_17_Simulator_Runtime.dmg"
+            else
+              sudo xcodebuild -downloadPlatform iOS -buildVersion "$IOS_VERSION"
+            fi
           fi
           runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
           device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'd=JSON.parse(STDIN.read).fetch("devicetypes"); x=d.find { |i| i["name"] == "iPhone 14" } || d.find { |i| i["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless x; puts x.fetch("identifier")')"
@@ -866,7 +912,7 @@ jobs:
     name: approve, publish, verify, and promote
     if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' && needs.package-gate.result == 'success' }}
     needs: [candidate, seal, package-gate]
-    runs-on: macos-26
+    runs-on: xcode-27
     environment: release
     permissions:
       actions: read
@@ -1367,14 +1413,14 @@ jobs:
           npm_config_cache: ${{ runner.temp }}/public-rn-npm-cache
           SYNCHRO_CONSUMER_RESOLUTION: public
           PACKAGED_SMOKE_TMP_ROOT: ${{ runner.temp }}/public-rn
-          SUPPORT_PLATFORM_VERSION: '26.5'
+          SUPPORT_PLATFORM_VERSION: '27.0'
         run: |
           set -euo pipefail
           mkdir -p "$GRADLE_USER_HOME" "$npm_config_cache"
           test -z "$(find "$GRADLE_USER_HOME" -mindepth 1 -print -quit)"
           test -z "$(find "$npm_config_cache" -mindepth 1 -print -quit)"
-          test -d /Applications/Xcode_26.6.app || { echo "Xcode 26.6 is required" >&2; exit 1; }
-          sudo xcode-select -s /Applications/Xcode_26.6.app
+          test -d /Applications/Xcode_27.0.app || { echo "Xcode 27.0 is required" >&2; exit 1; }
+          sudo xcode-select -s /Applications/Xcode_27.0.app
           sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$sdkmanager"
           yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
@@ -1382,6 +1428,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/public-rn" "$RUNNER_TEMP/empty-artifacts"
           sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
           sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
+          SYNCHRO_RN_VERSION=0.82.1 sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
+          SYNCHRO_RN_VERSION=0.82.1 sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
 
       - name: Promote npm latest only after public checks
         env:

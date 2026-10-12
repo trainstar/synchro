@@ -26,6 +26,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+# Module and direct-script execution both use this repository's shared validator.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import support_environments
+
+
 SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
 CELL_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 1
@@ -111,8 +116,8 @@ class EvidenceError(ValueError):
 def load_json(path: Path, label: str) -> Any:
     try:
         with path.open(encoding="utf-8") as stream:
-            return json.load(stream)
-    except (OSError, json.JSONDecodeError) as error:
+            return json.load(stream, object_pairs_hook=support_environments.reject_duplicate_members)
+    except (OSError, json.JSONDecodeError, support_environments.EnvironmentError) as error:
         raise EvidenceError(f"{label} is missing or malformed: {error}") from error
 
 
@@ -166,6 +171,10 @@ def required_cells(repo_root: Path) -> list[str]:
             result.append(cell_id)
     if not result:
         raise EvidenceError("support matrix has no packaged smoke cells")
+    try:
+        support_environments.validate_required_ids(set(result))
+    except support_environments.EnvironmentError as error:
+        raise EvidenceError(str(error)) from error
     return result
 
 
@@ -763,6 +772,39 @@ def require_observed(phase: dict[str, object], label: str, expected: dict[str, o
         raise EvidenceError(f"{label} consumer did not read the authored dataset state: {', '.join(differing_fields(observed, expected))}")
 
 
+def environment_records(repo_root: Path, value: object, *, complete: bool = True) -> list[dict[str, Any]]:
+    try:
+        return support_environments.validate_records(value, set(required_cells(repo_root)), complete=complete)
+    except support_environments.EnvironmentError as error:
+        raise EvidenceError(str(error)) from error
+
+
+def manifest_environments(repo_root: Path, manifest: object) -> list[dict[str, Any]]:
+    source = manifest.get("source") if isinstance(manifest, dict) else None
+    if not isinstance(source, dict) or source.get("commit") != source_commit(repo_root):
+        raise EvidenceError("packaged smoke and sealed source commits differ")
+    return environment_records(repo_root, manifest.get("resolved_support_cells"))
+
+
+def completion_environment(
+    repo_root: Path, cell_id: str, initial_path: Path, resume_path: Path, manifest_path: Path,
+) -> dict[str, str]:
+    measured = []
+    for label, path in (("initial", initial_path), ("resume", resume_path)):
+        records = environment_records(repo_root, [load_json(path, f"{label} measured environment")], complete=False)
+        record = records[0]
+        if record["id"] != cell_id:
+            raise EvidenceError(f"{label} measured environment has the wrong cell ID")
+        measured.append(record)
+    selected = manifest_environments(repo_root, load_json(manifest_path, "sealed release manifest"))
+    if measured[0] != measured[1]:
+        raise EvidenceError("initial and resume measured environments differ")
+    expected = next(record for record in selected if record["id"] == cell_id)
+    if measured[0] != expected:
+        raise EvidenceError("measured environment does not match sealed manifest")
+    return measured[0]["environment"]
+
+
 def complete_cell(
     repo_root: Path,
     cell_id: str,
@@ -774,6 +816,9 @@ def complete_cell(
     expected_hashes: list[str],
     remote_path: Path,
     server_path: Path,
+    initial_environment_path: Path,
+    resume_environment_path: Path,
+    release_manifest: Path,
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
@@ -813,6 +858,7 @@ def complete_cell(
     expected = validate_hash_list(expected_hashes, "expected artifact hashes")
     if sorted(hashes) != sorted(expected):
         raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
+    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path, release_manifest)
     write_json(
         output,
         {
@@ -822,6 +868,7 @@ def complete_cell(
             "status": "passed",
             "artifact_hashes": hashes,
             "operations": operation_entries("passed", 1),
+            "environment": environment,
             "process_lifecycle": {
                 "initial_pid": initial_pid,
                 "kill_signal": 9,
@@ -852,7 +899,12 @@ def validate_server_phase(path: Path, expected_phase: str) -> dict[str, object]:
     return value
 
 
-def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path, killed_pid: int, artifacts: list[Path], expected_hashes: list[str], remote_path: Path, server_path: Path) -> None:
+def complete_server_cell(
+    repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path,
+    killed_pid: int, artifacts: list[Path], expected_hashes: list[str], remote_path: Path,
+    server_path: Path, initial_environment_path: Path, resume_environment_path: Path,
+    release_manifest: Path,
+) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
     initial = validate_server_phase(initial_path, "initial")
@@ -870,6 +922,7 @@ def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_pa
     hashes = hash_files(artifacts)
     if sorted(hashes) != sorted(validate_hash_list(expected_hashes, "expected artifact hashes")):
         raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
+    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path, release_manifest)
     write_json(
         output,
         {
@@ -879,6 +932,7 @@ def complete_server_cell(repo_root: Path, cell_id: str, output: Path, initial_pa
             "status": "passed",
             "artifact_hashes": hashes,
             "operations": operation_entries("passed", 1),
+            "environment": environment,
             "process_lifecycle": {
                 "kind": "server",
                 "initial_pid": initial_pid,
@@ -927,8 +981,16 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
         "operations",
         "process_lifecycle" if status == "passed" else "failure",
     }
+    if status == "passed" or "environment" in value:
+        expected_members.add("environment")
     if set(value) != expected_members:
         raise EvidenceError(f"cell {expected_cell} has invalid members")
+    try:
+        if expected_cell not in support_environments.REQUIRED_IDS:
+            raise support_environments.EnvironmentError(f"unknown support cell: {expected_cell}")
+        environment = support_environments.validate_environment(expected_cell, value["environment"]) if "environment" in value else None
+    except support_environments.EnvironmentError as error:
+        raise EvidenceError(str(error)) from error
     failure = value.get("failure")
     if status == "failed" and (not isinstance(failure, str) or not failure):
         raise EvidenceError(f"cell {expected_cell} failure is missing")
@@ -989,11 +1051,14 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
                 raise EvidenceError(f"cell {expected_cell} has no durable work before kill")
             if lifecycle.get("durable_pending_after_resume") != 0:
                 raise EvidenceError(f"cell {expected_cell} did not drain durable work after resume")
-    return {
+    result = {
         "status": status,
         "artifact_hashes": hashes,
         "operations": operations,
     }
+    if environment is not None:
+        result["environment"] = environment
+    return result
 
 
 def missing_cell(cell_id: str) -> dict[str, object]:
@@ -1050,16 +1115,21 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
                     "artifact_hashes": record_hashes,
                 }
             )
-    write_json(
-        output,
-        {
-            "schema_version": SUMMARY_SCHEMA_VERSION,
-            "source_commit": commit,
-            "artifact_hashes": hashes,
-            "obligations": obligations,
-            "status": "passed" if all_passed else "failed",
-        },
-    )
+    measured = environment_records(repo_root, [
+        {"id": cell_id, "environment": record["environment"]}
+        for cell_id, record in records.items() if "environment" in record
+    ], complete=all_passed)
+    summary = {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "source_commit": commit,
+        "artifact_hashes": hashes,
+        "obligations": obligations,
+        "status": "passed" if all_passed else "failed",
+        "resolved_support_cells": measured,
+    }
+    if not all_passed:
+        summary["missing_environment_cells"] = sorted(cell_id for cell_id, record in records.items() if "environment" not in record)
+    write_json(output, summary)
 
 
 def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path | None = None) -> None:
@@ -1070,7 +1140,10 @@ def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path |
         "artifact_hashes",
         "obligations",
         "status",
+        "resolved_support_cells",
     }
+    if isinstance(value, dict) and value.get("status") == "failed":
+        required_keys.add("missing_environment_cells")
     if not isinstance(value, dict) or set(value) != required_keys:
         raise EvidenceError("packaged smoke summary has invalid members")
     if value.get("schema_version") != SUMMARY_SCHEMA_VERSION:
@@ -1079,6 +1152,7 @@ def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path |
         raise EvidenceError("packaged smoke summary source commit does not match HEAD")
     if value.get("status") != "passed":
         raise EvidenceError("packaged smoke summary did not pass")
+    measured = environment_records(repo_root, value.get("resolved_support_cells"))
     summary_hashes = set(validate_hash_list(value.get("artifact_hashes"), "summary artifact hashes"))
     obligations = value.get("obligations")
     if not isinstance(obligations, list):
@@ -1119,6 +1193,8 @@ def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path |
         source = manifest.get("source") if isinstance(manifest, dict) else None
         if not isinstance(source, dict) or source.get("commit") != value["source_commit"]:
             raise EvidenceError("packaged smoke and sealed source commits differ")
+        if measured != manifest_environments(repo_root, manifest):
+            raise EvidenceError("measured summary environments do not match sealed manifest")
         distributions = manifest.get("distributions")
         if not isinstance(distributions, list):
             raise EvidenceError("sealed release distributions are missing")
@@ -1364,6 +1440,9 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--expected-artifact-hash", action="append", default=[])
     complete.add_argument("--remote", type=Path, required=True)
     complete.add_argument("--server-verification", type=Path, required=True)
+    complete.add_argument("--initial-environment", type=Path, required=True)
+    complete.add_argument("--resume-environment", type=Path, required=True)
+    complete.add_argument("--release-manifest", type=Path, required=True)
 
     author = subparsers.add_parser("author-remote")
     author.add_argument("--config", type=Path, required=True)
@@ -1382,6 +1461,9 @@ def parse_args() -> argparse.Namespace:
     server_complete.add_argument("--expected-artifact-hash", action="append", default=[])
     server_complete.add_argument("--remote", type=Path, required=True)
     server_complete.add_argument("--server-verification", type=Path, required=True)
+    server_complete.add_argument("--initial-environment", type=Path, required=True)
+    server_complete.add_argument("--resume-environment", type=Path, required=True)
+    server_complete.add_argument("--release-manifest", type=Path, required=True)
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--repo-root", type=Path, required=True)
@@ -1447,13 +1529,21 @@ def main() -> int:
                 args.expected_artifact_hash,
                 args.remote.resolve(),
                 args.server_verification.resolve(),
+                args.initial_environment.resolve(),
+                args.resume_environment.resolve(),
+                args.release_manifest.resolve(),
             )
         elif args.command == "author-remote":
             author_remote_value(args.config.resolve(), args.output.resolve())
         elif args.command == "verify-server":
             verify_server_state(args.config.resolve(), args.remote.resolve(), args.output.resolve())
         elif args.command == "complete-server-cell":
-            complete_server_cell(args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(), args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact], args.expected_artifact_hash, args.remote.resolve(), args.server_verification.resolve())
+            complete_server_cell(
+                args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(),
+                args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact],
+                args.expected_artifact_hash, args.remote.resolve(), args.server_verification.resolve(),
+                args.initial_environment.resolve(), args.resume_environment.resolve(), args.release_manifest.resolve(),
+            )
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":

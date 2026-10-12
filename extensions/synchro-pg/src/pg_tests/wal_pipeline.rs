@@ -1029,6 +1029,11 @@
             measurements.insert(count, queries);
         }
         let below_boundary = measurements[&10];
+        // Reusing the validated catalog removes the duplicate 17-query load.
+        assert!(
+            below_boundary <= 42,
+            "WAL materialization used {below_boundary} queries, exceeding the one-page limit of 42"
+        );
         assert_eq!(measurements[&100], below_boundary);
         // Two input pages must use at most twice the work of one complete page.
         assert!(

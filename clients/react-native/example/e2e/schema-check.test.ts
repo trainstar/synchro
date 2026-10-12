@@ -5,6 +5,19 @@ import {
 import { WAIT_TIMEOUT_MS } from '../src/timeouts';
 
 async function execute(command: Record<string, unknown>): Promise<string> {
+  const manifest = command.action as { action?: { actor?: string; command?: string; parameters?: Record<string, unknown> } };
+  const action = manifest?.action;
+  if (action?.parameters?.process_restart === true) {
+    if (action.actor !== 'client' || action.command !== 'open' || action.parameters.database_mode !== 'reuse') {
+      throw new Error('React Native schema-check process cut requires a reuse open');
+    }
+    await device.terminateApp();
+    await launchCorpusApp({
+      newInstance: true,
+      delete: false,
+      launchArgs: { synchroConformance: '1' },
+    });
+  }
   const serialized = JSON.stringify(command);
   await submitCorpusCommand(serialized);
   const { raw, envelope } = await pollCorpusResult(WAIT_TIMEOUT_MS, 'React Native schema-check command did not finish');

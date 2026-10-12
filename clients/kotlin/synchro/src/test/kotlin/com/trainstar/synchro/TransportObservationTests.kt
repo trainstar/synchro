@@ -3,6 +3,7 @@
 package com.trainstar.synchro
 
 import com.trainstar.synchro.inspection.TransportObservationCollector
+import com.trainstar.synchro.inspection.MigrationCheckpoint
 import com.trainstar.synchro.inspection.TransportOperationClass
 import com.trainstar.synchro.inspection.TransportPauseBarrierError
 import com.trainstar.synchro.inspection.TransportPauseBarrierException
@@ -15,6 +16,12 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -77,6 +84,48 @@ class TransportObservationTests {
         assertFalse(request.isCompleted)
         collector.resumePause()
         request.await()
+    }
+
+    @Test
+    fun migrationPausesShareTransportBarrierAndRequireResume() = runTest {
+        val collector = TransportObservationCollector()
+        collector.armPause(MigrationCheckpoint.PREPARED)
+        collector.pauseIfArmed(TransportOperationClass.CONNECT)
+        val migration = async {
+            collector.pauseIfArmed(MigrationCheckpoint.PREPARED)
+            collector.pauseIfArmed(MigrationCheckpoint.COMMITTED)
+        }
+        collector.awaitPause(MigrationCheckpoint.PREPARED, 1_000)
+        assertFalse(migration.isCompleted)
+        assertEquals(0L, collector.snapshot().sequenceCheckpoint)
+        collector.armPause(MigrationCheckpoint.COMMITTED)
+        collector.resumePause()
+        collector.awaitPause(MigrationCheckpoint.COMMITTED, 1_000)
+        assertFalse(migration.isCompleted)
+        collector.resumePause()
+        migration.await()
+        collector.armPause(TransportOperationClass.PULL)
+        val transport = async { collector.pauseIfArmed(TransportOperationClass.PULL) }
+        collector.awaitPause(TransportOperationClass.PULL, 1_000)
+        collector.resumePause()
+        transport.await()
+    }
+
+    @Test
+    fun migrationTimeoutAndCancellationFailClosed() = runTest {
+        val timedOut = TransportObservationCollector()
+        timedOut.armPause(MigrationCheckpoint.PREPARED)
+        val failure = runCatching { timedOut.awaitPause(MigrationCheckpoint.PREPARED, 10) }.exceptionOrNull()
+        assertEquals(TransportPauseBarrierError.TIMED_OUT, (failure as TransportPauseBarrierException).error)
+        assertSame(failure, runCatching { timedOut.pauseIfArmed(MigrationCheckpoint.PREPARED) }.exceptionOrNull())
+        val cancelled = TransportObservationCollector()
+        cancelled.armPause(MigrationCheckpoint.COMMITTED)
+        val migration = async { cancelled.pauseIfArmed(MigrationCheckpoint.COMMITTED) }
+        cancelled.awaitPause(MigrationCheckpoint.COMMITTED, 1_000)
+        migration.cancelAndJoin()
+        assertTrue(migration.isCancelled)
+        val cancelledFailure = assertThrows(TransportPauseBarrierException::class.java) { cancelled.resumePause() }
+        assertEquals(TransportPauseBarrierError.CANCELLED, cancelledFailure.error)
     }
 
     @Test
@@ -313,6 +362,87 @@ class TransportObservationTests {
             val observations = collector.snapshot().observations
             assertEquals(listOf("temporary_unavailable", null), observations.map { it.errorCode })
             assertEquals(listOf(true, null), observations.map { it.retryable })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    @OptIn(ExperimentalSerializationApi::class)
+    fun connectInspectionBoundsParsedCollectionsAndPreservesNullUpdates() = runTest {
+        val scopes = (0..<17).map { "scope-%02d".format(it) }
+        val body = buildJsonObject {
+            put("server_time", "2026-10-09T00:00:00Z")
+            put("protocol_version", 3)
+            put("client_generation", 1)
+            put("scope_set_version", 1)
+            put("schema", buildJsonObject {
+                put("version", 2)
+                put("hash", "a".repeat(64))
+                put("action", "replace")
+            })
+            put("scopes", buildJsonObject {
+                put("add", buildJsonArray {})
+                put("remove", buildJsonArray {})
+            })
+            put("affected_scopes", buildJsonArray { scopes.reversed().forEach { add(JsonPrimitive(it)) } })
+            put("scope_cursor_updates", buildJsonObject {
+                scopes.reversed().forEach { put(it, if (it == scopes[0]) JsonNull else JsonPrimitive("token-$it")) }
+            })
+        }
+        val server = MockWebServer()
+        try {
+            server.enqueue(MockResponse().setBody(body.toString()))
+            server.start()
+            val collector = TransportObservationCollector()
+            val client = HttpClient(SynchroConfig(
+                dbPath = "", serverURL = server.url("/").toString().trimEnd('/'),
+                authProvider = { "test-token" }, clientID = "test-device", appVersion = "1.0.0",
+            ).withTransportObservation(collector))
+            val request = ConnectRequest(
+                clientID = "client", clientGeneration = 1, platform = "android", appVersion = "1.0.0",
+                protocolVersion = 3, schema = SchemaRef(1, "b".repeat(64)), scopeSetVersion = 1,
+                knownScopes = scopes.associateWith { ScopeCursorRef("token-$it") } + ("without-cursor" to ScopeCursorRef(null)),
+            )
+            // The missing schema definition prevents this inspection test from proving a sync flow.
+            val response = client.connect(request)
+            assertThrows(ContractException::class.java) { response.validate() }
+            val observation = collector.snapshot().observations.single()
+            val facts = requireNotNull(observation.connectResponseFacts)
+            assertEquals("replace", facts.action)
+            assertEquals(2L, facts.schemaVersion)
+            assertEquals("a".repeat(64), facts.schemaHash)
+            assertEquals(scopes.take(16).map(TransportObservationCollector::cursorFingerprint).sorted(), facts.affectedScopeFingerprints)
+            assertFalse(facts.affectedScopesComplete)
+            assertFalse(facts.scopeCursorUpdatesComplete)
+            assertEquals(16, facts.scopeCursorUpdates.size)
+            val nullScope = TransportObservationCollector.cursorFingerprint(scopes[0])
+            assertTrue(facts.scopeCursorUpdates.containsKey(nullScope))
+            assertEquals(null, facts.scopeCursorUpdates[nullScope])
+            assertFalse(facts.scopeCursorUpdates.containsKey(TransportObservationCollector.cursorFingerprint(scopes[16])))
+            assertEquals(scopes.map { TransportObservationCollector.cursorFingerprint("token-$it") }.sorted().take(16), observation.cursorFingerprints)
+            assertEquals(false, observation.cursorFingerprintsComplete)
+            val json = Json { explicitNulls = false }
+            val encoded = json.encodeToString(observation)
+            val encodedUpdates = json.parseToJsonElement(encoded).jsonObject.getValue("connect_response_facts")
+                .jsonObject.getValue("scope_cursor_updates").jsonObject
+            assertEquals(JsonNull, encodedUpdates.getValue(nullScope))
+            assertEquals(JsonPrimitive(TransportObservationCollector.cursorFingerprint("token-${scopes[1]}")),
+                encodedUpdates.getValue(TransportObservationCollector.cursorFingerprint(scopes[1])))
+            assertEquals(observation, json.decodeFromString<com.trainstar.synchro.inspection.TransportObservation>(encoded))
+            assertFalse(encoded.contains("scope-"))
+            assertFalse(encoded.contains("token-"))
+
+            val omittedBody = buildJsonObject {
+                body.forEach { (key, value) -> if (key != "affected_scopes") put(key, value) }
+            }
+            server.enqueue(MockResponse().setBody(omittedBody.toString()))
+            val omittedResponse = client.connect(request)
+            assertThrows(ContractException::class.java) { omittedResponse.validate() }
+            val omittedFacts = json.parseToJsonElement(json.encodeToString(collector.snapshot().observations.last()))
+                .jsonObject.getValue("connect_response_facts").jsonObject
+            assertEquals(buildJsonArray {}, omittedFacts.getValue("affected_scope_fingerprints"))
+            assertEquals(JsonPrimitive(true), omittedFacts.getValue("affected_scopes_complete"))
         } finally {
             server.shutdown()
         }

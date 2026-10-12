@@ -1,6 +1,6 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.1.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.2.sql
 @@ -2135,7 +2135,7 @@
  /* </end connected objects> */
  

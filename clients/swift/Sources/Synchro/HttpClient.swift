@@ -20,10 +20,13 @@ final class HttpClient: @unchecked Sendable {
         requestBody: Data? = nil
     ) async throws -> ConnectResponse {
         let body = try requestBody ?? connectRequestBody(request)
+        let cursorObservation = connectCursorFingerprints(from: body)
         let response: ConnectResponse = try await postData(
             "/sync/connect",
             data: body,
-            retryContext: try retryContext(resumeState: .connecting, workIdentity: body)
+            retryContext: try retryContext(resumeState: .connecting, workIdentity: body),
+            cursorFingerprints: cursorObservation?.fingerprints,
+            cursorFingerprintsComplete: cursorObservation?.complete
         )
         try response.validate(
             existingScopes: request.knownScopes,
@@ -393,11 +396,12 @@ final class HttpClient: @unchecked Sendable {
             operationClass: operationClass,
             statusCode: statusCode,
             durationNanoseconds: attemptEnded >= attemptStarted ? attemptEnded - attemptStarted : 0,
-            cursorFingerprints: operationClass == .pull ? cursorFingerprints ?? [] : nil,
-            cursorFingerprintsComplete: operationClass == .pull ? cursorFingerprintsComplete ?? false : nil,
+            cursorFingerprints: operationClass == .pull || operationClass == .connect ? cursorFingerprints ?? [] : nil,
+            cursorFingerprintsComplete: operationClass == .pull || operationClass == .connect ? cursorFingerprintsComplete ?? false : nil,
             requestFacts: requestFacts,
             rebuildResponseFacts: operationClass == .rebuild ? rebuildResponseFacts(from: responseBody) : nil,
             pullResponseFacts: operationClass == .pull ? pullResponseFacts(from: responseBody) : nil,
+            connectResponseFacts: operationClass == .connect ? connectResponseFacts(from: responseBody) : nil,
             errorCode: reportedError.code,
             retryable: reportedError.retryable
         )
@@ -463,6 +467,27 @@ final class HttpClient: @unchecked Sendable {
         default:
             return nil
         }
+    }
+
+    private func connectResponseFacts(from data: Data?) -> TransportConnectResponseFacts? {
+        guard let data, let response = try? decoder.decode(ConnectResponse.self, from: data) else { return nil }
+        let maximum = TransportObservationCollector.maximumCursorFingerprints
+        let affectedScopes = response.affectedScopes ?? []
+        let affected = affectedScopes.sorted().prefix(maximum)
+            .map(TransportObservationCollector.cursorFingerprint).sorted()
+        let updates = Dictionary(uniqueKeysWithValues: response.scopeCursorUpdates.sorted { $0.key < $1.key }
+            .prefix(maximum).map { scope, cursor in
+                (TransportObservationCollector.cursorFingerprint(scope), cursor.map(TransportObservationCollector.cursorFingerprint))
+            })
+        return TransportConnectResponseFacts(
+            action: response.schema.action.rawValue,
+            schemaVersion: response.schema.version,
+            schemaHash: response.schema.hash,
+            affectedScopeFingerprints: affected,
+            affectedScopesComplete: affectedScopes.count <= maximum,
+            scopeCursorUpdates: updates,
+            scopeCursorUpdatesComplete: response.scopeCursorUpdates.count <= maximum
+        )
     }
 
     private func rebuildResponseFacts(from data: Data?) -> TransportRebuildResponseFacts? {
@@ -572,6 +597,15 @@ final class HttpClient: @unchecked Sendable {
             throw SynchroError.invalidResponse(message: "retry request identity is not UTF-8 JSON")
         }
         return RetryContext(resumeState: resumeState, workIdentity: identity)
+    }
+
+    private func connectCursorFingerprints(from data: Data) -> (fingerprints: [String], complete: Bool)? {
+        guard config.transportObservationCollector != nil else { return nil }
+        guard let request = try? decoder.decode(ConnectRequest.self, from: data) else { return ([], false) }
+        let fingerprints = Set(request.knownScopes.values.compactMap(\.cursor)
+            .map(TransportObservationCollector.cursorFingerprint)).sorted()
+        let maximum = TransportObservationCollector.maximumCursorFingerprints
+        return (Array(fingerprints.prefix(maximum)), fingerprints.count <= maximum)
     }
 
     private func pullCursorFingerprints(from data: Data) -> (fingerprints: [String], complete: Bool)? {

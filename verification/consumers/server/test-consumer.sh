@@ -17,6 +17,11 @@ cell_id=$8
 cell_result=$9
 sealed_hashes=${10}
 tool=$repo_root/verification/packaged_smoke.py
+release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
+test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+environment_dir=$cell_result.environments
+initial_environment=$environment_dir/initial.json
+resume_environment=$environment_dir/resume.json
 
 case "$(uname -s):$(uname -m)" in Linux:x86_64) ;; *) echo "Linux x64 is required" >&2; exit 1 ;; esac
 case "$listen_url" in http://127.0.0.1:[0-9]*) ;; *) echo "loopback HTTP listen URL is required" >&2; exit 1 ;; esac
@@ -111,6 +116,9 @@ start_adapter() {
 }
 start_adapter
 mkdir -p "$work_dir/protocol-state"
+PGDATABASE="$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" PGUSER="$SYNCHRO_CONFORMANCE_ADMIN_USER" PGPASSWORD="$admin_password" \
+  python3 "$repo_root/verification/probe_support_environment.py" postgresql \
+    --cell "$cell_id" --pg18-bindir "$pg18_bindir" --output "$initial_environment"
 make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
   SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
   SERVER_SMOKE_PHASE=initial SERVER_SMOKE_ADAPTER_PID="$adapter_pid" \
@@ -142,6 +150,9 @@ SQL
 test "$authored" = "$remote_name" || { echo "server did not author exactly one remote value" >&2; exit 1; }
 python3 -c 'import json, sys; json.dump({"schema_version": 1, "remote_value": sys.argv[2]}, open(sys.argv[1], "w"))' "$work_dir/remote.json" "$remote_name"
 start_adapter
+PGDATABASE="$SYNCHRO_CONFORMANCE_ATTACH_DATABASE_URL" PGUSER="$SYNCHRO_CONFORMANCE_ADMIN_USER" PGPASSWORD="$admin_password" \
+  python3 "$repo_root/verification/probe_support_environment.py" postgresql \
+    --cell "$cell_id" --pg18-bindir "$pg18_bindir" --output "$resume_environment"
 make --no-print-directory -C "$repo_root" server-consumer-smoke-phase \
   SERVER_SMOKE_URL="$listen_url" SERVER_SMOKE_JWT_SECRET_FILE="$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE" \
   SERVER_SMOKE_PHASE=resume SERVER_SMOKE_ADAPTER_PID="$adapter_pid" \
@@ -259,6 +270,7 @@ fi
 DATABASE_URL="$admin_url" "$seed" --output "$work_dir/seed.sqlite"
 test -s "$work_dir/seed.sqlite"
 set -- python3 "$tool" complete-server-cell --repo-root "$repo_root" --cell "$cell_id" --output "$cell_result" --initial "$work_dir/initial.json" --resume "$work_dir/resume.json" --killed-pid "$killed_pid" --remote "$work_dir/remote.json" --server-verification "$work_dir/server.json" --artifact "$extension_archive" --artifact "$adapter" --artifact "$seed"
+set -- "$@" --initial-environment "$initial_environment" --resume-environment "$resume_environment" --release-manifest "$release_manifest"
 for hash in $sealed_hashes; do set -- "$@" --expected-artifact-hash "$hash"; done
 "$@"
 "$provisioner" lifecycle --state-dir "$work_dir/state" destroy "$attach_run_id" >/dev/null

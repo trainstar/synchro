@@ -1,10 +1,15 @@
 package kotlin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
 	"github.com/trainstar/synchro/conformance/scenarios"
@@ -12,14 +17,1143 @@ import (
 
 const schemaCheckScenarioID = "SCN-PERF-SCHEMA-CHECK-001"
 
+type schemaProofSnapshot struct {
+	Result
+	Schema            *schemaRef
+	ApplicationRows   []map[string]json.RawMessage
+	RetainedMutations []retainedMutation
+	ScopeStates       []scopeStateRecord
+}
+
+func decodeSchemaProofSnapshot(raw Result) (schemaProofSnapshot, error) {
+	value := schemaProofSnapshot{Result: raw}
+	if err := raw.requireCompleteMigrationCapture(); err != nil {
+		return value, err
+	}
+	if err := raw.requireCompleteAcceptedMutationOutcomes(); err != nil {
+		return value, err
+	}
+	if json.Unmarshal(raw.Schema, &value.Schema) != nil || value.Schema == nil || json.Unmarshal(raw.RetainedMutations, &value.RetainedMutations) != nil {
+		return value, errors.New("proof schema or retained inspection is invalid")
+	}
+	var err error
+	value.ApplicationRows, err = androidApplicationRows(raw.ApplicationRows)
+	if err != nil {
+		return value, err
+	}
+	value.ScopeStates, err = androidCursorScopeStates(raw.ScopeStates)
+	return value, err
+}
+
+func schemaProofCapture(ctx context.Context, state *platformClient) (schemaProofSnapshot, error) {
+	raw, err := captureClientState(ctx, state)
+	if err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	return decodeSchemaProofSnapshot(raw)
+}
+
+type schemaProofLane struct {
+	client           Client
+	write            scenarios.Operation
+	baseline, intent schemaProofSnapshot
+	original         schemaProofPush
+	localOriginal    retainedMutation
+}
+
+func schemaProofStep(steps map[scenarios.StepID]scenarios.Step, suffix string) scenarios.Step {
+	return steps[scenarios.StepID("STEP-PERF-SCHEMA-CHECK-PROOF-"+suffix+"-001")]
+}
+
+func captureSchemaProof(result *SchemaCheckResult, suffix string, capture schemaProofSnapshot) error {
+	if err := capture.requireCompleteMigrationCapture(); err != nil {
+		return err
+	}
+	if err := capture.requireCompleteAcceptedMutationOutcomes(); err != nil {
+		return err
+	}
+	id := scenarios.ExpectationID("EXPECT-PERF-SCHEMA-CHECK-PROOF-" + suffix + "-001")
+	if _, found := result.ProofCaptures[id]; found {
+		return errors.New("schema proof capture identity repeated")
+	}
+	result.ProofCaptures[id] = capture.Result
+	return nil
+}
+
+func prepareSchemaProof(ctx context.Context, scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, controller *blackbox.NativeController, platform *Platform, result *SchemaCheckResult) ([]schemaProofLane, error) {
+	if scenario.NativeLocalFixture == nil {
+		return nil, errors.New("schema proof local fixture is absent")
+	}
+	source, err := schemaProofSchema(controller, scenario, "schema-v1")
+	if err != nil {
+		return nil, err
+	}
+	commit := schemaProofStep(steps, "BASELINE-COMMIT")
+	if observed, err := controller.ApplyStep(ctx, commit.Operation); err != nil || observed.Disposition != "success" {
+		return nil, fmt.Errorf("commit proof baseline: %v", err)
+	}
+	materialize := schemaProofStep(steps, "BASELINE-MATERIALIZE")
+	if observed, err := controller.ProcessStep(ctx, nil, materialize.Operation); err != nil || observed.Disposition != "success" {
+		return nil, fmt.Errorf("materialize proof baseline: %v", err)
+	}
+	lanes := make([]schemaProofLane, 0, 2)
+	for _, name := range []string{"PREPARED", "COMMITTED"} {
+		bootstrap := schemaProofStep(steps, name+"-BOOTSTRAP")
+		client, err := schemaCheckClientForStep(bootstrap)
+		if err != nil {
+			return nil, err
+		}
+		if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: "empty", LocalFixture: scenario.NativeLocalFixture}); err != nil {
+			return nil, err
+		}
+		state, err := platform.clientFor(client)
+		if err != nil {
+			return nil, err
+		}
+		state.selectors["schema-proof-sentinel"] = RowSelector{TableName: scenario.NativeLocalFixture.TableName, PrimaryKeyField: "id", PrimaryKey: TypedValue{Type: "string", Value: scenario.NativeLocalFixture.ID}}
+		suffix := name + "-WRITE"
+		if name == "COMMITTED" {
+			suffix = "COMMITTED-M1-WRITE"
+		}
+		write, err := controller.ApplicationWrite(schemaProofStep(steps, suffix).Operation)
+		if err != nil {
+			return nil, err
+		}
+		var payload struct {
+			Table string                     `json:"table_id"`
+			PK    map[string]json.RawMessage `json:"pk"`
+		}
+		if json.Unmarshal(write.Payload, &payload) != nil || len(payload.PK) != 1 {
+			return nil, errors.New("proof row identity is invalid")
+		}
+		call, err := kotlinScenarioCall(ctx, platform, client, "start")
+		if err != nil || call.Completion != "idle" {
+			return nil, fmt.Errorf("bootstrap proof client: %v", err)
+		}
+		result.ProofCalls = append(result.ProofCalls, call)
+		for field, value := range payload.PK {
+			var id string
+			if json.Unmarshal(value, &id) != nil {
+				return nil, errors.New("proof runtime row identity is invalid")
+			}
+			state.selectors["schema-proof-row"] = RowSelector{TableName: payload.Table, PrimaryKeyField: field, PrimaryKey: TypedValue{Type: "string", Value: id}}
+		}
+		if len(call.transportObservations) == 0 {
+			return nil, errors.New("proof bootstrap connect is absent")
+		}
+		if err := validateKotlinWireObservation(scenario, string(bootstrap.ID), call.transportObservations[0]); err != nil {
+			return nil, err
+		}
+		if observed, err := platform.Lifecycle(ctx, LifecycleRequest{Client: client, Operation: "stop"}); err != nil || observed.Disposition != "success" {
+			return nil, fmt.Errorf("stop proof client: %v", err)
+		}
+		baseline, err := schemaProofCapture(ctx, state)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireSchemaProofSentinel(scenario.NativeLocalFixture, baseline); err != nil {
+			return nil, err
+		}
+		if *baseline.Schema != source || baseline.MutationLedgerCount == nil || *baseline.MutationLedgerCount != 0 {
+			return nil, errors.New("proof bootstrap did not establish clean S1")
+		}
+		if err := requireSchemaProofPhysical(controller, scenario, baseline); err != nil {
+			return nil, err
+		}
+		baselineWrite, err := scenarios.SchemaProofBaselineWrite(scenario, schemaProofStep(steps, suffix).Operation)
+		if err != nil {
+			return nil, err
+		}
+		baselineWrite, err = controller.ApplicationWrite(baselineWrite)
+		if err != nil {
+			return nil, err
+		}
+		if err := scenarios.RequireLocalWriteRow(baselineWrite, baseline.ApplicationRows); err != nil {
+			return nil, err
+		}
+		if err := captureSchemaProof(result, name+"-S1", baseline); err != nil {
+			return nil, err
+		}
+		lanes = append(lanes, schemaProofLane{client: client, write: write, baseline: baseline})
+	}
+	for index := range lanes {
+		lane := &lanes[index]
+		state, _ := platform.clientFor(lane.client)
+		if observed, err := platform.ApplyStep(ctx, lane.client, lane.write); err != nil || observed.Disposition != "success" {
+			return nil, fmt.Errorf("apply proof intent: %v", err)
+		}
+		intent, err := schemaProofCapture(ctx, state)
+		if err != nil {
+			return nil, err
+		}
+		if len(intent.RetainedMutations) != 1 || intent.RetainedMutations[0].AuthoredSchema != *lane.baseline.Schema || intent.RetainedMutations[0].Status != "pending" || intent.RetainedMutations[0].SourceKind == "normalized" || intent.RetainedMutations[0].NormalizedMutationID != nil || intent.RetainedMutations[0].DependsOnMutationID != nil {
+			return nil, errors.New("proof intent did not retain its S1 binding")
+		}
+		if err := scenarios.RequireLocalWriteRow(lane.write, intent.ApplicationRows); err != nil {
+			return nil, err
+		}
+		lane.intent = intent
+		lane.localOriginal = intent.RetainedMutations[0]
+		if index == 0 {
+			if err := captureSchemaProof(result, "PREPARED-INTENT", intent); err != nil {
+				return nil, err
+			}
+		}
+	}
+	committed := &lanes[1]
+	state, _ := platform.clientFor(committed.client)
+	push := schemaProofStep(steps, "COMMITTED-M1-SEND").Operation
+	if err := bindSchemaProofPush(controller, push); err != nil {
+		return nil, err
+	}
+	connect := schemaProofStep(steps, "COMMITTED-M1-CONNECT")
+	if _, err := platform.synchronizeWithResponseLoss(ctx, state, "start", []scenarios.Operation{connect.Operation, push}, "00000000-0000-4000-8000-000000033111"); err != nil {
+		return nil, err
+	}
+	if state.pendingLoss == nil {
+		return nil, errors.New("M1 response cut is absent")
+	}
+	committed.intent, err = decodeSchemaProofSnapshot(state.pendingLoss.restartCapture)
+	if err != nil {
+		return nil, err
+	}
+	pushes := schemaProofClientPushes(platform, committed.client.ClientID)
+	if len(pushes) != 1 {
+		return nil, errors.New("initial M1 actual push is absent")
+	}
+	committed.original = pushes[0]
+	request, err := decodeSchemaProofPush(committed.original)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireSchemaProofApplied(committed.original, request.Mutations[0].MutationID, *committed.baseline.Schema); err != nil {
+		return nil, err
+	}
+	if len(committed.intent.RetainedMutations) != 1 {
+		return nil, errors.New("initial M1 retained ledger is not a singleton")
+	}
+	sealed := committed.intent.RetainedMutations[0]
+	if sealed.MutationID != committed.localOriginal.MutationID || sealed.Status != "sealed" || sealed.DependsOnMutationID != nil || sealed.SealedBatchID == nil || *sealed.SealedBatchID != request.BatchID || sealed.SealedOrdinal == nil || *sealed.SealedOrdinal != 0 {
+		return nil, errors.New("initial M1 bytes are not bound to its sealed original record")
+	}
+	if err := requireSchemaProofMutation(sealed, request.Mutations[0]); err != nil {
+		return nil, err
+	}
+	if len(committed.intent.AcceptedMutationOutcomes) != 0 {
+		return nil, errors.New("initial M1 response was reconciled before the process cut")
+	}
+	if err := requireSchemaProofOriginal(committed.localOriginal, committed.intent.RetainedMutations); err != nil {
+		return nil, err
+	}
+	if err := captureSchemaProof(result, "COMMITTED-M1-SEALED", committed.intent); err != nil {
+		return nil, err
+	}
+	if err := captureSchemaProof(result, "COMMITTED-M1-ACCEPTED", committed.intent); err != nil {
+		return nil, err
+	}
+	if len(state.pendingLoss.observations) < 2 {
+		return nil, errors.New("M1 initial connect and push trace is incomplete")
+	}
+	if err := validateKotlinWireObservation(scenario, string(connect.ID), state.pendingLoss.observations[0]); err != nil {
+		return nil, err
+	}
+	result.InterruptedCuts = append(result.InterruptedCuts, SchemaProofInterruptedCut{CallID: *connect.NativeBinding.CallID, RestartStepID: schemaProofStep(steps, "COMMITTED-M1-RESTART").ID, Checkpoint: "push", Capture: committed.intent.Result, Transport: state.pendingLoss.observations})
+	if observed, err := platform.ProcessStep(ctx, committed.client, schemaProofStep(steps, "COMMITTED-M1-RESTART").Operation); err != nil || observed.Disposition != "success" {
+		return nil, fmt.Errorf("restart M1 response cut: %v", err)
+	}
+	return lanes, nil
+}
+
+func beginSchemaProofCheckpoint(ctx context.Context, platform *Platform, lane schemaProofLane, step scenarios.Step) (schemaProofSnapshot, error) {
+	state, err := platform.clientFor(lane.client)
+	if err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	before, err := captureClientState(ctx, state)
+	if err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	checkpoint := state.session.Checkpoint()
+	started := time.Now()
+	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: step.NativeBinding.Checkpoint}); err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	begin, err := state.session.Execute(ctx, Request{Operation: "begin-call", CallID: string(*step.NativeBinding.CallID), Method: "start"})
+	if err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	call, err := clientCallResult(begin)
+	if err != nil || call.State != "in_flight" {
+		return schemaProofSnapshot{}, errors.New("checkpoint call did not enter flight")
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: step.NativeBinding.Checkpoint}); err != nil {
+		return schemaProofSnapshot{}, err
+	}
+	state.activeCall = &pausedCall{id: string(*step.NativeBinding.CallID), checkpoint: checkpoint, started: started, before: before, paused: true}
+	return schemaProofCapture(ctx, state)
+}
+
+func finishSchemaProofCall(ctx context.Context, platform *Platform, client Client) (SynchronizationResult, error) {
+	state, err := platform.clientFor(client)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	active := state.activeCall
+	if active == nil {
+		return SynchronizationResult{}, errors.New("proof call is absent")
+	}
+	completed, err := state.session.Execute(ctx, Request{Operation: "await-call", CallID: active.id})
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	call, err := clientCallResult(completed)
+	if err != nil || call.State != "completed" || call.Completion != "idle" {
+		return SynchronizationResult{}, errors.New("proof call did not complete idle")
+	}
+	after, err := captureClientState(ctx, state)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	observations, err := state.session.ObservationsAfter(active.checkpoint)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	window, err := state.windowFromResults(active.started, active.before, after, observations)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	state.activeCall = nil
+	state.started = true
+	return synchronizationResult(call.Completion, nil, window), nil
+}
+
+func recoverSchemaProof(ctx context.Context, scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, controller *blackbox.NativeController, platform *Platform, lanes []schemaProofLane, result *SchemaCheckResult) error {
+	target, err := schemaProofSchema(controller, scenario, "schema-v2")
+	if err != nil {
+		return err
+	}
+	for index, name := range []string{"PREPARED", "COMMITTED"} {
+		lane := lanes[index]
+		cut, err := beginSchemaProofCheckpoint(ctx, platform, lane, schemaProofStep(steps, name+"-MIGRATE"))
+		if err != nil {
+			return err
+		}
+		journal, err := decodeMigrationJournal(cut.MigrationJournal)
+		if err != nil || journal == nil || journal.Source != *lane.baseline.Schema || journal.Target != target || journal.Action != "replace" {
+			return errors.New("migration cut has the wrong source or target")
+		}
+		if err := requireSchemaProofSentinel(scenario.NativeLocalFixture, cut); err != nil {
+			return err
+		}
+		var updates map[string]*string
+		if json.Unmarshal([]byte(journal.Stored["scope_cursor_updates_json"]), &updates) != nil || len(cut.ScopeStates) != 1 {
+			return errors.New("migration cursor journal is incomplete")
+		}
+		issued, found := updates[cut.ScopeStates[0].ScopeID]
+		if !found || issued == nil || *issued == "" || len(lane.intent.ScopeStates) != 1 || lane.intent.ScopeStates[0].Cursor == nil || *issued == *lane.intent.ScopeStates[0].Cursor {
+			return errors.New("migration did not issue a new unaffected cursor")
+		}
+		state, _ := platform.clientFor(lane.client)
+		observations, err := state.session.ObservationsAfter(state.activeCall.checkpoint)
+		if err != nil || len(observations) == 0 || observations[0].ConnectResponseFacts == nil {
+			return errors.New("migration cut is not bound to its actual connect")
+		}
+		for _, observation := range observations[1:] {
+			if observation.OperationClass != "schemas" || observation.StatusCode != 200 {
+				return errors.New("migration checkpoint continued beyond its schema input")
+			}
+		}
+		facts := observations[0].ConnectResponseFacts
+		replacement := facts.ScopeCursorUpdates[cursorFingerprint(cut.ScopeStates[0].ScopeID)]
+		if !facts.ScopeCursorUpdatesComplete || replacement == nil || *replacement != cursorFingerprint(*issued) {
+			return errors.New("journal cursor differs from actual response-issued replacement")
+		}
+		if err := validateSchemaProofActivation(lane.intent, cut, *journal, *issued, name == "PREPARED"); err != nil {
+			return err
+		}
+		if err := validateKotlinWireObservation(scenario, string(schemaProofStep(steps, name+"-MIGRATE").ID), observations[0]); err != nil {
+			return err
+		}
+		if observations[0].OperationClass != "connect" || observations[0].StatusCode != 200 || facts.Action != "replace" || facts.SchemaVersion != target.Version || facts.SchemaHash != target.Hash || !facts.AffectedScopesComplete || len(facts.AffectedScopeFingerprints) != 0 {
+			return errors.New("migration checkpoint has no complete real replace response")
+		}
+		if err := requireSchemaProofPhysical(controller, scenario, cut); err != nil {
+			return err
+		}
+		if err := captureSchemaProof(result, name+"-JOURNAL", cut); err != nil {
+			return err
+		}
+		if observed, err := platform.ProcessStep(ctx, lane.client, schemaProofStep(steps, name+"-CUT").Operation); err != nil || observed.Disposition != "success" {
+			return fmt.Errorf("restart checkpoint cut: %v", err)
+		}
+		result.InterruptedCuts = append(result.InterruptedCuts, SchemaProofInterruptedCut{CallID: *schemaProofStep(steps, name+"-MIGRATE").NativeBinding.CallID, RestartStepID: schemaProofStep(steps, name+"-CUT").ID, Checkpoint: schemaProofStep(steps, name+"-MIGRATE").NativeBinding.Checkpoint, Capture: cut.Result, Transport: observations})
+		platform.mu.Lock()
+		traffic := platform.schemaProofRequests
+		platform.mu.Unlock()
+		recovered, err := beginSchemaProofCheckpoint(ctx, platform, lane, schemaProofStep(steps, name+"-RECOVER"))
+		if err != nil {
+			return err
+		}
+		platform.mu.Lock()
+		newTraffic := platform.schemaProofRequests
+		platform.mu.Unlock()
+		if traffic != newTraffic {
+			return errors.New("startup recovery sent HTTP traffic before its committed checkpoint")
+		}
+		if *recovered.Schema != target || len(recovered.ScopeStates) != 1 || recovered.ScopeStates[0].Cursor == nil || *recovered.ScopeStates[0].Cursor != *issued || !reflect.DeepEqual(cut.RetainedMutations, recovered.RetainedMutations) {
+			return errors.New("offline recovery did not preserve target schema, cursor, or intent")
+		}
+		if recovered.ProcessID == cut.ProcessID || recovered.DatabaseIdentityFingerprint != cut.DatabaseIdentityFingerprint {
+			return errors.New("checkpoint cut did not replace the process against the same database")
+		}
+		recoveryJournal, err := decodeMigrationJournal(recovered.MigrationJournal)
+		if err != nil || recoveryJournal == nil || recoveryJournal.Phase != "ddl_applied" || recoveryJournal.Source != journal.Source || recoveryJournal.Target != journal.Target || !reflect.DeepEqual(recoveryJournal.Stored, journal.Stored) {
+			return errors.New("recovery changed the validated migration journal")
+		}
+		if err := requireSchemaProofSentinel(scenario.NativeLocalFixture, recovered); err != nil {
+			return err
+		}
+		if err := requireSchemaProofPhysical(controller, scenario, recovered); err != nil {
+			return err
+		}
+		if err := captureSchemaProof(result, name+"-RECOVERED", recovered); err != nil {
+			return err
+		}
+		if err := scenarios.RequireLocalWriteRow(lane.write, recovered.ApplicationRows); err != nil {
+			return err
+		}
+		finalWrite := lane.write
+		state, _ = platform.clientFor(lane.client)
+		if name == "COMMITTED" {
+			finalWrite, err = controller.ApplicationWrite(schemaProofStep(steps, "COMMITTED-M2-WRITE").Operation)
+			if err != nil {
+				return err
+			}
+			if observed, err := platform.ApplyStep(ctx, lane.client, finalWrite); err != nil || observed.Disposition != "success" {
+				return fmt.Errorf("write later intent during recovery pause: %v", err)
+			}
+			if err := runSchemaProofReplay(ctx, scenario.NativeLocalFixture, steps, controller, platform, lane, finalWrite, result); err != nil {
+				return err
+			}
+		} else {
+			if err := bindSchemaProofPush(controller, schemaProofStep(steps, "PREPARED-PUSH").Operation); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "push"}); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "push"}); err != nil {
+				return err
+			}
+			pushes := schemaProofClientPushes(platform, lane.client.ClientID)
+			if len(pushes) != 1 {
+				return errors.New("prepared response pause did not observe exactly one actual push")
+			}
+			request, err := decodeSchemaProofPush(pushes[0])
+			if err != nil || request.Schema != target {
+				return errors.New("prepared paused push did not use S2")
+			}
+			if err := requireSchemaProofApplied(pushes[0], lane.localOriginal.MutationID, target); err != nil {
+				return err
+			}
+			sealed, err := schemaProofCapture(ctx, state)
+			if err != nil {
+				return err
+			}
+			if len(sealed.RetainedMutations) != 1 || len(sealed.AcceptedMutationOutcomes) != 0 {
+				return errors.New("prepared push reconciled before its sealing capture")
+			}
+			if err := requireSchemaProofOriginal(lane.localOriginal, sealed.RetainedMutations); err != nil {
+				return err
+			}
+			original := sealed.RetainedMutations[0]
+			if original.Status != "sealed" || original.SealedBatchID == nil || *original.SealedBatchID != request.BatchID {
+				return errors.New("prepared original does not name its actual sealed batch")
+			}
+			if err := requireSchemaProofMutation(original, request.Mutations[0]); err != nil {
+				return err
+			}
+			if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+				return err
+			}
+		}
+		call, err := finishSchemaProofCall(ctx, platform, lane.client)
+		if err != nil {
+			return err
+		}
+		result.ProofCalls = append(result.ProofCalls, call)
+		if call.after == nil {
+			return errors.New("proof final capture is absent")
+		}
+		final, err := decodeSchemaProofSnapshot(*call.after)
+		if err != nil {
+			return err
+		}
+		if err := requireSchemaProofSentinel(scenario.NativeLocalFixture, final); err != nil {
+			return err
+		}
+		if err := scenarios.RequireLocalWriteRow(finalWrite, final.ApplicationRows); err != nil {
+			return err
+		}
+		if final.PendingChangeCount == nil || *final.PendingChangeCount != 0 {
+			return errors.New("proof call left pending mutations")
+		}
+		if err := requireSchemaProofPhysical(controller, scenario, final); err != nil {
+			return err
+		}
+		if err := validateSchemaProofRecoveryWire(scenario, steps, name, call, target, recovered); err != nil {
+			return err
+		}
+		if err := captureSchemaProof(result, name+"-FINAL", final); err != nil {
+			return err
+		}
+		pushes := schemaProofClientPushes(platform, lane.client.ClientID)
+		if name == "PREPARED" {
+			if len(final.AcceptedMutationOutcomes) != 1 || len(final.RetainedMutations) != 0 || final.MutationLedgerCount == nil || *final.MutationLedgerCount != 1 {
+				return errors.New("prepared final ledger does not contain exactly one accepted original")
+			}
+			if len(pushes) != 1 {
+				return errors.New("prepared lane did not send exactly one push")
+			}
+			if err := requireSchemaProofStoredOutcome(final, pushes[0]); err != nil {
+				return err
+			}
+			if err := requireSchemaProofRowMetadata(final, lane.localOriginal, pushes[0]); err != nil {
+				return err
+			}
+		} else {
+			if len(final.AcceptedMutationOutcomes) != 2 || len(final.RetainedMutations) != 0 || final.MutationLedgerCount == nil || *final.MutationLedgerCount != 2 {
+				return errors.New("committed final ledger does not contain exactly two accepted originals")
+			}
+			if len(pushes) != 3 {
+				return errors.New("committed lane did not send exactly three pushes")
+			}
+			if err := requireSchemaProofStoredOutcome(final, pushes[1]); err != nil {
+				return err
+			}
+			if err := requireSchemaProofStoredOutcome(final, pushes[2]); err != nil {
+				return err
+			}
+			if err := requireSchemaProofRowMetadata(final, lane.localOriginal, pushes[2]); err != nil {
+				return err
+			}
+		}
+	}
+	platform.mu.Lock()
+	result.ProofPushes = append([]schemaProofPush(nil), platform.schemaProofPushes...)
+	platform.mu.Unlock()
+	return nil
+}
+
+func runSchemaProofReplay(ctx context.Context, fixture *scenarios.NativeLocalFixture, steps map[scenarios.StepID]scenarios.Step, controller *blackbox.NativeController, platform *Platform, lane schemaProofLane, m2 scenarios.Operation, result *SchemaCheckResult) error {
+	state, _ := platform.clientFor(lane.client)
+	beforeM2, err := schemaProofCapture(ctx, state)
+	if err != nil {
+		return err
+	}
+	if len(beforeM2.RetainedMutations) != 2 || len(beforeM2.AcceptedMutationOutcomes) != 0 {
+		return errors.New("unreconciled M1 and M2 ledger is not exact")
+	}
+	if err := requireSchemaProofOriginal(lane.localOriginal, beforeM2.RetainedMutations); err != nil {
+		return err
+	}
+	var m2Original retainedMutation
+	for _, value := range beforeM2.RetainedMutations {
+		if value.SourceKind == lane.localOriginal.SourceKind && value.MutationID != lane.localOriginal.MutationID && value.LocalOrder > lane.localOriginal.LocalOrder {
+			if m2Original.MutationID != "" {
+				return errors.New("M2 original intent is ambiguous")
+			}
+			m2Original = value
+		}
+	}
+	if m2Original.MutationID == "" || m2Original.AuthoredSchema != *beforeM2.Schema || m2Original.BaseVersion != nil || m2Original.Status != "pending" || m2Original.NormalizedMutationID != nil || m2Original.SealedBatchID != nil || m2Original.SealedOrdinal != nil || m2Original.DependsOnMutationID == nil || *m2Original.DependsOnMutationID != lane.localOriginal.MutationID {
+		return errors.New("M2 original did not retain its actual local base and S2 binding")
+	}
+	if err := scenarios.RequireLocalWriteRow(m2, beforeM2.ApplicationRows); err != nil {
+		return err
+	}
+	if err := captureSchemaProof(result, "COMMITTED-M2-INTENT", beforeM2); err != nil {
+		return err
+	}
+	serverBefore, err := controller.Capture(ctx, []string{lane.client.Key}, []string{"server-state"})
+	if err != nil || len(serverBefore) != 1 {
+		return fmt.Errorf("capture before replay: %v", err)
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "push"}); err != nil {
+		return err
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+		return err
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "push"}); err != nil {
+		return err
+	}
+	pushes := schemaProofClientPushes(platform, lane.client.ClientID)
+	if len(pushes) != 2 {
+		return errors.New("M1 replay is not the second actual push")
+	}
+	replay := pushes[1]
+	originalRequest, err := decodeSchemaProofPush(lane.original)
+	if err != nil {
+		return err
+	}
+	replayRequest, err := decodeSchemaProofPush(replay)
+	if err != nil {
+		return err
+	}
+	if originalRequest.Mutations[0].MutationID != lane.localOriginal.MutationID || !reflect.DeepEqual(originalRequest.Mutations, replayRequest.Mutations) || originalRequest.BatchID == replayRequest.BatchID && !bytes.Equal(lane.original.Request, replay.Request) || originalRequest.BatchID != replayRequest.BatchID && replayRequest.Schema != *beforeM2.Schema {
+		return errors.New("replay changed immutable M1 or reused batch bytes")
+	}
+	m1ID := originalRequest.Mutations[0].MutationID
+	if err := requireSchemaProofApplied(replay, m1ID, originalRequest.Mutations[0].AuthoredSchema); err != nil {
+		return err
+	}
+	var first, second struct {
+		Accepted []json.RawMessage `json:"accepted"`
+	}
+	if json.Unmarshal(lane.original.Response, &first) != nil || json.Unmarshal(replay.Response, &second) != nil || len(first.Accepted) != 1 || len(second.Accepted) != 1 || blackbox.CompareSemanticJSON(first.Accepted[0], second.Accepted[0], blackbox.NormalizationSpec{}) != nil {
+		return errors.New("M1 replay did not return the original historical outcome")
+	}
+	serverAfter, err := controller.Capture(ctx, []string{lane.client.Key}, []string{"server-state"})
+	if err != nil || len(serverAfter) != 1 {
+		return fmt.Errorf("capture after replay: %v", err)
+	}
+	if err := compareSchemaProofServer(serverBefore[0], serverAfter[0]); err != nil {
+		return err
+	}
+	result.ProofServerCaptures["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-BEFORE-001"] = serverBefore[0]
+	result.ProofServerCaptures["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-AFTER-001"] = serverAfter[0]
+	pausedM1, err := schemaProofCapture(ctx, state)
+	if err != nil {
+		return err
+	}
+	if len(pausedM1.RetainedMutations) != 2 || len(pausedM1.AcceptedMutationOutcomes) != 0 {
+		return errors.New("M1 replay reconciled before its response pause")
+	}
+	if err := requireSchemaProofOriginal(lane.localOriginal, pausedM1.RetainedMutations); err != nil {
+		return err
+	}
+	if err := requireSchemaProofOriginal(m2Original, pausedM1.RetainedMutations); err != nil {
+		return err
+	}
+	for _, value := range pausedM1.RetainedMutations {
+		if value.MutationID == m2Original.MutationID && !reflect.DeepEqual(value, m2Original) {
+			return errors.New("unreconciled original M2 changed before M1 acceptance")
+		}
+	}
+	if err := bindSchemaProofPush(controller, schemaProofStep(steps, "COMMITTED-M2-REPLY").Operation); err != nil {
+		return err
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "arm-transport-pause", TransportOperation: "push"}); err != nil {
+		return err
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "resume-transport-pause"}); err != nil {
+		return err
+	}
+	if _, err := state.session.Execute(ctx, Request{Operation: "await-transport-pause", TransportOperation: "push"}); err != nil {
+		return err
+	}
+	reconciled, err := schemaProofCapture(ctx, state)
+	if err != nil {
+		return err
+	}
+	if err := requireSchemaProofStoredOutcome(reconciled, replay); err != nil {
+		return err
+	}
+	if len(reconciled.RetainedMutations) != 1 || len(reconciled.AcceptedMutationOutcomes) != 1 {
+		return errors.New("M1 reconciliation did not leave exactly one sealed M2")
+	}
+	sealedM2 := reconciled.RetainedMutations[0]
+	var accepted struct {
+		Accepted []struct {
+			ServerVersion string `json:"server_version"`
+		} `json:"accepted"`
+	}
+	if json.Unmarshal(replay.Response, &accepted) != nil || len(accepted.Accepted) != 1 || accepted.Accepted[0].ServerVersion == "" {
+		return errors.New("M1 accepted predecessor base is absent")
+	}
+	if err := requireSchemaProofSuccessorTransition(m2Original, sealedM2, accepted.Accepted[0].ServerVersion); err != nil {
+		return err
+	}
+	pushes = schemaProofClientPushes(platform, lane.client.ClientID)
+	if len(pushes) != 3 {
+		return errors.New("M2 response pause is not the third actual push")
+	}
+	m2Request, err := decodeSchemaProofPush(pushes[2])
+	if err != nil || m2Request.Schema != *beforeM2.Schema || m2Request.Mutations[0].MutationID != m2Original.MutationID || sealedM2.SealedBatchID == nil || *sealedM2.SealedBatchID != m2Request.BatchID {
+		return errors.New("M2 push is not bound to its sealed original and S2")
+	}
+	if err := requireSchemaProofMutation(sealedM2, m2Request.Mutations[0]); err != nil {
+		return err
+	}
+	if err := requireSchemaProofApplied(pushes[2], m2Original.MutationID, *beforeM2.Schema); err != nil {
+		return err
+	}
+	if _, found := reconciled.AcceptedMutationOutcomes[m2Original.MutationID]; found {
+		return errors.New("M2 reconciled before its response pause")
+	}
+	if err := captureSchemaProof(result, "COMMITTED-M2-PAUSED", reconciled); err != nil {
+		return err
+	}
+	if err := scenarios.RequireLocalWriteRow(m2, reconciled.ApplicationRows); err != nil {
+		return err
+	}
+	if err := requireSchemaProofSentinel(fixture, reconciled); err != nil {
+		return err
+	}
+	_, err = state.session.Execute(ctx, Request{Operation: "resume-transport-pause"})
+	return err
+}
+
+func bindSchemaProofPush(controller *blackbox.NativeController, operation scenarios.Operation) error {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(operation.Payload, &payload) != nil {
+		return errors.New("proof push binding payload is invalid")
+	}
+	payload["delivery"] = json.RawMessage(`"apply"`)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	operation.Payload = encoded
+	return controller.BindApplicationPush(operation)
+}
+
+type wireMutation struct {
+	MutationID     string                     `json:"mutation_id"`
+	Table          string                     `json:"table"`
+	Operation      string                     `json:"op"`
+	PrimaryKey     map[string]json.RawMessage `json:"pk"`
+	AuthoredSchema schemaRef                  `json:"authored_schema"`
+	BaseVersion    *string                    `json:"base_version"`
+	ClientVersion  string                     `json:"client_version"`
+	Columns        map[string]json.RawMessage `json:"columns"`
+}
+
+type schemaProofPushRequest struct {
+	BatchID   string         `json:"batch_id"`
+	Schema    schemaRef      `json:"schema"`
+	Mutations []wireMutation `json:"mutations"`
+}
+
+func decodeSchemaProofPush(push schemaProofPush) (schemaProofPushRequest, error) {
+	var request schemaProofPushRequest
+	if json.Unmarshal(push.Request, &request) != nil || request.BatchID == "" || len(request.Mutations) != 1 {
+		return request, errors.New("proof push does not contain one named mutation")
+	}
+	return request, nil
+}
+
+func validateSchemaProofActivation(before, cut schemaProofSnapshot, journal migrationJournalCapture, issued string, prepared bool) error {
+	if before.Schema == nil || cut.Schema == nil || journal.Source != *before.Schema || len(before.ScopeStates) != 1 || len(cut.ScopeStates) != 1 || before.ScopeStates[0].Cursor == nil || cut.ScopeStates[0].Cursor == nil || before.ScopeStates[0].ScopeID != cut.ScopeStates[0].ScopeID || issued == "" || issued == *before.ScopeStates[0].Cursor {
+		return errors.New("schema activation captures are incomplete")
+	}
+	if !reflect.DeepEqual(before.RetainedMutations, cut.RetainedMutations) {
+		return errors.New("schema activation changed queued intent")
+	}
+	if prepared {
+		if journal.Phase != "prepared" || *cut.Schema != journal.Source || !bytes.Equal(before.PhysicalSchema, cut.PhysicalSchema) || *cut.ScopeStates[0].Cursor != *before.ScopeStates[0].Cursor {
+			return errors.New("prepared cut changed active schema, physical schema, or cursor")
+		}
+		return nil
+	}
+	if journal.Phase != "ddl_applied" || *cut.Schema != journal.Target || *cut.ScopeStates[0].Cursor != issued || bytes.Equal(before.PhysicalSchema, cut.PhysicalSchema) {
+		return errors.New("committed cut did not activate schema, DDL, and cursor together")
+	}
+	return nil
+}
+
+func compareSchemaProofServer(before, after blackbox.NativeCaptureFacts) error {
+	if len(before.RuntimeRows) == 0 || len(before.StateFacts.MutationOutcomes) == 0 || !reflect.DeepEqual(before.RuntimeRows, after.RuntimeRows) || !reflect.DeepEqual(before.StateFacts.MutationOutcomes, after.StateFacts.MutationOutcomes) {
+		return errors.New("M1 replay changed authoritative row/version/checksum or outcomes")
+	}
+	return nil
+}
+
+func schemaProofSchema(controller *blackbox.NativeController, scenario scenarios.Scenario, aliasName string) (schemaRef, error) {
+	for _, alias := range scenario.NativeIdentityAliases {
+		if alias.Kind == "schema" && alias.Alias == aliasName {
+			values, err := controller.IdentityValues([]scenarios.NativeIdentityAlias{alias})
+			if err != nil || len(values) != 1 {
+				return schemaRef{}, fmt.Errorf("resolve proof schema: %v", err)
+			}
+			var value schemaRef
+			if json.Unmarshal(values[0].RuntimeValue, &value) != nil || value.Version <= 0 || !validLowerHexDigest(value.Hash) {
+				return schemaRef{}, errors.New("proof runtime schema is invalid")
+			}
+			return value, nil
+		}
+	}
+	return schemaRef{}, errors.New("proof schema alias is absent")
+}
+
+func schemaProofClientPushes(platform *Platform, clientID string) []schemaProofPush {
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	var values []schemaProofPush
+	for _, push := range platform.schemaProofPushes {
+		if push.ClientID == clientID {
+			values = append(values, push)
+		}
+	}
+	return values
+}
+
+func sameSchemaProofIntent(before, after []retainedMutation) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index, want := range before {
+		got := after[index]
+		if want.MutationID != got.MutationID || want.LocalOrder != got.LocalOrder || want.TableID != got.TableID || want.TableName != got.TableName || want.PrimaryKeyFieldID != got.PrimaryKeyFieldID || want.PrimaryKeyLogicalType != got.PrimaryKeyLogicalType || want.SourceKind != got.SourceKind || want.RecordID != got.RecordID || want.Operation != got.Operation || want.AuthoredSchema != got.AuthoredSchema || !equalKotlinOptionalStrings(want.BaseVersion, got.BaseVersion) || want.ClientVersion != got.ClientVersion || !reflect.DeepEqual(want.AuthoredFields, got.AuthoredFields) {
+			return false
+		}
+	}
+	return true
+}
+
+func requireSchemaProofOriginal(original retainedMutation, values []retainedMutation) error {
+	matched := false
+	for _, value := range values {
+		if value.MutationID == original.MutationID {
+			if matched {
+				return errors.New("original local record is ambiguous")
+			}
+			matched = true
+			if !sameSchemaProofIntent([]retainedMutation{original}, []retainedMutation{value}) || !equalKotlinOptionalStrings(original.DependsOnMutationID, value.DependsOnMutationID) {
+				return errors.New("original local record changed immutable intent")
+			}
+			if original.NormalizedMutationID != nil || value.NormalizedMutationID != nil || value.SourceKind == "normalized" {
+				return errors.New("single-write original acquired normalized lineage")
+			}
+			if value.Status == "pending" {
+				if original.Status != "pending" || value.SealedBatchID != nil || value.SealedOrdinal != nil {
+					return errors.New("pending original has invalid sealing state")
+				}
+			} else if value.Status == "sealed" {
+				if value.SealedBatchID == nil || *value.SealedBatchID == "" || value.SealedOrdinal == nil || *value.SealedOrdinal != 0 {
+					return errors.New("sealed original has no exact singleton membership")
+				}
+			} else {
+				return errors.New("original local record has an unexpected state")
+			}
+			if original.SealedBatchID != nil && (!equalKotlinOptionalStrings(original.SealedBatchID, value.SealedBatchID) || !reflect.DeepEqual(original.SealedOrdinal, value.SealedOrdinal)) {
+				return errors.New("sealed original changed its established membership")
+			}
+		}
+	}
+	if !matched {
+		return errors.New("original local record is no longer inspectable")
+	}
+	return nil
+}
+
+func requireSchemaProofSuccessorTransition(before, after retainedMutation, base string) error {
+	if before.Status != "pending" || before.BaseVersion != nil || before.SealedBatchID != nil || before.SealedOrdinal != nil || before.DependsOnMutationID == nil || base == "" || after.Status != "sealed" || after.BaseVersion == nil || *after.BaseVersion != base || after.DependsOnMutationID != nil || after.SealedBatchID == nil || *after.SealedBatchID == "" || after.SealedOrdinal == nil || *after.SealedOrdinal != 0 {
+		return errors.New("M2 did not seal against its validated accepted predecessor base")
+	}
+	compare := after
+	compare.BaseVersion = before.BaseVersion
+	compare.DependsOnMutationID = before.DependsOnMutationID
+	if !sameSchemaProofIntent([]retainedMutation{before}, []retainedMutation{compare}) || before.NormalizedMutationID != nil || after.NormalizedMutationID != nil || after.SourceKind == "normalized" {
+		return errors.New("original M2 changed more than base and dependency")
+	}
+	return nil
+}
+
+func requireSchemaProofMutation(intent retainedMutation, mutation wireMutation) error {
+	if mutation.MutationID == "" || mutation.MutationID != intent.MutationID || mutation.AuthoredSchema != intent.AuthoredSchema || mutation.Table != intent.TableID || mutation.Operation != intent.Operation || mutation.ClientVersion != intent.ClientVersion || !equalKotlinOptionalStrings(mutation.BaseVersion, intent.BaseVersion) || len(mutation.PrimaryKey) != 1 || len(mutation.Columns) != len(intent.AuthoredFields) {
+		return errors.New("sealed proof mutation changed authored intent")
+	}
+	var recordID string
+	if json.Unmarshal(mutation.PrimaryKey[intent.PrimaryKeyFieldID], &recordID) != nil || recordID != intent.RecordID {
+		return errors.New("sealed proof mutation changed its row identity")
+	}
+	for _, field := range intent.AuthoredFields {
+		value, found := mutation.Columns[field.FieldID]
+		var authoredValue, wireValue *string
+		if !found || json.Unmarshal(field.Value, &authoredValue) != nil || authoredValue == nil || json.Unmarshal(value, &wireValue) != nil || wireValue == nil || *wireValue != *authoredValue {
+			return errors.New("sealed proof mutation changed authored fields")
+		}
+	}
+	return nil
+}
+
+func requireSchemaProofApplied(push schemaProofPush, id string, schema schemaRef) error {
+	var response struct {
+		Accepted []struct {
+			MutationID string    `json:"mutation_id"`
+			Status     string    `json:"status"`
+			Schema     schemaRef `json:"outcome_schema"`
+		} `json:"accepted"`
+		Rejected []json.RawMessage `json:"rejected"`
+	}
+	if push.Status != 200 || json.Unmarshal(push.Response, &response) != nil || len(response.Accepted) != 1 || len(response.Rejected) != 0 || response.Accepted[0].MutationID != id || response.Accepted[0].Status != "applied" || response.Accepted[0].Schema != schema {
+		return errors.New("real push did not return one applied outcome at the required schema")
+	}
+	return nil
+}
+
+func requireSchemaProofStoredOutcome(capture schemaProofSnapshot, push schemaProofPush) error {
+	if err := capture.requireCompleteAcceptedMutationOutcomes(); err != nil {
+		return err
+	}
+	request, err := decodeSchemaProofPush(push)
+	if err != nil {
+		return err
+	}
+	stored, found := capture.AcceptedMutationOutcomes[request.Mutations[0].MutationID]
+	if !found {
+		return errors.New("actual accepted mutation identity is absent from durable storage")
+	}
+	var response struct {
+		Accepted []json.RawMessage `json:"accepted"`
+	}
+	if json.Unmarshal(push.Response, &response) != nil || len(response.Accepted) != 1 || blackbox.CompareSemanticJSON([]byte(stored), response.Accepted[0], blackbox.NormalizationSpec{}) != nil {
+		return errors.New("durable accepted outcome differs from its actual server response")
+	}
+	return nil
+}
+
+func requireSchemaProofSentinel(fixture *scenarios.NativeLocalFixture, capture schemaProofSnapshot) error {
+	if err := capture.requireCompleteMigrationCapture(); err != nil {
+		return err
+	}
+	for _, row := range capture.ApplicationRows {
+		var id, value string
+		if json.Unmarshal(row["id"], &id) == nil && id == fixture.ID {
+			if json.Unmarshal(row["value"], &value) != nil || value != fixture.Value {
+				return errors.New("local sentinel changed")
+			}
+			return nil
+		}
+	}
+	return errors.New("actual local sentinel row is absent")
+}
+
+func requireSchemaProofRowMetadata(capture schemaProofSnapshot, original retainedMutation, push schemaProofPush) error {
+	var response struct {
+		Accepted []struct {
+			ServerVersion string `json:"server_version"`
+		} `json:"accepted"`
+	}
+	if json.Unmarshal(push.Response, &response) != nil || len(response.Accepted) != 1 || response.Accepted[0].ServerVersion == "" {
+		return errors.New("validated proof accepted version is absent")
+	}
+	if original.TableName == "" || original.RecordID == "" {
+		return errors.New("proof row metadata identity is absent")
+	}
+	var records []rowMetadataRecord
+	if json.Unmarshal(capture.RowMetadata, &records) != nil || records == nil {
+		return errors.New("proof row metadata capture is invalid")
+	}
+	matches := 0
+	for _, record := range records {
+		if record.TableName == original.TableName && record.RecordID == original.RecordID {
+			matches++
+			if record.ServerVersion != response.Accepted[0].ServerVersion {
+				return errors.New("proof row metadata version differs from its latest accepted outcome")
+			}
+		}
+	}
+	if matches != 1 {
+		return errors.New("proof row metadata is absent or ambiguous")
+	}
+	return nil
+}
+
+func validateSchemaProofRecoveryWire(scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, name string, call SynchronizationResult, target schemaRef, recovered schemaProofSnapshot) error {
+	if len(call.transportObservations) < 3 {
+		return errors.New("proof recovery omitted real connect, push, or pull traffic")
+	}
+	if recovered.Schema == nil || *recovered.Schema != target || len(recovered.ScopeStates) != 1 || recovered.ScopeStates[0].Cursor == nil || *recovered.ScopeStates[0].Cursor == "" {
+		return errors.New("proof recovered schema or installed cursor is absent")
+	}
+	installed := []string{cursorFingerprint(*recovered.ScopeStates[0].Cursor)}
+	if err := validateKotlinWireObservation(scenario, string(schemaProofStep(steps, name+"-RECOVER").ID), call.transportObservations[0]); err != nil {
+		return err
+	}
+	connect := call.transportObservations[0]
+	facts := connect.ConnectResponseFacts
+	if connect.OperationClass != "connect" || connect.RequestFacts == nil || connect.RequestFacts.SchemaVersion != target.Version || connect.RequestFacts.SchemaHash != target.Hash || connect.CursorFingerprintsComplete == nil || !*connect.CursorFingerprintsComplete || !slices.Equal(connect.CursorFingerprints, installed) || facts == nil || facts.Action != "none" || facts.SchemaVersion != target.Version || facts.SchemaHash != target.Hash {
+		return errors.New("recovery connect did not use recovered S2")
+	}
+	foundSuccessfulPull := false
+	for _, observation := range call.transportObservations[1:] {
+		if observation.OperationClass != "pull" {
+			continue
+		}
+		if observation.RequestFacts == nil || observation.RequestFacts.SchemaVersion != target.Version || observation.RequestFacts.SchemaHash != target.Hash || observation.CursorFingerprintsComplete == nil || !*observation.CursorFingerprintsComplete || !slices.Equal(observation.CursorFingerprints, installed) {
+			return errors.New("proof pull attempt did not use the recovered S2 cursor")
+		}
+		if observation.StatusCode == 200 {
+			if err := validateKotlinWireObservation(scenario, string(schemaProofStep(steps, name+"-COMPLETE").ID), observation); err != nil {
+				return err
+			}
+			foundSuccessfulPull = true
+			break
+		}
+		if observation.StatusCode != 503 || observation.ErrorCode == nil || *observation.ErrorCode != "capture_pending" || observation.Retryable == nil || !*observation.Retryable {
+			return errors.New("proof pull attempt did not return retryable capture_pending")
+		}
+	}
+	if !foundSuccessfulPull {
+		return errors.New("proof recovery omitted its first successful target pull")
+	}
+	pull := call.transportObservations[len(call.transportObservations)-1]
+	if pull.OperationClass != "pull" || pull.RequestFacts == nil || pull.RequestFacts.SchemaVersion != target.Version || pull.RequestFacts.SchemaHash != target.Hash {
+		return errors.New("proof terminal pull did not use S2")
+	}
+	return validateKotlinWireObservation(scenario, string(schemaProofStep(steps, name+"-COMPLETE").ID), pull)
+}
+
+func requireSchemaProofPhysical(controller *blackbox.NativeController, scenario scenarios.Scenario, capture schemaProofSnapshot) error {
+	if capture.Schema == nil {
+		return errors.New("physical schema has no active binding")
+	}
+	var manifest json.RawMessage
+	alias, writeSuffix := "schema-v1", "PREPARED-WRITE"
+	switch capture.Schema.Version {
+	case 1:
+		var setup struct {
+			InitialSchema json.RawMessage `json:"initial_schema"`
+		}
+		if len(scenario.Model.Setup) == 0 || json.Unmarshal(scenario.Model.Setup[0].Payload, &setup) != nil {
+			return errors.New("authored S1 physical manifest is invalid")
+		}
+		manifest = setup.InitialSchema
+	case 2:
+		alias, writeSuffix = "schema-v2", "COMMITTED-M2-WRITE"
+		for _, step := range scenario.Steps {
+			if step.ID == "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001" {
+				manifest = step.Operation.Payload
+			}
+		}
+	default:
+		return errors.New("schema proof physical manifest is not S1 or S2")
+	}
+	schema, err := schemaProofSchema(controller, scenario, alias)
+	if err != nil {
+		return err
+	}
+	if schema != *capture.Schema {
+		return errors.New("physical schema active identity differs from its authored binding")
+	}
+	for _, step := range scenario.Steps {
+		if step.ID == scenarios.StepID("STEP-PERF-SCHEMA-CHECK-PROOF-"+writeSuffix+"-001") {
+			write, err := controller.ApplicationWrite(step.Operation)
+			if err != nil {
+				return err
+			}
+			return compareSchemaProofPhysical(manifest, step.Operation.Payload, write.Payload, capture.PhysicalSchema)
+		}
+	}
+	return errors.New("schema proof authored physical field binding is absent")
+}
+
+func compareSchemaProofPhysical(manifest, authoredWrite, runtimeWrite, physical json.RawMessage) error {
+	var authored struct {
+		Tables []struct {
+			TableID string `json:"table_id"`
+			Fields  []struct {
+				ID         string `json:"field_id"`
+				Type       string `json:"type"`
+				Nullable   *bool  `json:"nullable"`
+				PrimaryKey *bool  `json:"primary_key"`
+			} `json:"fields"`
+		} `json:"tables"`
+	}
+	var logical, runtime struct {
+		Table   string                     `json:"table_id"`
+		PK      map[string]json.RawMessage `json:"pk"`
+		Columns map[string]json.RawMessage `json:"columns"`
+	}
+	if json.Unmarshal(manifest, &authored) != nil || len(authored.Tables) != 1 || authored.Tables[0].TableID != "items" || len(authored.Tables[0].Fields) < 2 || len(authored.Tables[0].Fields) > 3 {
+		return errors.New("schema proof authored table manifest is incomplete")
+	}
+	if json.Unmarshal(authoredWrite, &logical) != nil || json.Unmarshal(runtimeWrite, &runtime) != nil || logical.Table != authored.Tables[0].TableID || runtime.Table != "cf_items" || len(logical.PK) != 1 || len(runtime.PK) != 1 || logical.PK["id"] == nil || runtime.PK["id"] == nil || len(logical.Columns) != len(runtime.Columns) || len(logical.Columns)+1 != len(authored.Tables[0].Fields) {
+		return errors.New("schema proof physical field binding is incomplete")
+	}
+	expected := make(map[string]physicalSchemaColumn)
+	for _, field := range authored.Tables[0].Fields {
+		if (field.ID != "id" && field.ID != "value" && field.ID != "note") || field.Nullable == nil || field.PrimaryKey == nil || *field.PrimaryKey != (field.ID == "id") || field.Type != "string" {
+			return errors.New("schema proof authored field storage is incomplete or unsupported")
+		}
+		pk := 0
+		if *field.PrimaryKey {
+			pk = 1
+		} else {
+			value, found := logical.Columns[field.ID]
+			runtimeValue, bound := runtime.Columns[field.ID]
+			var authoredValue, boundValue *string
+			if !found || !bound || json.Unmarshal(value, &authoredValue) != nil || authoredValue == nil || json.Unmarshal(runtimeValue, &boundValue) != nil || boundValue == nil || *boundValue != *authoredValue {
+				return errors.New("authored physical field has an invalid fixture binding")
+			}
+		}
+		if _, found := expected[field.ID]; found {
+			return errors.New("authored physical field binding is duplicated")
+		}
+		expected[field.ID] = physicalSchemaColumn{TableName: "cf_items", Name: field.ID, Type: "TEXT", NotNull: !*field.Nullable && !*field.PrimaryKey, PrimaryKeyPosition: pk}
+	}
+	if _, found := expected["id"]; !found {
+		return errors.New("authored fixture primary key is absent")
+	}
+	if _, found := expected["value"]; !found {
+		return errors.New("authored fixture value field is absent")
+	}
+	// The independent cf_items fixture adds ownership and lifecycle columns beyond authored proof fields.
+	for _, column := range []physicalSchemaColumn{
+		{TableName: "cf_items", Name: "owner_id", Type: "TEXT", NotNull: true},
+		{TableName: "cf_items", Name: "updated_at", Type: "TEXT", NotNull: true},
+		{TableName: "cf_items", Name: "deleted_at", Type: "TEXT"},
+	} {
+		expected[column.Name] = column
+	}
+	columns, err := decodePhysicalSchema(physical)
+	if err != nil {
+		return err
+	}
+	subjectCount := 0
+	for _, column := range columns {
+		if column.TableName != "cf_items" {
+			continue
+		}
+		subjectCount++
+		want, found := expected[column.Name]
+		if !found || column != want {
+			return errors.New("physical schema column type, nullability, or primary key differs from the complete manifest")
+		}
+	}
+	if subjectCount != len(expected) {
+		return errors.New("physical fixture column set differs from the complete independent expectation")
+	}
+	return nil
+}
+
 // SchemaCheckResult records each authored schema-dispatch call executed through Kotlin Android.
 type SchemaCheckResult struct {
-	Calls []SynchronizationResult
+	Calls               []SynchronizationResult
+	ProofCalls          []SynchronizationResult
+	InterruptedCuts     []SchemaProofInterruptedCut
+	ProofCaptures       map[scenarios.ExpectationID]Result
+	ProofServerCaptures map[scenarios.ExpectationID]blackbox.NativeCaptureFacts
+	ProofPushes         []schemaProofPush
+}
+
+type SchemaProofInterruptedCut struct {
+	CallID        scenarios.NativeCallID
+	RestartStepID scenarios.StepID
+	Checkpoint    string
+	Capture       Result
+	Transport     []TransportObservation
 }
 
 // RunSchemaCheckScenario executes the authored schema transition classes through Kotlin Android.
 func RunSchemaCheckScenario(ctx context.Context, scenario scenarios.Scenario, controller *blackbox.NativeController, platform *Platform) (SchemaCheckResult, error) {
-	steps, err := kotlinScenarioStepMap(scenario, schemaCheckScenarioID, 43)
+	steps, err := kotlinScenarioStepMap(scenario, schemaCheckScenarioID, 64)
 	if err != nil {
 		return SchemaCheckResult{}, err
 	}
@@ -34,13 +1168,12 @@ func RunSchemaCheckScenario(ctx context.Context, scenario scenarios.Scenario, co
 		return SchemaCheckResult{}, fmt.Errorf("install Kotlin Android schema-check contract: %w", err)
 	}
 
-	clients := make(map[string]Client)
 	installed := make(map[string]bool)
 	completedBoundaries := make(map[string]bool)
-	result := SchemaCheckResult{Calls: make([]SynchronizationResult, 0, publicCount)}
+	result := SchemaCheckResult{Calls: make([]SynchronizationResult, 0, publicCount), ProofCaptures: make(map[scenarios.ExpectationID]Result), ProofServerCaptures: make(map[scenarios.ExpectationID]blackbox.NativeCaptureFacts)}
 
 	runPublic := func(stepID string) error {
-		call, runErr := runSchemaCheckPublicStep(ctx, scenario, steps, platform, clients, installed, completedBoundaries, stepID)
+		call, runErr := runSchemaCheckPublicStep(ctx, scenario, steps, controller, platform, installed, completedBoundaries, stepID)
 		if runErr != nil {
 			return runErr
 		}
@@ -109,7 +1242,16 @@ func RunSchemaCheckScenario(ctx context.Context, scenario scenarios.Scenario, co
 			return SchemaCheckResult{}, err
 		}
 	}
+	proof, err := prepareSchemaProof(ctx, scenario, steps, controller, platform, &result)
+	if err != nil {
+		return SchemaCheckResult{}, err
+	}
+	completedBoundaries["schema_proof_prepared_stop"] = true
+	completedBoundaries["schema_proof_committed_stop"] = true
 	if err := runApply("STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001", "model/publish-schema"); err != nil {
+		return SchemaCheckResult{}, err
+	}
+	if err := recoverSchemaProof(ctx, scenario, steps, controller, platform, proof, &result); err != nil {
 		return SchemaCheckResult{}, err
 	}
 	for _, stepID := range []string{
@@ -129,6 +1271,9 @@ func RunSchemaCheckScenario(ctx context.Context, scenario scenarios.Scenario, co
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
+		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
+		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
+		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
 	} {
 		if err := runPublic(stepID); err != nil {
 			return SchemaCheckResult{}, err
@@ -151,9 +1296,6 @@ func RunSchemaCheckScenario(ctx context.Context, scenario scenarios.Scenario, co
 	}
 
 	for _, stepID := range []string{
-		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
-		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
-		"STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
 		"STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
@@ -198,6 +1340,12 @@ func validateSchemaCheckBindings(scenario scenarios.Scenario, steps map[scenario
 		binding := step.NativeBinding
 		if binding == nil || step.ExpectedOutcome.Disposition != "success" {
 			return 0, fmt.Errorf("Kotlin Android schema-check binding %s is invalid", step.ID)
+		}
+		if strings.HasPrefix(string(step.ID), "STEP-PERF-SCHEMA-CHECK-PROOF-") {
+			if step.Transport == "http" && wireCounts[step.ID] != 1 || step.Transport != "http" && wireCounts[step.ID] != 0 {
+				return 0, errors.New("schema proof wire closure is invalid")
+			}
+			continue
 		}
 		switch binding.Kind {
 		case "public-call":
@@ -264,7 +1412,7 @@ func schemaCheckClientForStep(step scenarios.Step) (Client, error) {
 	return Client{Key: key, UserID: binding.UserID, ClientID: binding.ClientID, DatabaseKey: key}, nil
 }
 
-func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, platform *Platform, clients map[string]Client, installed, completedBoundaries map[string]bool, stepID string) (SynchronizationResult, error) {
+func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, steps map[scenarios.StepID]scenarios.Step, controller *blackbox.NativeController, platform *Platform, installed, completedBoundaries map[string]bool, stepID string) (SynchronizationResult, error) {
 	step, found := steps[scenarios.StepID(stepID)]
 	if !found {
 		return SynchronizationResult{}, fmt.Errorf("Kotlin Android schema-check step %s is absent", stepID)
@@ -273,19 +1421,30 @@ func runSchemaCheckPublicStep(ctx context.Context, scenario scenarios.Scenario, 
 	if err != nil {
 		return SynchronizationResult{}, err
 	}
-	clients[client.Key] = client
 	cold := !installed[client.Key]
+	if !cold && step.NativeBinding.Initialization != "" {
+		return SynchronizationResult{}, fmt.Errorf("Kotlin Android schema-check step %s repeats client initialization", stepID)
+	}
 	if cold {
-		if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: "empty"}); err != nil {
+		initialization := "empty"
+		if step.NativeBinding.Initialization != "" {
+			initialization = step.NativeBinding.Initialization
+		}
+		if err := platform.Install(ctx, InstallRequest{Client: client, Initialization: initialization}); err != nil {
 			return SynchronizationResult{}, fmt.Errorf("install Kotlin Android schema-check client %s: %w", client.ClientID, err)
 		}
 		installed[client.Key] = true
+		cold = initialization == "empty"
 	}
 	call, err := kotlinScenarioCall(ctx, platform, client, step.NativeBinding.Method)
 	if err != nil {
 		return SynchronizationResult{}, fmt.Errorf("run Kotlin Android schema-check step %s: %w", stepID, err)
 	}
-	if err := validateSchemaCheckPublicCall(ctx, platform, client, scenario, step, call, cold); err != nil {
+	target, scope, affected, err := schemaCheckRuntimeReferences(controller, scenario, step)
+	if err != nil {
+		return SynchronizationResult{}, err
+	}
+	if err := validateSchemaCheckPublicCall(scenario, step, call, cold, target, scope, affected); err != nil {
 		return SynchronizationResult{}, err
 	}
 	if err := runSchemaCheckLifecycleBoundaries(ctx, scenario, step, client, platform, completedBoundaries); err != nil {
@@ -346,7 +1505,7 @@ func runSchemaCheckLifecycleBoundaries(ctx context.Context, scenario scenarios.S
 	return nil
 }
 
-func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, client Client, scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult, cold bool) error {
+func validateSchemaCheckPublicCall(scenario scenarios.Scenario, step scenarios.Step, call SynchronizationResult, cold bool, target schemaRef, scope string, affected bool) error {
 	wire, err := schemaCheckWireExpectation(scenario, step.ID)
 	if err != nil {
 		return err
@@ -371,18 +1530,12 @@ func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, clie
 			}
 			dispositions = append(dispositions, entry)
 		}
-		snapshot, captureErr := platform.scenarioSnapshot(ctx, client)
-		if captureErr != nil {
-			return fmt.Errorf(
-				"Kotlin Android schema-check step %s completed %q, want %q, observations %v, dispositions %v; capture failure: %v",
-				step.ID, call.Completion, wantCompletion, outcomes, dispositions, captureErr,
-			)
-		}
-		if snapshot.Failure != nil {
+		if call.after != nil && call.after.Failure != nil {
+			failure := call.after.Failure
 			return fmt.Errorf(
 				"Kotlin Android schema-check step %s completed %q, want %q, observations %v, dispositions %v; failure operation %q, code %q, retryable %t, recovery action %q",
 				step.ID, call.Completion, wantCompletion, outcomes, dispositions,
-				snapshot.Failure.Operation, snapshot.Failure.Code, snapshot.Failure.Retryable, snapshot.Failure.RecoveryAction,
+				failure.Operation, failure.Code, failure.Retryable, failure.RecoveryAction,
 			)
 		}
 		return fmt.Errorf(
@@ -391,10 +1544,10 @@ func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, clie
 		)
 	}
 	if wire.Action == "unsupported" {
-		snapshot, captureErr := platform.scenarioSnapshot(ctx, client)
-		if captureErr != nil {
-			return fmt.Errorf("inspect Kotlin Android unsupported schema step %s: %w", step.ID, captureErr)
+		if call.after == nil {
+			return fmt.Errorf("Kotlin Android schema-check step %s final capture is absent", step.ID)
 		}
+		snapshot := call.after
 		if snapshot.Failure == nil || snapshot.Failure.Operation != "schema" || snapshot.Failure.Code != "unsupported_schema" || snapshot.Failure.Retryable || snapshot.Failure.RecoveryAction != "schema_reset" {
 			return fmt.Errorf("Kotlin Android schema-check step %s did not persist the unsupported_schema recovery state", step.ID)
 		}
@@ -407,10 +1560,10 @@ func validateSchemaCheckPublicCall(ctx context.Context, platform *Platform, clie
 	if cold && !validateKotlinSteadyPullBaselineShape(call) {
 		return fmt.Errorf("Kotlin Android schema-check step %s did not bootstrap its client", step.ID)
 	}
-	transport, err := kotlinScenarioWire(call, "connect")
-	if err != nil {
+	if err := validateSchemaCheckDispatch(step, wire.Action, call, target, scope, affected); err != nil {
 		return fmt.Errorf("Kotlin Android schema-check step %s: %w", step.ID, err)
 	}
+	transport := call.transportObservations[0]
 	if err := validateKotlinWireObservation(scenario, string(step.ID), transport); err != nil {
 		return err
 	}
@@ -452,4 +1605,302 @@ func schemaCheckNativeCompletion(wire scenarios.WireExpectation) string {
 		return "blocked"
 	}
 	return "error"
+}
+
+func schemaCheckRuntimeReferences(controller *blackbox.NativeController, scenario scenarios.Scenario, step scenarios.Step) (schemaRef, string, bool, error) {
+	var setup struct {
+		InitialSchema struct {
+			Schema schemaRef `json:"schema"`
+		} `json:"initial_schema"`
+	}
+	if len(scenario.Model.Setup) != 1 || json.Unmarshal(scenario.Model.Setup[0].Payload, &setup) != nil {
+		return schemaRef{}, "", false, errors.New("Kotlin schema-check initial schema is invalid")
+	}
+	authoredTarget := setup.InitialSchema.Schema
+	var affectedScopes []string
+	foundStep := false
+	for _, candidate := range scenario.Steps {
+		if candidate.ID == step.ID {
+			foundStep = true
+			break
+		}
+		if scenarios.OperationKey(candidate.Operation) == "model/publish-schema" {
+			var published struct {
+				Schema         schemaRef `json:"schema"`
+				AffectedScopes []string  `json:"affected_scopes"`
+			}
+			if json.Unmarshal(candidate.Operation.Payload, &published) != nil {
+				return schemaRef{}, "", false, errors.New("Kotlin schema-check published schema is invalid")
+			}
+			authoredTarget, affectedScopes = published.Schema, published.AffectedScopes
+		}
+	}
+	if !foundStep || step.NativeBinding == nil {
+		return schemaRef{}, "", false, errors.New("Kotlin schema-check step is unbound")
+	}
+	scopes := make(map[string]bool)
+	for _, candidate := range scenario.Steps {
+		if candidate.NativeBinding == nil || candidate.NativeBinding.Kind != "public-call" || candidate.NativeBinding.UserID != step.NativeBinding.UserID {
+			continue
+		}
+		var payload struct {
+			KnownScopes []struct {
+				ScopeID string `json:"scope_id"`
+			} `json:"known_scopes"`
+		}
+		if json.Unmarshal(candidate.Operation.Payload, &payload) != nil {
+			return schemaRef{}, "", false, errors.New("Kotlin schema-check authored scope is invalid")
+		}
+		for _, scope := range payload.KnownScopes {
+			scopes[scope.ScopeID] = true
+		}
+	}
+	if len(scopes) != 1 {
+		return schemaRef{}, "", false, errors.New("Kotlin schema-check authored client scope is ambiguous")
+	}
+	var authoredScope string
+	for scope := range scopes {
+		authoredScope = scope
+	}
+	var aliases []scenarios.NativeIdentityAlias
+	for _, alias := range scenario.NativeIdentityAliases {
+		if alias.Kind == "schema" {
+			var value schemaRef
+			if json.Unmarshal(alias.Value, &value) == nil && value == authoredTarget {
+				aliases = append(aliases, alias)
+			}
+		}
+		if alias.Kind == "scope" {
+			var value string
+			if json.Unmarshal(alias.Value, &value) == nil && value == authoredScope {
+				aliases = append(aliases, alias)
+			}
+		}
+	}
+	if len(aliases) != 2 {
+		return schemaRef{}, "", false, errors.New("Kotlin schema-check runtime aliases are ambiguous")
+	}
+	values, err := controller.IdentityValues(aliases)
+	if err != nil {
+		return schemaRef{}, "", false, err
+	}
+	var target schemaRef
+	var scope string
+	for _, value := range values {
+		if value.Kind == "schema" {
+			err = json.Unmarshal(value.RuntimeValue, &target)
+		}
+		if value.Kind == "scope" {
+			err = json.Unmarshal(value.RuntimeValue, &scope)
+		}
+		if err != nil {
+			return schemaRef{}, "", false, err
+		}
+	}
+	wire, err := schemaCheckWireExpectation(scenario, step.ID)
+	if err != nil || target.Version <= 0 || !validLowerHexDigest(target.Hash) || scope == "" {
+		return schemaRef{}, "", false, errors.New("Kotlin schema-check runtime references are invalid")
+	}
+	return target, scope, wire.Action == "rebuild_local" && slices.Contains(affectedScopes, authoredScope), nil
+}
+
+func validateSchemaCheckDispatch(step scenarios.Step, action string, call SynchronizationResult, target schemaRef, scope string, affected bool) error {
+	before, after := call.before, call.after
+	if before == nil || after == nil || before.TransportObservations == nil || after.TransportObservations == nil || before.TransportObservations.Overflowed || after.TransportObservations.Overflowed || before.EventsOverflowed || after.EventsOverflowed || len(call.transportObservations) == 0 {
+		return errors.New("schema dispatch captures or transport window are incomplete")
+	}
+	for _, capture := range []*Result{before, after} {
+		if err := capture.requireCompleteMigrationCapture(); err != nil {
+			return err
+		}
+		if capture.CaptureOverflowed != nil && *capture.CaptureOverflowed || capture.ApplicationRowCount != nil && *capture.ApplicationRowCount > maximumRows {
+			return errors.New("schema dispatch captured state is truncated")
+		}
+		for _, count := range []*int{capture.MutationLedgerCount, capture.RetainedMutationCount, capture.MutationOutcomeCount, capture.SealedBatchCount, capture.RejectedMutationCount, capture.ScopeStateCount, capture.ScopeRowCount, capture.ProvenanceCount, capture.RowMetadataCount, capture.RebuildAttemptCount, capture.RebuildReceiptCount} {
+			if count != nil && *count > maximumRecords {
+				return errors.New("schema dispatch captured state is out of bounds")
+			}
+		}
+	}
+	checkpoint := before.TransportObservations.SequenceCheckpoint
+	if after.TransportObservations.SequenceCheckpoint != checkpoint+uint64(len(call.transportObservations)) {
+		return errors.New("schema dispatch transport window changed")
+	}
+	for index, observation := range call.transportObservations {
+		if observation.Sequence != checkpoint+uint64(index+1) {
+			return errors.New("schema dispatch transport window has a gap")
+		}
+	}
+	connect := call.transportObservations[0]
+	facts := connect.ConnectResponseFacts
+	if connect.OperationClass != "connect" || connect.StatusCode != 200 || connect.RequestFacts == nil || facts == nil || facts.validate() != nil || !facts.AffectedScopesComplete || !facts.ScopeCursorUpdatesComplete || facts.Action != action || facts.SchemaVersion != target.Version || facts.SchemaHash != target.Hash {
+		return errors.New("initial connect action or target schema differs from authored dispatch")
+	}
+	source := schemaRef{}
+	beforeSchema, err := androidSchemaFact(before.Schema)
+	if err != nil {
+		return err
+	}
+	if beforeSchema != nil {
+		source = schemaRef{Version: int64(beforeSchema.Version), Hash: beforeSchema.Hash}
+	}
+	if connect.RequestFacts.SchemaVersion != source.Version || connect.RequestFacts.SchemaHash != source.Hash {
+		return errors.New("connect did not present the captured source schema")
+	}
+	beforeScopes, err := androidCursorScopeStates(before.ScopeStates)
+	if err != nil {
+		return err
+	}
+	afterScopes, err := androidCursorScopeStates(after.ScopeStates)
+	if err != nil || len(beforeScopes) > 1 || len(afterScopes) != 1 || afterScopes[0].ScopeID != scope {
+		return errors.New("schema dispatch scope captures are incomplete")
+	}
+	var oldCursor *string
+	if len(beforeScopes) == 1 {
+		if beforeScopes[0].ScopeID != scope {
+			return errors.New("schema dispatch source scope differs from authored scope")
+		}
+		oldCursor = beforeScopes[0].Cursor
+	}
+	presented := []string{}
+	if oldCursor != nil {
+		presented = append(presented, cursorFingerprint(*oldCursor))
+	}
+	if connect.CursorFingerprintsComplete == nil || !*connect.CursorFingerprintsComplete || !slices.Equal(connect.CursorFingerprints, presented) || connect.CursorFingerprints == nil {
+		return errors.New("connect did not present the captured old cursor")
+	}
+	wantSchema := target
+	// A final capture does not identify the schema activation cut.
+	if action == "unsupported" {
+		wantSchema = source
+	}
+	afterSchema, err := androidSchemaFact(after.Schema)
+	if err != nil || afterSchema == nil || int64(afterSchema.Version) != wantSchema.Version || afterSchema.Hash != wantSchema.Hash {
+		return errors.New("schema dispatch final schema differs from its accepted target")
+	}
+	var beforeEvents, afterEvents []json.RawMessage
+	if json.Unmarshal(before.Events, &beforeEvents) != nil || json.Unmarshal(after.Events, &afterEvents) != nil || len(afterEvents) < len(beforeEvents) {
+		return errors.New("schema dispatch event window is incomplete")
+	}
+	if len(beforeEvents) >= maximumRecords || len(afterEvents) >= maximumRecords {
+		return errors.New("schema dispatch event ring is full")
+	}
+	for index, event := range beforeEvents {
+		if !bytes.Equal(event, afterEvents[index]) {
+			return errors.New("schema dispatch event window changed")
+		}
+	}
+	schemaEvents := []string{}
+	for _, raw := range afterEvents[len(beforeEvents):] {
+		var event struct {
+			Type         string     `json:"type"`
+			SourceSchema *schemaRef `json:"source_schema"`
+			TargetSchema *schemaRef `json:"target_schema"`
+			SchemaAction *string    `json:"schema_action"`
+		}
+		if json.Unmarshal(raw, &event) != nil {
+			return errors.New("schema dispatch event is invalid")
+		}
+		if event.Type != "schema_applying" && event.Type != "schema_applied" {
+			continue
+		}
+		if event.SourceSchema == nil || *event.SourceSchema != source || event.TargetSchema == nil || *event.TargetSchema != target || event.SchemaAction == nil || *event.SchemaAction != action {
+			return errors.New("schema event source, target, or action differs from authored dispatch")
+		}
+		schemaEvents = append(schemaEvents, event.Type)
+	}
+	wantEvents := []string{}
+	if action == "replace" || action == "rebuild_local" {
+		wantEvents = []string{"schema_applying", "schema_applied"}
+	}
+	if !slices.Equal(schemaEvents, wantEvents) {
+		return errors.New("schema dispatch event sequence differs from authored action")
+	}
+	scopeFingerprint := cursorFingerprint(scope)
+	wantAffected := []string{}
+	if affected {
+		wantAffected = append(wantAffected, scopeFingerprint)
+	}
+	if (action == "rebuild_local") != affected || !slices.Equal(facts.AffectedScopeFingerprints, wantAffected) {
+		return errors.New("schema dispatch affected scopes differ from authored assignment")
+	}
+	for fingerprint := range facts.ScopeCursorUpdates {
+		if fingerprint != scopeFingerprint {
+			return errors.New("connect issued a cursor update for an unexpected scope")
+		}
+	}
+	var parameters struct {
+		SchemaCase string `json:"schema_case"`
+	}
+	if step.MeasurementSample != nil && json.Unmarshal(step.MeasurementSample.Parameters, &parameters) != nil {
+		return errors.New("schema dispatch measurement case is invalid")
+	}
+	membershipRecovery := parameters.SchemaCase == "class_1"
+	issued, hasUpdate := facts.ScopeCursorUpdates[scopeFingerprint]
+	if affected && (!hasUpdate || issued != nil) || hasUpdate && issued == nil && !affected && !membershipRecovery {
+		return errors.New("connect cursor reset differs from required affected rebuild")
+	}
+	if oldCursor != nil && source != target && !affected && action != "unsupported" && (!hasUpdate || issued == nil || *issued == presented[0]) {
+		return errors.New("connect did not replace the historical unaffected cursor")
+	}
+	if action == "unsupported" {
+		if len(call.transportObservations) != 1 || len(facts.ScopeCursorUpdates) != 0 {
+			return errors.New("unsupported schema dispatch continued synchronization")
+		}
+		return nil
+	}
+	firstPull := -1
+	var terminalBeforePull *string
+	rebuilt := false
+	for index, observation := range call.transportObservations[1:] {
+		if observation.OperationClass == "pull" {
+			if observation.RequestFacts == nil || observation.RequestFacts.SchemaVersion != target.Version || observation.RequestFacts.SchemaHash != target.Hash {
+				return errors.New("pull did not use the activated target schema")
+			}
+			if firstPull == -1 {
+				firstPull = index + 1
+			}
+		}
+		if observation.OperationClass == "rebuild" {
+			if oldCursor != nil && !affected && !membershipRecovery {
+				return errors.New("unaffected schema dispatch caused an unnecessary rebuild")
+			}
+			if observation.RequestFacts == nil || observation.RequestFacts.SchemaVersion != target.Version || observation.RequestFacts.SchemaHash != target.Hash || observation.RequestFacts.ScopeFingerprint == nil || *observation.RequestFacts.ScopeFingerprint != scopeFingerprint {
+				return errors.New("schema rebuild target or scope differs from authored dispatch")
+			}
+			response := observation.RebuildResponseFacts
+			if observation.StatusCode == 200 && response != nil && response.HasFinalScopeCursor && response.FinalScopeCursorFingerprint != nil && validLowerHexDigest(*response.FinalScopeCursorFingerprint) && response.ScopeFingerprint == scopeFingerprint {
+				rebuilt = true
+				if firstPull == -1 {
+					terminalBeforePull = response.FinalScopeCursorFingerprint
+				}
+			}
+		}
+	}
+	if firstPull == -1 || affected && !rebuilt {
+		return errors.New("schema dispatch omitted its target pull or required affected rebuild")
+	}
+	pull := call.transportObservations[firstPull]
+	if pull.StatusCode != 200 || pull.CursorFingerprints == nil || pull.CursorFingerprintsComplete == nil || !*pull.CursorFingerprintsComplete || !validCursorFingerprintSet(pull.CursorFingerprints) {
+		return errors.New("first target-schema pull cursor facts are incomplete")
+	}
+	wantCursors := presented
+	if hasUpdate && issued != nil {
+		wantCursors = []string{*issued}
+	} else if affected || oldCursor == nil || hasUpdate && issued == nil {
+		wantCursors = []string{}
+		if terminalBeforePull != nil {
+			wantCursors = []string{*terminalBeforePull}
+		}
+	} else if membershipRecovery && rebuilt {
+		if terminalBeforePull != nil {
+			wantCursors = []string{*terminalBeforePull}
+		} else if len(pull.CursorFingerprints) == 0 {
+			wantCursors = []string{}
+		}
+	}
+	if !slices.Equal(pull.CursorFingerprints, wantCursors) {
+		return errors.New("first target-schema pull did not use the response-issued replacement or rebuilt cursor")
+	}
+	return nil
 }

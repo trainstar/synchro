@@ -724,4 +724,44 @@ func TestRealNativeMaterializationBindsEachSourceTransaction(t *testing.T) {
 	if observation, err := controller.ProcessStep(ctx, nil, later); err != nil || observation.Disposition != "success" {
 		t.Fatalf("materialize the later push: observation=%#v err=%v", observation, err)
 	}
+
+	// A failed live-row verification must not publish identities that let the
+	// next capture skip the unresolved push. Restore the captured input before
+	// requiring the normal authored-image verification to succeed.
+	push("100", "101", 1, 0, pushedMutation{op: "update", authoredKey: "cardinality-000001", runtimeKey: runtimeRecordID, baseVersion: currentVersion(runtimeRecordID), value: "application-push-live-resolution"})
+	awaitFence("live-row resolution negative control")
+	var originalRow []byte
+	if err := database.QueryRowContext(ctx, `
+		SELECT row_data FROM synchro.sync_captured_rows WHERE record_id = $1`, runtimeRecordID).Scan(&originalRow); err != nil {
+		t.Fatalf("read the captured input for live-row resolution: %v", err)
+	}
+	corrupted, err := database.ExecContext(ctx, `
+		UPDATE synchro.sync_captured_rows
+		SET row_data = jsonb_set(row_data, ARRAY[$2]::text[], to_jsonb($3::text), false)
+		WHERE record_id = $1`, runtimeRecordID, table.ValueField, "corrupted-live-resolution-input")
+	if err != nil {
+		t.Fatalf("corrupt the captured input for live-row resolution: %v", err)
+	}
+	if count, err := corrupted.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("corrupted captured input count=%d, want 1: %v", count, err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		attemptContext, attemptCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, captureErr := controller.Capture(attemptContext, nil, []string{"server-state"})
+		attemptCancel()
+		if captureErr == nil || !strings.Contains(captureErr.Error(), "resolve pending native application push records") || !strings.Contains(captureErr.Error(), "native runtime captured field differs from the authored source image") {
+			t.Errorf("live-row resolution attempt %d did not reject the pending push image: %v", attempt, captureErr)
+		}
+	}
+	restored, err := database.ExecContext(ctx, `
+		UPDATE synchro.sync_captured_rows SET row_data = $2::jsonb WHERE record_id = $1`, runtimeRecordID, string(originalRow))
+	if err != nil {
+		t.Fatalf("restore the captured input for live-row resolution: %v", err)
+	}
+	if count, err := restored.RowsAffected(); err != nil || count != 1 {
+		t.Fatalf("restored captured input count=%d, want 1: %v", count, err)
+	}
+	if captured, err := controller.Capture(ctx, nil, []string{"server-state"}); err != nil || len(captured) != 1 {
+		t.Fatalf("capture after restoring the live-row resolution input: captures=%d err=%v", len(captured), err)
+	}
 }

@@ -105,6 +105,18 @@ data class TransportPullResponseFacts(
 
 @Serializable
 @SynchroProofApi
+data class TransportConnectResponseFacts(
+    val action: String,
+    @SerialName("schema_version") val schemaVersion: Long,
+    @SerialName("schema_hash") val schemaHash: String,
+    @SerialName("affected_scope_fingerprints") val affectedScopeFingerprints: List<String>,
+    @SerialName("affected_scopes_complete") val affectedScopesComplete: Boolean,
+    @SerialName("scope_cursor_updates") val scopeCursorUpdates: Map<String, String?>,
+    @SerialName("scope_cursor_updates_complete") val scopeCursorUpdatesComplete: Boolean,
+)
+
+@Serializable
+@SynchroProofApi
 data class TransportObservation(
     val sequence: Long,
     @SerialName("operation_class") val operationClass: TransportOperationClass,
@@ -116,6 +128,7 @@ data class TransportObservation(
     @SerialName("request_facts") val requestFacts: TransportRequestFacts? = null,
     @SerialName("rebuild_response_facts") val rebuildResponseFacts: TransportRebuildResponseFacts? = null,
     @SerialName("pull_response_facts") val pullResponseFacts: TransportPullResponseFacts? = null,
+    @SerialName("connect_response_facts") val connectResponseFacts: TransportConnectResponseFacts? = null,
     val retryable: Boolean? = null,
 )
 
@@ -126,6 +139,21 @@ data class TransportObservationSnapshot(
     val overflowed: Boolean,
     @SerialName("sequence_checkpoint") val sequenceCheckpoint: Long,
 )
+
+@Serializable
+@SynchroProofApi
+enum class MigrationCheckpoint {
+    @SerialName("migration_prepared") PREPARED,
+    @SerialName("migration_committed") COMMITTED;
+
+    companion object {
+        fun fromWire(value: String): MigrationCheckpoint? = when (value) {
+            "migration_prepared" -> PREPARED
+            "migration_committed" -> COMMITTED
+            else -> null
+        }
+    }
+}
 
 @SynchroProofApi
 enum class TransportPauseBarrierError {
@@ -149,15 +177,20 @@ class TransportObservationCollector(capacity: Int = 256) {
     private val observations = ArrayDeque<TransportObservation>()
     private var sequence = 0L
     private var pauseState: PauseState = PauseState.Idle
-    private var nextPauseOperation: TransportOperationClass? = null
+    private var nextPauseOperation: PauseTarget? = null
     private var pauseWaiter: CompletableDeferred<Unit>? = null
     private var rebuildCursorOverride: String? = null
 
+    private sealed class PauseTarget {
+        data class Transport(val operation: TransportOperationClass) : PauseTarget()
+        data class Migration(val checkpoint: MigrationCheckpoint) : PauseTarget()
+    }
+
     private sealed class PauseState {
         data object Idle : PauseState()
-        data class Armed(val operationClass: TransportOperationClass) : PauseState()
+        data class Armed(val operationClass: PauseTarget) : PauseState()
         data class Paused(
-            val operationClass: TransportOperationClass,
+            val operationClass: PauseTarget,
             val resume: CompletableDeferred<Unit>,
         ) : PauseState()
         data class Failed(val error: TransportPauseBarrierException) : PauseState()
@@ -178,6 +211,14 @@ class TransportObservationCollector(capacity: Int = 256) {
     }
 
     fun armPause(operationClass: TransportOperationClass) {
+        armPause(PauseTarget.Transport(operationClass))
+    }
+
+    fun armPause(checkpoint: MigrationCheckpoint) {
+        armPause(PauseTarget.Migration(checkpoint))
+    }
+
+    private fun armPause(operationClass: PauseTarget) {
         synchronized(lock) {
             when (val state = pauseState) {
                 PauseState.Idle -> pauseState = PauseState.Armed(operationClass)
@@ -195,6 +236,14 @@ class TransportObservationCollector(capacity: Int = 256) {
     }
 
     suspend fun awaitPause(operationClass: TransportOperationClass, timeoutMillis: Long) {
+        awaitPause(PauseTarget.Transport(operationClass), timeoutMillis)
+    }
+
+    suspend fun awaitPause(checkpoint: MigrationCheckpoint, timeoutMillis: Long) {
+        awaitPause(PauseTarget.Migration(checkpoint), timeoutMillis)
+    }
+
+    private suspend fun awaitPause(operationClass: PauseTarget, timeoutMillis: Long) {
         if (timeoutMillis <= 0) throw failPauseBarrier(TransportPauseBarrierError.TIMED_OUT)
         val waiter = synchronized(lock) {
             when (val state = pauseState) {
@@ -255,7 +304,7 @@ class TransportObservationCollector(capacity: Int = 256) {
             val state = pauseState
             check(
                 state is PauseState.Paused &&
-                    state.operationClass == TransportOperationClass.REBUILD &&
+                    state.operationClass == PauseTarget.Transport(TransportOperationClass.REBUILD) &&
                     rebuildCursorOverride == null,
             ) { "no paused rebuild response is available" }
             rebuildCursorOverride = cursor
@@ -263,6 +312,14 @@ class TransportObservationCollector(capacity: Int = 256) {
     }
 
     internal suspend fun pauseIfArmed(operationClass: TransportOperationClass): String? {
+        return pauseIfArmed(PauseTarget.Transport(operationClass))
+    }
+
+    internal suspend fun pauseIfArmed(checkpoint: MigrationCheckpoint) {
+        pauseIfArmed(PauseTarget.Migration(checkpoint))
+    }
+
+    private suspend fun pauseIfArmed(operationClass: PauseTarget): String? {
         val resume: CompletableDeferred<Unit>? = synchronized(lock) {
             when (val state = pauseState) {
                 is PauseState.Armed -> if (state.operationClass == operationClass) {
@@ -285,7 +342,7 @@ class TransportObservationCollector(capacity: Int = 256) {
             failPauseBarrier(TransportPauseBarrierError.CANCELLED)
             throw error
         }
-        if (resume == null || operationClass != TransportOperationClass.REBUILD) return null
+        if (resume == null || operationClass != PauseTarget.Transport(TransportOperationClass.REBUILD)) return null
         return synchronized(lock) {
             rebuildCursorOverride.also { rebuildCursorOverride = null }
         }
@@ -302,6 +359,7 @@ class TransportObservationCollector(capacity: Int = 256) {
         requestFacts: TransportRequestFacts? = null,
         rebuildResponseFacts: TransportRebuildResponseFacts? = null,
         pullResponseFacts: TransportPullResponseFacts? = null,
+        connectResponseFacts: TransportConnectResponseFacts? = null,
     ) {
         synchronized(lock) {
             check(sequence < Long.MAX_VALUE) { "transport observation sequence exhausted" }
@@ -320,6 +378,7 @@ class TransportObservationCollector(capacity: Int = 256) {
                     requestFacts = requestFacts,
                     rebuildResponseFacts = rebuildResponseFacts,
                     pullResponseFacts = pullResponseFacts,
+                    connectResponseFacts = connectResponseFacts,
                 ),
             )
         }

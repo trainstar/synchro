@@ -2,6 +2,7 @@ package com.trainstar.synchro
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -12,6 +13,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.SQLiteMode
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -49,6 +51,238 @@ class SchemaManagerTests {
     fun tearDown() {
         databases.closeAll()
     }
+
+    @Test
+    @SQLiteMode(SQLiteMode.Mode.NATIVE)
+    fun appliedRecoveryRejectsDuplicateSourceIdentifiersAfterReopenWithoutDurableProgress() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sourceDraft = protocolOrdersSchemaManifest().let { manifest ->
+            manifest.copy(tables = manifest.tables.map { table ->
+                table.copy(indexes = listOf(IndexSchema("idx-owner", "idx_orders_owner", listOf("field-user-id"), false)))
+            })
+        }
+        val source = sourceDraft.copy(schemaHash = Integrity.schemaManifestHash(sourceDraft))
+        val sourceTables = source.localTables()
+        val sourceTable = sourceTables.single()
+        val targetDraft = protocolOrdersSchemaManifest(
+            includeNotes = true, schemaVersion = 2,
+            parentSchema = SchemaRef(1, source.schemaHash), transitionClass = "class_2",
+        ).let { manifest ->
+            manifest.copy(tables = manifest.tables.map { it.copy(indexes = source.tables.single().indexes) })
+        }
+        val target = targetDraft.copy(schemaHash = Integrity.schemaManifestHash(targetDraft))
+        val journalJSON = Json { encodeDefaults = true }
+        for (corruptedTables in listOf(
+            sourceTables + sourceTable,
+            listOf(sourceTable.copy(columns = sourceTable.columns + sourceTable.columns.first())),
+            listOf(sourceTable.copy(indexes = sourceTable.indexes + sourceTable.indexes.single())),
+        )) {
+            val dbName = "synchro_source_archive_${java.util.UUID.randomUUID()}.sqlite"
+            val database = databases.open(context, dbName)
+            installTestSchema(database, 1, source.schemaHash, sourceTables)
+            database.execute("CREATE TABLE drafts (id TEXT PRIMARY KEY, body TEXT)")
+            database.execute("INSERT INTO drafts VALUES ('draft', 'local')")
+            database.execute("INSERT INTO orders (id, user_id, updated_at) VALUES ('queued', 'owner', '2026-01-01T00:00:00.000000Z')")
+            val manager = SchemaManager(database)
+            manager.prepareConnectMigration(schemaMigrationResponse(target), target.localTables(), false)
+            manager.recoverPendingMigration()
+            assertEquals("ddl_applied", database.queryOne("SELECT phase FROM _synchro_migration_journal")?.get("phase"))
+            database.writeTransaction { db ->
+                db.execSQL(
+                    "UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = ? AND schema_hash = ?",
+                    arrayOf(journalJSON.encodeToString(corruptedTables), 1, source.schemaHash),
+                )
+            }
+            database.close()
+
+            val reopened = databases.open(context, dbName)
+            val stateQueries = listOf(
+                "SELECT * FROM _synchro_meta ORDER BY key",
+                "SELECT * FROM _synchro_migration_journal",
+                "SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash",
+                "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
+                "SELECT * FROM orders ORDER BY id",
+                "SELECT * FROM drafts ORDER BY id",
+                "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name",
+            )
+            val before = stateQueries.map { reopened.query(it) }
+            assertThrows(SynchroError.InvalidResponse::class.java) { SchemaManager(reopened).recoverPendingMigration() }
+            assertEquals(before, stateQueries.map { reopened.query(it) })
+            reopened.writeTransaction { db ->
+                db.execSQL(
+                    "UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = ? AND schema_hash = ?",
+                    arrayOf(journalJSON.encodeToString(sourceTables), 1, source.schemaHash),
+                )
+            }
+            SchemaManager(reopened).recoverPendingMigration()
+            reopened.close()
+        }
+    }
+
+    @Test
+    @SQLiteMode(SQLiteMode.Mode.NATIVE)
+    fun nullableRelaxationPreservesRowsAndDurableIntentWithoutCapture() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dbName = "synchro_nullable_views_${java.util.UUID.randomUUID()}.sqlite"
+        val db = databases.open(context, dbName)
+        val sourceDraft = protocolOrdersSchemaManifest().let { manifest ->
+            manifest.copy(tables = manifest.tables.map { table ->
+                table.copy(indexes = listOf(IndexSchema("idx-owner", "idx_orders_owner", listOf("field-user-id"), false)))
+            })
+        }
+        val source = sourceDraft.copy(schemaHash = Integrity.schemaManifestHash(sourceDraft))
+        installTestSchema(db, 1, source.schemaHash, source.localTables())
+        db.execute("CREATE TABLE drafts (body TEXT)")
+        db.execute("INSERT INTO drafts VALUES ('local')")
+        db.execute("INSERT INTO orders (id, user_id, updated_at) VALUES ('queued', 'owner', '2026-01-01T00:00:00.000000Z')")
+        db.execute("CREATE VIEW order_cache AS SELECT id, user_id FROM orders")
+        db.execute("CREATE VIEW nested_order_cache AS SELECT id, user_id FROM order_cache")
+        db.execute("CREATE VIEW draft_cache AS SELECT body FROM drafts")
+        db.execute(
+            "CREATE TRIGGER order_cache_write INSTEAD OF UPDATE OF user_id ON NESTED_ORDER_CACHE " +
+                "BEGIN INSERT INTO drafts (body) VALUES (NEW.user_id); END",
+        )
+        val sourceTable = source.localTables().single()
+        val sourceRow = JsonObject(mapOf(
+            "field-id" to JsonPrimitive("queued"),
+            "field-ship-address" to JsonNull,
+            "field-user-id" to JsonPrimitive("owner"),
+            "field-updated-at" to JsonPrimitive("2026-01-01T00:00:00.000000Z"),
+            "field-deleted-at" to JsonNull,
+        ))
+        val sourceDigest = Integrity.rowDigest(
+            source.schemaHash, sourceTable, JsonObject(mapOf("field-id" to JsonPrimitive("queued"))), sourceRow, "v1",
+        )
+        val sourceScopeChecksum = Json.encodeToString(
+            Integrity.scopeDigest(source.schemaHash, "orders:test", listOf(sourceDigest.identity to sourceDigest.checksum)),
+        )
+        db.writeTransaction { raw ->
+            SynchroMeta.upsertScope(raw, "orders:test", "c1", sourceScopeChecksum, 3, sourceScopeChecksum)
+            SynchroMeta.upsertRowVersion(raw, "orders", "queued", "v1", sourceDigest.checksum)
+            SynchroMeta.upsertScopeRow(raw, "orders:test", "orders", "queued", sourceDigest.checksum.digest, 3)
+        }
+        val pending = db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+        val mutationValues = db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id")
+        val versions = db.query("SELECT * FROM _synchro_row_versions")
+        val scopes = db.query("SELECT * FROM _synchro_scopes")
+        val provenance = db.query("SELECT * FROM _synchro_scope_rows")
+        val draft = source.copy(
+            schemaVersion = 2,
+            parentSchema = SchemaRef(1, source.schemaHash),
+            transitionClass = "class_2",
+            tables = source.tables.map { table ->
+                table.copy(fields = table.fields.map { if (it.name == "user_id") it.copy(nullable = true) else it })
+            },
+        )
+        val target = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+        val manager = SchemaManager(db)
+        manager.prepareConnectMigration(
+            schemaMigrationResponse(target).copy(scopeCursorUpdates = mapOf("orders:test" to "c2")),
+            target.localTables(), false,
+        )
+        db.execute("CREATE VIEW invalid_cache AS SELECT missing_field FROM orders")
+        val rollbackQueries = listOf(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name",
+            "SELECT * FROM _synchro_meta ORDER BY key",
+            "SELECT * FROM _synchro_migration_journal",
+            "SELECT * FROM _synchro_schema_archives ORDER BY schema_version, schema_hash",
+            "SELECT * FROM _synchro_pending_changes ORDER BY local_order",
+            "SELECT * FROM orders ORDER BY id",
+            "SELECT * FROM drafts",
+        )
+        val beforeRollback = rollbackQueries.map { db.query(it) }
+        assertThrows(android.database.sqlite.SQLiteException::class.java) { manager.recoverPendingMigration() }
+        assertEquals(beforeRollback, rollbackQueries.map { db.query(it) })
+        db.execute("DROP VIEW invalid_cache")
+        val viewObjectsQuery = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type = 'view' OR " +
+            "tbl_name COLLATE NOCASE IN (SELECT name FROM sqlite_master WHERE type = 'view') ORDER BY name"
+        val viewObjects = db.query(viewObjectsQuery)
+        db.close()
+
+        val resumed = databases.open(context, dbName)
+        SchemaManager(resumed).recoverPendingMigration()
+        resumed.close()
+        val recovered = databases.open(context, dbName)
+        SchemaManager(recovered).recoverPendingMigration()
+        assertEquals(viewObjects, recovered.query(viewObjectsQuery))
+        assertEquals("owner", recovered.queryOne("SELECT user_id FROM nested_order_cache WHERE id = 'queued'")?.get("user_id"))
+        assertEquals(pending, recovered.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(mutationValues, recovered.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+        assertEquals(versions, recovered.query("SELECT * FROM _synchro_row_versions"))
+        assertEquals(
+            scopes.map { it + mapOf("cursor" to "c2", "checksum" to null, "local_checksum" to "") },
+            recovered.query("SELECT * FROM _synchro_scopes"),
+        )
+        assertEquals(provenance, recovered.query("SELECT * FROM _synchro_scope_rows"))
+        assertEquals("local", recovered.queryOne("SELECT body FROM draft_cache")?.get("body"))
+        assertCDCTriggers(recovered, "orders")
+        assertEquals("user_id", recovered.query("PRAGMA index_info(idx_orders_owner)").single()["name"])
+        recovered.writeTransaction { raw ->
+            raw.execSQL("UPDATE nested_order_cache SET user_id = 'view-trigger' WHERE id = 'queued'")
+        }
+        assertEquals(1, recovered.query("SELECT body FROM drafts WHERE body = 'view-trigger'").size)
+        assertEquals(pending, recovered.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        recovered.execute("DROP TRIGGER order_cache_write")
+        recovered.execute("UPDATE orders SET user_id = NULL WHERE id = 'queued'")
+        assertNull(recovered.queryOne("SELECT user_id FROM nested_order_cache WHERE id = 'queued'")?.get("user_id"))
+        val captured = recovered.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+        assertEquals(pending, captured.take(pending.size))
+        assertEquals(pending.size + 1, captured.size)
+    }
+
+    @Test
+    fun requiredAdditionWithoutDefaultUsesNullableStorageUntilRebuild() {
+        val db = makeTestDB()
+        val source = protocolOrdersSchemaManifest()
+        installTestSchema(db, 1, source.schemaHash, source.localTables())
+        db.execute("INSERT INTO orders (id, user_id, updated_at) VALUES ('retained', 'owner', '2026-01-01T00:00:00.000000Z')")
+        val draft = protocolOrdersSchemaManifest(
+            includeNotes = true,
+            schemaVersion = 2,
+            parentSchema = SchemaRef(1, source.schemaHash),
+            transitionClass = "class_3",
+            compatibilityFloor = 2,
+        ).let { manifest ->
+            manifest.copy(tables = manifest.tables.map { table ->
+                table.copy(fields = table.fields.map { if (it.name == "notes") it.copy(nullable = false) else it })
+            })
+        }
+        val target = draft.copy(schemaHash = Integrity.schemaManifestHash(draft))
+        val manager = SchemaManager(db)
+        manager.prepareConnectMigration(schemaMigrationResponse(target), target.localTables(), false)
+        manager.recoverPendingMigration()
+        manager.recoverPendingMigration()
+        assertNull(db.queryOne("SELECT notes FROM orders WHERE id = 'retained'")?.get("notes"))
+        assertFalse(manager.loadStoredLocalSchema()!!.single().columns.single { it.name == "notes" }.nullable)
+        assertEquals(0L, db.query("PRAGMA table_info(orders)").single { it["name"] == "notes" }["notnull"])
+        val table = target.localTables().single()
+        val nullRequiredRow = JsonObject(table.columns.associate { column ->
+            column.fieldID to when (column.name) {
+                "id" -> JsonPrimitive("retained")
+                "user_id" -> JsonPrimitive("owner")
+                "updated_at" -> JsonPrimitive("2026-01-01T00:00:00.000000Z")
+                else -> JsonNull
+            }
+        })
+        Integrity.rowDigest(
+            target.schemaHash, table, JsonObject(mapOf(table.primaryKeyFieldID to JsonPrimitive("retained"))),
+            JsonObject(nullRequiredRow + ("field-notes" to JsonPrimitive("materialized"))), "v1",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            Integrity.rowDigest(target.schemaHash, table, JsonObject(mapOf(table.primaryKeyFieldID to JsonPrimitive("retained"))), nullRequiredRow, "v1")
+        }
+    }
+
+    private fun schemaMigrationResponse(target: SchemaManifest) = ConnectResponse(
+        serverTime = "2026-01-01T00:00:00.000000Z",
+        protocolVersion = 3,
+        clientGeneration = 1,
+        scopeSetVersion = 0,
+        schema = SchemaDescriptor(target.schemaVersion, target.schemaHash, SchemaAction.REPLACE),
+        scopes = ScopeAssignmentDelta(emptyList(), emptyList()),
+        scopeCursorUpdates = emptyMap(),
+        schemaDefinition = target,
+    )
 
     @Test
     fun testCreateSyncedTables() {
@@ -1108,6 +1342,16 @@ class SchemaManagerTests {
             oldRow,
             serverVersion,
         )
+        val protectedScopeID = "orders:user-2"
+        val additionalDigests = listOf("edited", "deleted", "other-retained").associateWith { recordID ->
+            Integrity.rowDigest(
+                oldHash, oldTable, JsonObject(mapOf("field-id-old" to JsonPrimitive(recordID))),
+                JsonObject(oldRow + ("field-id-old" to JsonPrimitive(recordID))), serverVersion,
+            )
+        }
+        val sourceScopeChecksum = Json.encodeToString(
+            Integrity.scopeDigest(oldHash, protectedScopeID, additionalDigests.values.map { it.identity to it.checksum }),
+        )
         db.writeSyncLockedTransaction { connection ->
             connection.execSQL(
                 "INSERT INTO orders (id, title, updated_at, deleted_at) VALUES (?, ?, ?, NULL)",
@@ -1129,14 +1373,34 @@ class SchemaManagerTests {
                 oldDigest.checksum.digest,
                 0,
             )
+            SynchroMeta.upsertScope(connection, protectedScopeID, "protected-old-cursor", sourceScopeChecksum, 3, sourceScopeChecksum)
+            additionalDigests.forEach { (recordID, digest) ->
+                connection.execSQL(
+                    "INSERT INTO orders (id, title, updated_at, deleted_at) VALUES (?, ?, ?, NULL)",
+                    arrayOf(recordID, "retained", "2026-01-01T00:00:00.000000Z"),
+                )
+                SynchroMeta.upsertRowVersion(connection, "orders", recordID, serverVersion, digest.checksum)
+                SynchroMeta.upsertScopeRow(connection, protectedScopeID, "orders", recordID, digest.checksum.digest, 3)
+            }
         }
+        db.execute("UPDATE orders SET title = 'visible-local-edit' WHERE id = 'edited'")
+        db.execute("DELETE FROM orders WHERE id = 'deleted'")
+        val pending = db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order")
+        assertEquals(listOf("update", "delete"), pending.map { it["operation"] })
+        val mutationValues = db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id")
+        val versions = db.query("SELECT * FROM _synchro_row_versions ORDER BY table_name, record_id")
+        val protectedProvenanceQuery = "SELECT * FROM _synchro_scope_rows WHERE scope_id = ? AND record_id IN ('edited', 'deleted') ORDER BY record_id"
+        val protectedProvenance = db.query(protectedProvenanceQuery, arrayOf(protectedScopeID))
+        val visibleRows = db.query("SELECT * FROM orders ORDER BY id")
+        assertEquals("visible-local-edit", db.queryOne("SELECT title FROM orders WHERE id = 'edited'")?.get("title"))
+        assertNotNull(db.queryOne("SELECT deleted_at FROM orders WHERE id = 'deleted'")?.get("deleted_at"))
 
         installTestSchema(
             db,
             schemaVersion = 2,
             schemaHash = targetHash,
             tables = listOf(targetTable),
-            scopeCursorUpdates = mapOf(scopeID to "target-cursor"),
+            scopeCursorUpdates = mapOf(scopeID to "target-cursor", protectedScopeID to "protected-target-cursor"),
         )
 
         val targetRow = JsonObject(
@@ -1169,6 +1433,24 @@ class SchemaManagerTests {
             targetScopeDigest,
             Json.decodeFromString<ChecksumObject>(storedScope!!.localChecksum),
         )
+        val unprotectedDigest = Integrity.rowDigest(
+            targetHash, targetTable, JsonObject(mapOf("field-id-target" to JsonPrimitive("other-retained"))),
+            JsonObject(targetRow + ("field-id-target" to JsonPrimitive("other-retained"))), serverVersion,
+        )
+        val mixedScopeRows = db.readTransaction { SynchroMeta.getScopeRowChecksums(it, protectedScopeID) }
+        assertEquals(unprotectedDigest.checksum.digest, mixedScopeRows.single { it.recordID == "other-retained" }.checksum)
+        assertEquals(protectedProvenance, db.query(protectedProvenanceQuery, arrayOf(protectedScopeID)))
+        assertEquals(pending, db.query("SELECT * FROM _synchro_pending_changes ORDER BY local_order"))
+        assertEquals(mutationValues, db.query("SELECT * FROM _synchro_mutation_values ORDER BY mutation_id, field_id"))
+        assertEquals(versions, db.query("SELECT * FROM _synchro_row_versions ORDER BY table_name, record_id"))
+        assertEquals(visibleRows, db.query("SELECT * FROM orders ORDER BY id"))
+        val protectedScope = db.readTransaction { SynchroMeta.getScope(it, protectedScopeID) }
+        assertEquals("protected-target-cursor", protectedScope?.cursor)
+        assertEquals(3L, protectedScope?.generation)
+        assertNull(protectedScope?.checksum)
+        assertEquals("", protectedScope?.localChecksum)
+        assertEquals(0L, storedScope.generation)
+        assertEquals(0, db.query("SELECT * FROM _synchro_rebuild_attempts").size)
     }
 
     @Test

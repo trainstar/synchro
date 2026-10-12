@@ -1707,7 +1707,11 @@ func validateForgedCursorTrace(scenario scenarios.Scenario, raw json.RawMessage,
 		if observation.OperationClass != wantClasses[index] || observation.StatusCode != wantStatuses[index] || observation.DurationNanoseconds == 0 || !hasJSONValue(observation.RequestFacts) {
 			return fmt.Errorf("React Native forged-cursor trace %d={class:%q status:%d duration:%d request:%s}, want={class:%q status:%d positive_duration:true request_present:true}", index+1, observation.OperationClass, observation.StatusCode, observation.DurationNanoseconds, boundedRaw(observation.RequestFacts), wantClasses[index], wantStatuses[index])
 		}
-		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
+		if index == 0 {
+			if err := validateTraceOperation(observation, "connect"); err != nil {
+				return fmt.Errorf("React Native forged-cursor connect trace: %w", err)
+			}
+		} else if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 			return fmt.Errorf("React Native forged-cursor trace %d top-level cursor fingerprints=%v complete=%v, want nil/nil", index+1, observation.CursorFingerprints, observation.CursorFingerprintsComplete)
 		}
 	}

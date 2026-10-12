@@ -47,20 +47,12 @@ private struct PackagedSmokePhaseResult: Encodable {
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
-    var window: UIWindow?
     private var client: SynchroClient?
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        let window = UIWindow(frame: UIScreen.main.bounds)
-        let viewController = UIViewController()
-        viewController.view.backgroundColor = .systemBackground
-        window.rootViewController = viewController
-        window.makeKeyAndVisible()
-        self.window = window
-
         do {
             let documents = try FileManager.default.url(
                 for: .documentDirectory,
@@ -111,6 +103,20 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
 
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(
+            name: "Default Configuration",
+            sessionRole: connectingSceneSession.role
+        )
+        configuration.sceneClass = UIWindowScene.self
+        configuration.delegateClass = SceneDelegate.self
+        return configuration
     }
 
     private func runAndWaitForScheduledRetry(
@@ -270,5 +276,24 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         )
         let destination = documents.appendingPathComponent("\(phase)-result.json")
         try JSONEncoder().encode(result).write(to: destination, options: .atomic)
+    }
+}
+
+final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+
+        let window = UIWindow(windowScene: windowScene)
+        let viewController = UIViewController()
+        viewController.view.backgroundColor = .systemBackground
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        self.window = window
     }
 }

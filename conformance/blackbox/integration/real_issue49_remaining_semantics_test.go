@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/trainstar/synchro/conformance/blackbox"
+	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 func TestRealIssue49RemainingSemantics(t *testing.T) {
@@ -1871,7 +1872,7 @@ func issue49RemainingSchemaCursorContinuity(t *testing.T) {
 	_, oldGlobalCursor := rebuildRealScope(t, ctx, harness, token, client, "cf:global", "00000000-0000-4000-8e28-000000000002")
 	oldSchema := issue49CloneObject(t, client.Schema)
 	knownScopes := issue49CloneObject(t, client.Scopes)
-	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_schema_queue", "", "compatible_value", "", ""); err != nil {
+	if err := harness.Operator().TransitionSyncedTableField(ctx, "cf_schema_queue", "", &scenarios.QueueReplaySchemaField{Name: "compatible_value", Type: "string", Nullable: true, Writable: true}, "", ""); err != nil {
 		t.Fatalf("commit compatible schema transition: %v", err)
 	}
 	var currentTable realSchemaTableReference

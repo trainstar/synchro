@@ -13,6 +13,9 @@ import com.trainstar.synchro.inspection.SynchroInspection
 import com.trainstar.synchro.inspection.TransportObservationCollector
 import com.trainstar.synchro.inspection.TransportObservationSnapshot
 import com.trainstar.synchro.inspection.TransportOperationClass
+import com.trainstar.synchro.inspection.MigrationCheckpoint
+import com.trainstar.synchro.inspection.MigrationJournalInspection
+import com.trainstar.synchro.inspection.PhysicalSchemaColumnInspection
 import com.trainstar.synchro.inspection.withTransportObservation
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.*
@@ -1127,6 +1130,16 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             }
             val inspection = JSONObject().apply {
                 put("client_state", clientStateJson(snapshot.capture))
+                put("migration_journal", snapshot.capture.migrationJournal?.let {
+                    JSONObject(Json.encodeToString(MigrationJournalInspection.serializer(), it))
+                } ?: JSONObject.NULL)
+                put("migration_journal_truncated", snapshot.capture.migrationJournalTruncated)
+                put("physical_schema", JSONArray(snapshot.capture.physicalSchema.map {
+                    JSONObject(Json.encodeToString(PhysicalSchemaColumnInspection.serializer(), it))
+                }))
+                put("physical_schema_truncated", snapshot.capture.physicalSchemaTruncated)
+                put("accepted_mutation_outcomes", JSONObject(snapshot.capture.acceptedMutationOutcomes))
+                put("accepted_mutation_outcomes_truncated", snapshot.capture.acceptedMutationOutcomesTruncated)
                 put("retained_mutations", snapshot.retainedMutations?.let { JSONArray(it.map(::retainedMutationJson)) } ?: JSONObject.NULL)
                 put("rejected_mutations", snapshot.rejectedMutations?.let { JSONArray(it.map(::retainedRejectionJson)) } ?: JSONObject.NULL)
             }
@@ -1202,7 +1215,8 @@ class SynchroModule(reactContext: ReactApplicationContext) :
     override fun armTransportPause(operationClass: String, promise: Promise) {
         try {
             val collector = transportObservationCollector ?: error("Transport observation is not configured")
-            collector.armPause(transportOperationClass(operationClass))
+            val checkpoint = MigrationCheckpoint.fromWire(operationClass)
+            if (checkpoint != null) collector.armPause(checkpoint) else collector.armPause(transportOperationClass(operationClass))
             promise.resolve(null)
         } catch (error: Exception) {
             rejectWithError(promise, error)
@@ -1220,7 +1234,12 @@ class SynchroModule(reactContext: ReactApplicationContext) :
                         timeoutMs % 1.0 == 0.0,
                 ) { "Transport pause timeout is invalid" }
                 val collector = transportObservationCollector ?: error("Transport observation is not configured")
-                collector.awaitPause(transportOperationClass(operationClass), timeoutMs.toLong())
+                val checkpoint = MigrationCheckpoint.fromWire(operationClass)
+                if (checkpoint != null) {
+                    collector.awaitPause(checkpoint, timeoutMs.toLong())
+                } else {
+                    collector.awaitPause(transportOperationClass(operationClass), timeoutMs.toLong())
+                }
                 promise.resolve(null)
             } catch (error: Exception) {
                 rejectWithError(promise, error)
@@ -1532,6 +1551,7 @@ class SynchroModule(reactContext: ReactApplicationContext) :
             put("row_metadata_count", capture.rowMetadataCount)
             put("rebuild_attempt_count", capture.rebuildAttemptCount)
             put("rebuild_receipt_count", capture.rebuildReceiptCount)
+            put("capture_overflowed", capture.overflowed)
             put(
                 "provenance_maintenance_work_cursor",
                 capture.provenanceMaintenanceWorkCursor.toString(),

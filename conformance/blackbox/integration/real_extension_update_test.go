@@ -28,6 +28,14 @@ import (
 // cross-table membership declarations, and accept a same-table declaration.
 func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 	for _, origin := range realUpdateOrigins(t) {
+		var wantSourceRequirement sql.NullInt64
+		switch origin.version {
+		case "0.3.1", "0.3.2":
+		case "0.4.0-rc.1":
+			wantSourceRequirement = sql.NullInt64{Int64: 2, Valid: true}
+		default:
+			t.Fatalf("missing fixture contract for update origin %s", origin.version)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		harness := provisionRealUpdateHarness(t, ctx, origin)
 		token, err := harness.DiagnosticBearerToken(time.Now())
@@ -61,6 +69,30 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				pushedID        = "00000000-0000-4000-8c07-000000000041"
 				successorID     = "00000000-0000-4000-8c07-000000000046"
 			)
+			observeAssignmentRegistration := func() string {
+				t.Helper()
+				if origin.version != "0.4.0-rc.1" {
+					return "null"
+				}
+				var registration string
+				if err := admin.QueryRowContext(ctx, `
+					SELECT to_jsonb(registration)::text
+					FROM synchro.sync_assignment_function registration
+					WHERE singleton`).Scan(&registration); err != nil {
+					t.Fatalf("observe retained assignment registration: %v", err)
+				}
+				return registration
+			}
+			var predecessorRegistration string
+			if origin.version == "0.4.0-rc.1" {
+				database := registerRealScopeAssignmentFunction(t, ctx, harness, 8)
+				if _, err := database.ExecContext(ctx,
+					"INSERT INTO public.cf_scope_assignments (user_id, scope_id) VALUES ($1, 'cf:global')",
+					clientUser); err != nil {
+					t.Fatalf("insert predecessor client assignment: %v", err)
+				}
+				predecessorRegistration = observeAssignmentRegistration()
+			}
 			clientToken, err := harness.NativeBearerToken(ctx, clientUser, time.Now())
 			if err != nil {
 				t.Fatalf("sign extension update client token: %v", err)
@@ -105,8 +137,8 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			if err := harness.StopUpdateBaselineAdapter(ctx); err != nil {
 				t.Fatalf("stop the adapter on %s: %v", origin.version, err)
 			}
-			// The client identity, its checkpoints, the push ledger, and the row
-			// state are the durable state that the update must keep.
+			// The update must keep client, assignment, checkpoint, push ledger,
+			// and row state.
 			retainedClientState := func() string {
 				t.Helper()
 				var state string
@@ -116,6 +148,11 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 					                   'generation', client_generation, 'scope_set_version', scope_set_version,
 					                   'scopes', bucket_subs, 'write_epoch', accepted_write_epoch, 'active', is_active)
 					               FROM synchro.sync_clients WHERE user_id = $1 AND client_id = $2),
+					    'assignment_registration', $4::jsonb,
+					    'assignment_history', (SELECT jsonb_agg(to_jsonb(history)
+					                              ORDER BY history.client_generation, history.scope_id, history.scope_set_version)
+					                           FROM synchro.sync_client_scope_history history
+					                           WHERE history.user_id = $1 AND history.client_id = $2),
 					    'checkpoints', (SELECT jsonb_agg(to_jsonb(checkpoint) ORDER BY checkpoint.bucket_id)
 					                    FROM synchro.sync_client_checkpoints checkpoint
 					                    WHERE checkpoint.user_id = $1 AND checkpoint.client_id = $2),
@@ -130,18 +167,17 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 					    'source', (SELECT jsonb_build_object('id', item.id, 'owner_id', item.owner_id, 'value', item.value,
 					                                         'updated_at', item.updated_at, 'deleted_at', item.deleted_at)
 					               FROM public.cf_items item WHERE item.id = $3::uuid)
-					)::text`, clientUser, clientID, pushedID).Scan(&state); err != nil {
+					)::text`, clientUser, clientID, pushedID, observeAssignmentRegistration()).Scan(&state); err != nil {
 					t.Fatalf("observe retained client state: %v", err)
 				}
 				return state
 			}
 			predecessorState := retainedClientState()
 
-			// The predecessor validates a field addition, but its worker waits on
-			// the gate and never activates it. The restart of the update ends the
-			// gate session. The retained generation has no recorded source
-			// requirement, so it must activate as Class 3 with the value written
-			// after registration.
+			// The worker gate keeps the validated field addition pending.
+			// Legacy origins retain an unknown source requirement.
+			// Rc.1 records requirement 2 because the field has a value at admission.
+			// Both paths require bootstrap and Class 3 activation.
 			const retainedValue = "retained-pending-value"
 			session, err := admin.Conn(ctx)
 			if err != nil {
@@ -156,9 +192,14 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				t.Fatalf("begin retained-generation registration: %v", err)
 			}
 			defer transaction.Rollback()
-			for step, statement := range []string{
-				"ALTER TABLE public.cf_items ADD COLUMN retained_note text",
-				`WITH parent AS MATERIALIZED (
+			if _, err := transaction.ExecContext(ctx, "ALTER TABLE public.cf_items ADD COLUMN retained_note text"); err != nil {
+				t.Fatalf("add the retained field on %s: %v", origin.version, err)
+			}
+			if _, err := transaction.ExecContext(ctx,
+				"UPDATE public.cf_items SET retained_note = $2 WHERE id = $1", beforeID, "retained-admission-value"); err != nil {
+				t.Fatalf("write the retained field before registration: %v", err)
+			}
+			if _, err := transaction.ExecContext(ctx, `WITH parent AS MATERIALIZED (
 				     SELECT r.*
 				     FROM synchro.sync_registry r
 				     JOIN synchro.sync_registry_generations g ON g.generation = r.registry_generation
@@ -172,11 +213,8 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				     exclude_columns, array_append(sync_columns, 'retained_note'),
 				     max_scope_fanout
 				 )
-				 FROM parent`,
-			} {
-				if _, err := transaction.ExecContext(ctx, statement); err != nil {
-					t.Fatalf("retained-generation registration statement %d on %s: %v", step+1, origin.version, err)
-				}
+				 FROM parent`); err != nil {
+				t.Fatalf("register the retained field on %s: %v", origin.version, err)
 			}
 			var retainedGeneration int64
 			if err := transaction.QueryRowContext(ctx, `
@@ -208,6 +246,15 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 					update.WorkerStableBeforeUpdate,
 				)
 			}
+			var sourceRequirement sql.NullInt64
+			if err := admin.QueryRowContext(ctx,
+				"SELECT source_requirement FROM synchro.sync_registry_generations WHERE generation = $1",
+				retainedGeneration).Scan(&sourceRequirement); err != nil {
+				t.Fatalf("observe retained source requirement after the update: %v", err)
+			}
+			if sourceRequirement != wantSourceRequirement {
+				t.Fatalf("retained source requirement from %s = %+v, want %+v", origin.version, sourceRequirement, wantSourceRequirement)
+			}
 
 			catalogs, err := harness.ObserveExtensionCatalogs(ctx)
 			if err != nil {
@@ -235,6 +282,44 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			}
 			if state := retainedClientState(); state != predecessorState {
 				t.Fatalf("push replay after the update from %s changed durable state:\nbefore=%s\nafter=%s", origin.version, predecessorState, state)
+			}
+			if origin.version == "0.4.0-rc.1" {
+				for _, call := range []string{
+					"synchro.synchro_register_assignment_function(NULL)",
+					"synchro.synchro_register_assignment_function(NULL, NULL)",
+					"synchro.synchro_register_assignment_function(NULL, 0)",
+				} {
+					var returnedNull bool
+					if err := admin.QueryRowContext(ctx, "SELECT "+call+" IS NULL").Scan(&returnedNull); err != nil {
+						t.Fatalf("register a NULL function name after the update: %v", err)
+					}
+					if !returnedNull {
+						t.Fatalf("NULL-name registration returned a non-NULL result: %s", call)
+					}
+					if after := observeAssignmentRegistration(); after != predecessorRegistration {
+						t.Fatalf("NULL-name registration changed retained state: %s\nbefore=%s\nafter=%s", call, predecessorRegistration, after)
+					}
+				}
+				var registered bool
+				if err := admin.QueryRowContext(ctx, `
+					SELECT synchro.synchro_register_assignment_function('public.cf_assigned_scopes', NULL) IS NOT NULL`).Scan(&registered); err != nil {
+					t.Fatalf("register the retained function without a bound: %v", err)
+				}
+				if !registered {
+					t.Fatal("unbounded registration returned a NULL result")
+				}
+				var unbounded, sameDefinition bool
+				if err := admin.QueryRowContext(ctx, `
+					SELECT max_scopes IS NULL,
+					       (to_jsonb(registration) - 'max_scopes' - 'registered_at') =
+					       ($1::jsonb - 'max_scopes' - 'registered_at')
+					FROM synchro.sync_assignment_function registration
+					WHERE singleton`, predecessorRegistration).Scan(&unbounded, &sameDefinition); err != nil {
+					t.Fatalf("observe the retained unbounded registration: %v", err)
+				}
+				if !unbounded || !sameDefinition {
+					t.Fatalf("unbounded registration changed its retained function: unbounded=%t same_definition=%t", unbounded, sameDefinition)
+				}
 			}
 			requireOnlyChange := func(response map[string]any, recordID, value, version string) map[string]any {
 				t.Helper()
@@ -272,8 +357,8 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				successorID, "successor-source", successorChanges.Records[0].RowVersion)
 			acknowledgeRealClientCursors(t, ctx, harness, clientToken, updateClient)
 
-			// Without a recorded source requirement, the generation waits for the
-			// operator bootstrap and then activates as Class 3.
+			// Unknown legacy requirements and recorded requirement 2 both need
+			// operator bootstrap before Class 3 activation.
 			retainedGenerationState := func() (state, class string, pending int64) {
 				t.Helper()
 				if err := admin.QueryRowContext(ctx, `

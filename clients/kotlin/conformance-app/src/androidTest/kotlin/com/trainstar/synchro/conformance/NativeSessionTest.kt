@@ -3,7 +3,9 @@ package com.trainstar.synchro.conformance
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -13,20 +15,69 @@ import org.junit.runner.RunWith
 class NativeSessionTest {
     @Test
     fun routesCommandsToIndependentLogicalSessions() {
-        NativeSession(InstrumentationRegistry.getInstrumentation().targetContext).use { session ->
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val maximumRows = 256
+        NativeSession(context).use { session ->
             val first = session.execute(openCommand("session-one", "one.sqlite", "client-one"))
             val second = session.execute(openCommand("session-two", "two.sqlite", "client-two"))
-            val firstCapture = session.execute(captureCommand("session-one"))
-            val repeatedCapture = session.execute(captureCommand("session-one"))
-
             assertTrue(first.contains("\"outcome\":\"passed\""))
             assertTrue(second.contains("\"outcome\":\"passed\""))
+            val selectedCapture = """{"schema_version":1,"operation":"capture","session_id":"session-one","row_selectors":[{"table_name":"local_capture_rows","primary_key_field":"id","primary_key":{"type":"string","value":"first"}},{"table_name":"local_capture_rows","primary_key_field":"id","primary_key":{"type":"string","value":"second"}}]}"""
+            SQLiteDatabase.openDatabase(
+                context.getDatabasePath("one.sqlite").absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE,
+            ).use { database ->
+                database.execSQL("CREATE TABLE local_capture_rows (id TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                database.execSQL("INSERT INTO local_capture_rows VALUES ('first', 'first-value'), ('second', 'second-value')")
+            }
+            val firstCapture = session.execute(selectedCapture)
+            val repeatedCapture = session.execute(selectedCapture)
             assertTrue(firstCapture.contains("\"outcome\":\"passed\""))
+            val firstResult = JSONObject(firstCapture).getJSONObject("result")
+            assertEquals(2, firstResult.getInt("application_row_count"))
+            val firstRows = firstResult.getJSONArray("application_rows")
+            assertEquals(2, firstRows.length())
+            assertEquals("first", firstRows.getJSONObject(0).getString("id"))
+            assertEquals("first-value", firstRows.getJSONObject(0).getString("value"))
+            assertEquals("second", firstRows.getJSONObject(1).getString("id"))
+            assertEquals("second-value", firstRows.getJSONObject(1).getString("value"))
+            val secondResult = JSONObject(session.execute(captureCommand("session-two"))).getJSONObject("result")
+            assertEquals(0, secondResult.getInt("application_row_count"))
+            assertEquals(0, secondResult.getJSONArray("application_rows").length())
             val fingerprint = Regex("\\\"durable_state_fingerprint\\\":\\\"([0-9a-f]{64})\\\"")
             val firstFingerprint = fingerprint.find(firstCapture)?.groupValues?.get(1)
             assertTrue(firstFingerprint != null)
             assertEquals(firstFingerprint, fingerprint.find(repeatedCapture)?.groupValues?.get(1))
+            SQLiteDatabase.openDatabase(
+                context.getDatabasePath("one.sqlite").absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE,
+            ).use { database ->
+                database.execSQL("INSERT INTO local_capture_rows VALUES ('unselected', 'unselected-value')")
+            }
+            val incompleteResult = JSONObject(session.execute(selectedCapture)).getJSONObject("result")
+            assertEquals(3, incompleteResult.getInt("application_row_count"))
+            val incompleteRows = incompleteResult.getJSONArray("application_rows")
+            assertEquals(2, incompleteRows.length())
+            assertEquals(firstRows.toString(), incompleteRows.toString())
+            assertTrue(incompleteResult.getInt("application_row_count") > incompleteRows.length())
+            SQLiteDatabase.openDatabase(
+                context.getDatabasePath("one.sqlite").absolutePath,
+                null,
+                SQLiteDatabase.OPEN_READWRITE,
+            ).use { database ->
+                repeat(maximumRows - 2) { index ->
+                    database.execSQL("INSERT INTO local_capture_rows VALUES (?, ?)", arrayOf("bulk-$index", "value-$index"))
+                }
+            }
+            val overLimitResult = JSONObject(session.execute(selectedCapture)).getJSONObject("result")
+            assertEquals(maximumRows + 1, overLimitResult.getInt("application_row_count"))
+            assertFalse(overLimitResult.has("application_rows"))
+            assertFalse(overLimitResult.has("application_row_storage_classes"))
         }
+        context.deleteDatabase("one.sqlite")
+        context.deleteDatabase("two.sqlite")
     }
 
     @Test

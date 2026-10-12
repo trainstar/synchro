@@ -1,6 +1,6 @@
 {
   "name": "@trainstar/synchro-react-native",
-  "version": "0.4.0-rc.1",
+  "version": "0.4.0-rc.2",
   "description": "React Native bridge for Synchro sync SDK",
   "source": "./src/index.ts",
   "main": "./lib/module/index.js",
@@ -16,6 +16,11 @@
       "types": "./lib/typescript/src/inspection.d.ts",
       "default": "./lib/module/inspection.js"
     },
+    "./tooling-patches/apply": "./tooling-patches/apply.cjs",
+    "./tooling-patches/cli-config-android-20.2.0.patch": "./tooling-patches/cli-config-android-20.2.0.patch",
+    "./tooling-patches/cli-clean-20.2.0.patch": "./tooling-patches/cli-clean-20.2.0.patch",
+    "./tooling-patches/react-native-builder-bob-0.40.18.patch": "./tooling-patches/react-native-builder-bob-0.40.18.patch",
+    "./tooling-patches/stream-json-1.9.1.patch": "./tooling-patches/stream-json-1.9.1.patch",
     "./package.json": "./package.json"
   },
   "files": [
@@ -23,7 +28,9 @@
     "lib",
     "android",
     "ios",
+    "ios-test-host",
     "ios-tests",
+    "tooling-patches",
     "*.podspec",
     "!ios/build",
     "!android/build",
@@ -69,7 +76,7 @@
     "node": ">=20.19.4"
   },
   "devDependencies": {
-    "@react-native/babel-preset": "0.83.0",
+    "@react-native/babel-preset": "0.83.10",
     "@testing-library/react-native": "^12.4.0",
     "@types/jest": "^29.5.14",
     "@types/react": "^19.2.4",
@@ -79,19 +86,26 @@
     "eslint": "^9.0.0",
     "jest": "^29.7.0",
     "react": "19.2.4",
-    "react-native": "0.83.0",
+    "react-native": "0.83.10",
     "react-native-builder-bob": "^0.40.18",
     "react-test-renderer": "^19.2.4",
     "ts-jest": "^29.1.0",
     "typescript": "^5.9.2"
   },
   "peerDependencies": {
-    "react": ">=19.2.0 <20.0.0",
-    "react-native": ">=0.83.0 <0.84.0"
+    "react": ">=19.1.1 <20.0.0",
+    "react-native": ">=0.82.1 <0.84.0"
   },
   "workspaces": [
     "example"
   ],
+  "resolutions": {
+    "@react-native-community/cli-config-android@npm:20.2.0": "patch:@react-native-community/cli-config-android@npm%3A20.2.0#./tooling-patches/cli-config-android-20.2.0.patch",
+    "@react-native-community/cli-clean@npm:20.2.0": "patch:@react-native-community/cli-clean@npm%3A20.2.0#./tooling-patches/cli-clean-20.2.0.patch",
+    "react-native-builder-bob@npm:^0.40.18": "patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch",
+    "stream-json@npm:^1.7.4": "patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch",
+    "stream-json@npm:^1.7.5": "patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch"
+  },
   "packageManager": "yarn@4.11.0",
   "react-native-builder-bob": {
     "source": "src",

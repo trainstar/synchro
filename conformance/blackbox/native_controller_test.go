@@ -8,8 +8,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trainstar/synchro/conformance/scenarios"
 )
@@ -51,6 +53,32 @@ func TestNativeLSNComparisonPreservesWordBoundaries(t *testing.T) {
 		if _, valid := compareNativeLSN("1/0", invalid); valid {
 			t.Fatalf("invalid right position %q was accepted", invalid)
 		}
+	}
+}
+
+func TestAwaitApplicationPushRecordsPreservesAlreadyDoneContext(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want error
+	}{
+		{"canceled", context.Canceled},
+		{"expired", context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if test.want == context.Canceled {
+				ctx, cancel = context.WithCancel(context.Background())
+				cancel()
+			} else {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			}
+			defer cancel()
+			controller := &NativeController{waitTimeout: time.Second}
+			if err := controller.awaitApplicationPushRecords(ctx, &nativeTransactionBinding{}); !errors.Is(err, test.want) {
+				t.Fatalf("already-done context error=%v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
@@ -662,6 +690,77 @@ func TestValidateNativeRuntimeRowMapsSchemaQueueAuthoredMutation(t *testing.T) {
 	}
 }
 
+func TestNativeControllerRebindsCurrentImagesWithoutChangingHistory(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		input   json.RawMessage
+		want    json.RawMessage
+		remove  bool
+		wantErr bool
+	}{
+		{name: "string to int", input: []byte(`"42"`), want: []byte(`42`)},
+		{name: "negative", input: []byte(`"-42"`), want: []byte(`-42`)},
+		{name: "zero", input: []byte(`"0"`), want: []byte(`0`)},
+		{name: "minimum integer", input: []byte(`"-2147483648"`), want: []byte(`-2147483648`)},
+		{name: "maximum integer", input: []byte(`"2147483647"`), want: []byte(`2147483647`)},
+		{name: "removal only", input: []byte(`"retained"`), want: []byte(`"retained"`), remove: true},
+		{name: "malformed JSON", input: []byte(`"42`), wantErr: true},
+		{name: "non-string JSON", input: []byte(`42`), wantErr: true},
+		{name: "null", input: []byte(`null`), wantErr: true},
+		{name: "malformed decimal", input: []byte(`"not-an-integer"`), wantErr: true},
+		{name: "fraction", input: []byte(`"1.5"`), wantErr: true},
+		{name: "below minimum", input: []byte(`"-2147483649"`), wantErr: true},
+		{name: "above maximum", input: []byte(`"2147483648"`), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			firstFields := map[string]json.RawMessage{"value": test.input, "retired": []byte(`"old-first"`)}
+			secondFields := map[string]json.RawMessage{"value": []byte(`"7"`), "retired": []byte(`"old-second"`)}
+			wantFirstHistory := map[string]json.RawMessage{"value": test.input, "retired": []byte(`"old-first"`)}
+			wantSecondHistory := map[string]json.RawMessage{"value": []byte(`"7"`), "retired": []byte(`"old-second"`)}
+			before := &nativeAuthoredImage{Fields: firstFields, Version: "first-version", Checksum: "first-checksum"}
+			after := &nativeAuthoredImage{Fields: secondFields, Version: "second-version", Checksum: "second-checksum"}
+			first := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "affected"}, Image: *before}
+			second := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "affected"}, Image: *after}
+			unaffected := &nativeRecordBinding{Table: nativeTableBinding{RuntimeID: "other"}, Image: *before}
+			transaction := &nativeTransactionBinding{Events: []nativeEventBinding{{Before: before, After: after}}}
+			controller := &NativeController{
+				installation: &nativeInstallationBinding{},
+				records:      map[string]*nativeRecordBinding{"first": first, "second": second, "unaffected": unaffected},
+				transactions: map[string]*nativeTransactionBinding{"historical": transaction},
+			}
+			changed, targetType := "value", "int"
+			if test.remove {
+				changed, targetType = "", "string"
+			}
+			err := controller.rebindNativeTableAfterTransition("affected", map[string]nativeAuthoredField{
+				"value": {FieldID: "value", Type: targetType},
+			}, changed)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("rebind error=%v, want error=%t", err, test.wantErr)
+			}
+			if test.wantErr {
+				if !reflect.DeepEqual(first.Image.Fields, wantFirstHistory) || !reflect.DeepEqual(second.Image.Fields, wantSecondHistory) {
+					t.Fatal("failed conversion partially published a current image")
+				}
+			} else {
+				secondValue := json.RawMessage(`7`)
+				if test.remove {
+					secondValue = json.RawMessage(`"7"`)
+				}
+				if !reflect.DeepEqual(first.Image.Fields, map[string]json.RawMessage{"value": test.want}) || !reflect.DeepEqual(second.Image.Fields, map[string]json.RawMessage{"value": secondValue}) {
+					t.Fatal("current images did not apply the authored conversion and field removal")
+				}
+			}
+			if !reflect.DeepEqual(transaction.Events[0].Before.Fields, wantFirstHistory) || !reflect.DeepEqual(transaction.Events[0].After.Fields, wantSecondHistory) || !reflect.DeepEqual(unaffected.Image.Fields, wantFirstHistory) {
+				t.Fatal("current-image rebinding changed a historical or unaffected field map")
+			}
+			if first.Image.Version != "first-version" || first.Image.Checksum != "first-checksum" || second.Image.Version != "second-version" || second.Image.Checksum != "second-checksum" || before.Version != "first-version" || before.Checksum != "first-checksum" || after.Version != "second-version" || after.Checksum != "second-checksum" {
+				t.Fatal("current-image rebinding changed version or checksum evidence")
+			}
+		})
+	}
+}
+
 func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T) {
 	table := nativeTableBinding{
 		AuthoredID:       "items",
@@ -721,6 +820,9 @@ func TestNativeControllerBindsAcceptedApplicationPushToWALIdentity(t *testing.T)
 
 func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.T) {
 	controller := nativeApplicationPushChangeController("deleted_at")
+	currentTable := controller.installation.tables["items"]
+	currentTable.Fields = map[string]string{"id": "runtime-id", "owner": "runtime-owner", "value": "runtime-value", "note": "runtime-note"}
+	controller.installation.tables["items"] = currentTable
 	operation := scenarios.Operation{
 		ContractOperation: "push",
 		Name:              "submit",
@@ -739,7 +841,7 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 					"op":"update",
 					"base_version":"server-version",
 					"client_version":"2026-08-11T00:00:01.000000Z",
-					"columns":{"value":"pending-updated"}
+					"columns":{"value":"pending-updated","note":"added-note"}
 				}]
 			},
 			"delivery":"apply",
@@ -762,7 +864,7 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 	if event.Before.Version != "server-version" || string(event.Before.Fields["value"]) != `"pending"` {
 		t.Fatalf("application update before image = %#v, want materialized prior image", event.Before)
 	}
-	if string(event.After.Fields["value"]) != `"pending-updated"` || string(event.After.Fields["owner"]) != `"user-a"` || event.After.Version != "" || event.After.Checksum != "" {
+	if string(event.After.Fields["value"]) != `"pending-updated"` || string(event.After.Fields["note"]) != `"added-note"` || string(event.After.Fields["owner"]) != `"user-a"` || event.After.Version != "" || event.After.Checksum != "" {
 		t.Fatalf("application update after image = %#v, want merged unmaterialized image", event.After)
 	}
 	if len(event.AuthoredScopes) != 1 || event.AuthoredScopes[0] != "scope-a" {
@@ -771,6 +873,14 @@ func TestNativeControllerBindsAcceptedApplicationUpdateToWALIdentity(t *testing.
 	record := controller.records[nativeRecordKey("items", `"pending-row"`)]
 	if record == nil || string(record.Image.Fields["value"]) != `"pending"` {
 		t.Fatalf("application update changed the materialized prior record: %#v", record)
+	}
+	if _, found := record.Table.Fields["note"]; found {
+		t.Fatal("application update changed the prior record's table before acceptance")
+	}
+	transaction.RuntimeAcceptedEvents = []bool{true}
+	controller.bindApplicationPushRecords(transaction)
+	if !reflect.DeepEqual(record.Table, currentTable) || !reflect.DeepEqual(record.Image, *event.After) {
+		t.Fatalf("accepted application update did not bind the current table and image: %#v", record)
 	}
 }
 

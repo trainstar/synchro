@@ -16,6 +16,7 @@ internal enum class MigrationOperationKind {
     @kotlinx.serialization.SerialName("create_table") CREATE_TABLE,
     @kotlinx.serialization.SerialName("drop_table") DROP_TABLE,
     @kotlinx.serialization.SerialName("add_columns") ADD_COLUMNS,
+    @kotlinx.serialization.SerialName("recreate_table") RECREATE_TABLE,
     @kotlinx.serialization.SerialName("drop_index") DROP_INDEX,
     @kotlinx.serialization.SerialName("create_index") CREATE_INDEX,
     @kotlinx.serialization.SerialName("replace_synced_materialization") REPLACE_SYNCED_MATERIALIZATION,

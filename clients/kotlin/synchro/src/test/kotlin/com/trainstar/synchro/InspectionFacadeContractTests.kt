@@ -104,7 +104,7 @@ class InspectionFacadeContractTests {
         reachedReferences: MutableSet<String>,
     ) {
         val classifier = type.classifier as? KClass<*> ?: error("facade type classifier is unavailable")
-        if (classifier == List::class || classifier.isFunction()) {
+        if (classifier == List::class || classifier == Map::class || classifier.isFunction()) {
             type.arguments.forEach { collectModels(requireNotNull(it.type), references, result, reachedReferences) }
             return
         }
@@ -125,6 +125,10 @@ class InspectionFacadeContractTests {
     private fun KType.toShape(): TypeShape {
         val classifier = classifier as? KClass<*> ?: error("facade type classifier is unavailable")
         return when (classifier) {
+            Map::class -> {
+                require(arguments.first().type?.classifier == String::class)
+                TypeShape("string-map", isMarkedNullable, element = requireNotNull(arguments.last().type).toShape())
+            }
             List::class -> TypeShape(
                 name = "array",
                 nullable = isMarkedNullable,

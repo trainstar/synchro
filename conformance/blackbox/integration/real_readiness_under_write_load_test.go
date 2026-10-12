@@ -42,8 +42,11 @@ func (sample realReadinessSample) withinLimits(limits realReadinessLimits) bool 
 }
 
 type realReadinessWriteLoad struct {
-	commits []time.Duration
-	err     error
+	commits                       []time.Duration
+	err                           error
+	maximumScheduledStartDelay    time.Duration
+	totalSuccessfulExecDuration   time.Duration
+	maximumSuccessfulExecDuration time.Duration
 }
 
 // TestRealReadinessStaysReadyUnderWriteLoad proves that readiness stays ready while a healthy worker captures writes.
@@ -76,7 +79,8 @@ func TestRealReadinessStaysReadyUnderWriteLoad(t *testing.T) {
 		t.Fatalf("readiness write load failed after %d commits: %v", len(load.commits), load.err)
 	}
 	if commits, want := realReadinessLoadCommitsInWindow(load.commits), realReadinessLoadMinimumRate*int(realReadinessLoadDuration/time.Second); commits < want {
-		t.Fatalf("write load committed %d rows in %s, want at least %d", commits, realReadinessLoadDuration, want)
+		t.Fatalf("write load committed %d rows in %s, want at least %d: max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
+			commits, realReadinessLoadDuration, want, load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration)
 	}
 	if last := samples[len(samples)-1].at; last > load.commits[len(load.commits)-1] {
 		t.Fatalf("readiness sample at %s started after the last write at %s", last, load.commits[len(load.commits)-1])
@@ -105,8 +109,9 @@ func TestRealReadinessStaysReadyUnderWriteLoad(t *testing.T) {
 	// The mutation gate treats output of the parent test as a setup failure, so the summary is in the assertion.
 	t.Run("assertion", func(t *testing.T) {
 		t.Logf(
-			"readiness write load commits=%d samples=%d max_heartbeat_age=%.3fs max_wal_lag_bytes=%.0f max_commit_lag=%.3fs",
+			"readiness write load commits=%d samples=%d max_heartbeat_age=%.3fs max_wal_lag_bytes=%.0f max_commit_lag=%.3fs max_scheduled_start_delay=%s total_successful_exec_duration=%s max_successful_exec_duration=%s",
 			len(load.commits), len(samples), maximum.heartbeatSeconds, maximum.walLagBytes, maximum.walLagSeconds,
+			load.maximumScheduledStartDelay, load.totalSuccessfulExecDuration, load.maximumSuccessfulExecDuration,
 		)
 		notReady := 0
 		unhealthy := make(map[string]int)
@@ -157,22 +162,30 @@ func runRealReadinessWriteLoad(ctx context.Context, database *sql.DB, started ti
 	var load realReadinessWriteLoad
 	commitCount := int(realReadinessLoadDuration / realReadinessLoadCommitInterval)
 	for commit := 0; commit < commitCount; commit++ {
+		scheduled := started.Add(time.Duration(commit) * realReadinessLoadCommitInterval)
 		select {
 		case <-ctx.Done():
 			load.err = ctx.Err()
 			return load
-		case <-time.After(time.Until(started.Add(time.Duration(commit) * realReadinessLoadCommitInterval))):
+		case <-time.After(time.Until(scheduled)):
 		}
 		recordID := fmt.Sprintf("00000000-0000-4000-8239-%012d", commit+1)
-		if _, err := database.ExecContext(
+		queryStart := time.Now()
+		_, err := database.ExecContext(
 			ctx,
 			"INSERT INTO public.cf_items (id, owner_id, value) VALUES ($1, 'diagnostic-user', 'readiness-write-load')",
 			recordID,
-		); err != nil {
+		)
+		queryEnd := time.Now()
+		if err != nil {
 			load.err = fmt.Errorf("insert write-load row %s: %w", recordID, err)
 			return load
 		}
 		load.commits = append(load.commits, time.Since(started))
+		executionDuration := queryEnd.Sub(queryStart)
+		load.maximumScheduledStartDelay = max(load.maximumScheduledStartDelay, queryStart.Sub(scheduled))
+		load.totalSuccessfulExecDuration += executionDuration
+		load.maximumSuccessfulExecDuration = max(load.maximumSuccessfulExecDuration, executionDuration)
 	}
 	return load
 }

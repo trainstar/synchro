@@ -510,7 +510,7 @@
           "installation": {
             "installed": true,
             "schema_name": "synchro",
-            "extension_version": "0.4.0-rc.1",
+            "extension_version": "0.4.0-rc.2",
             "protocol_version": 3,
             "minimum_client_runtime": 3,
             "stale_client_interval_milliseconds": 3600000,
@@ -612,7 +612,10 @@
               }
             ],
             "capture_dependencies": [],
-            "scope_rules": [],
+             "scope_rules": [{"scope_rule_id":"items-schema-proof","relation":"public.items","membership_function":"synchro.scope_items","positive_fanout_bound":8,"evaluations":[
+               {"row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019schema-proof-prepared-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-prepared-row\""},"scopes":["user:user-a"]},
+               {"row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u001aschema-proof-committed-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-committed-row\""},"scopes":["user:user-a"]}
+             ]}],
             "dependency_impacts": []
           },
           "stream": {
@@ -634,6 +637,8 @@
             }
           ],
           "clients": [
+            {"user_id":"user-a","client_id":"client-schema-proof-prepared","client_generation":1,"scope_set_version":1,"accepted_write_epoch":0,"last_cursor_acknowledged_at":null,"assigned_scope_ids":["user:user-a"],"local_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"local_lifecycle":"local_ready"},
+            {"user_id":"user-a","client_id":"client-schema-proof-committed","client_generation":1,"scope_set_version":1,"accepted_write_epoch":0,"last_cursor_acknowledged_at":null,"assigned_scope_ids":["user:user-a"],"local_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"local_lifecycle":"local_ready"},
             {
               "user_id": "user-a",
               "client_id": "client-schema-current-1",
@@ -942,6 +947,21 @@
       }
     ],
     "expected_state": [
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-S1-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-BOOTSTRAP-001","schema_alias":"schema-v1","row_alias":"proof-prepared-row","columns":{"value":"41"},"queue_count":0,"sentinel":"preserve-local"}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-INTENT-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-WRITE-001","schema_alias":"schema-v1","mutation_alias":"proof-prepared-mutation","base_alias":"proof-prepared-baseline","columns":{"value":"42"},"queue_count":1}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-JOURNAL-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-MIGRATE-001","checkpoint":"migration_prepared","active_schema_alias":"schema-v1","journal_schema_alias":"schema-v2","active_cursor":"captured-S1","journal_cursor":"actual-connect-replacement","preserve":["physical-schema","queued-intent","sentinel"]}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVERED-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVER-001","checkpoint":"migration_committed","before_http":true,"active_schema_alias":"schema-v2","active_cursor":"journal-replacement","physical_field":"note","preserve":["queued-intent","sentinel"]}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-FINAL-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-COMPLETE-001","schema_alias":"schema-v2","columns":{"value":"42"},"queue_count":0,"outcome_schema_alias":"schema-v2","sentinel":"preserve-local"}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-S1-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-BOOTSTRAP-001","schema_alias":"schema-v1","row_alias":"proof-committed-row","columns":{"value":"42"},"queue_count":0,"sentinel":"preserve-local"}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEALED-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","mutation_alias":"proof-m1","authored_schema_alias":"schema-v1","columns":{"value":"41"},"sealed":true}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-ACCEPTED-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","mutation_alias":"proof-m1","status":"applied","outcome_schema_alias":"schema-v1","client_reconciled":false}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-JOURNAL-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-MIGRATE-001","checkpoint":"migration_committed","active_schema_alias":"schema-v2","active_cursor":"actual-connect-replacement","physical_field":"note","preserve":["queued-intent","sentinel"]}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVERED-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVER-001","checkpoint":"migration_committed","before_http":true,"active_schema_alias":"schema-v2","active_cursor":"journal-replacement","preserve":["physical-schema","queued-intent","sentinel"]}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-INTENT-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-WRITE-001","mutation_alias":"proof-m2","authored_schema_alias":"schema-v2","base":"actual-local-base","depends_on":"proof-m1","field_order":["value","note"],"columns":{"value":"42","note":"later-note"},"queue_count":2}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-BEFORE-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"before_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001","schema_alias":"schema-v2","mutation_alias":"proof-m1","outcome_schema_alias":"schema-v1","columns":{"value":"41"}}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-AFTER-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001","compare_to":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-BEFORE-001","preserve":["row","version","checksum","historical-outcome","outcome-identity"]}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-PAUSED-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-REPLY-001","mutation_alias":"proof-m2","status":"applied","outcome_schema_alias":"schema-v2","m1_reconciled":true,"m2_reconciled":false,"preserve_original":true,"normalized_changes":["base_version","depends_on_mutation_id"],"base":"accepted-M1-server-version","columns":{"value":"42","note":"later-note"}}}},
+      {"id":"EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-FINAL-001","predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{"after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-COMPLETE-001","schema_alias":"schema-v2","queue_count":0,"outcome_count":2,"columns":{"value":"42","note":"later-note"},"sentinel":"preserve-local"}}},
       {
         "id": "EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001",
         "predicate": {
@@ -1026,7 +1046,18 @@
       }
     ]
   },
+  "native_local_fixture":{"table_name":"schema_proof_local","id":"sentinel","value":"preserve-local"},
   "native_identity_aliases": [
+    {"kind":"row-version","alias":"proof-prepared-baseline","value":"proof-prepared-baseline","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001","STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-PUSH-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-INTENT-001"]},
+    {"kind":"row-version","alias":"proof-committed-baseline","value":"proof-committed-baseline","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-WRITE-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEALED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-INTENT-001"]},
+    {"kind":"mutation-id","alias":"proof-prepared-mutation","value":"00000000-0000-4000-8000-000000033101","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-PUSH-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-INTENT-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-FINAL-001"]},
+    {"kind":"mutation-id","alias":"proof-m1","value":"00000000-0000-4000-8000-000000033102","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEALED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-ACCEPTED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-BEFORE-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-AFTER-001"]},
+    {"kind":"mutation-id","alias":"proof-m2","value":"00000000-0000-4000-8000-000000033103","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-REPLY-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-INTENT-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-PAUSED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-FINAL-001"]},
+    {"kind":"batch-id","alias":"proof-m1-original-batch","value":"00000000-0000-4000-8000-000000033111","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEALED-001"]},
+    {"kind":"batch-id","alias":"proof-prepared-batch","value":"00000000-0000-4000-8000-000000033112","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-PUSH-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-FINAL-001"]},
+    {"kind":"batch-id","alias":"proof-m2-batch","value":"00000000-0000-4000-8000-000000033114","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-REPLY-001"],"expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-PAUSED-001"]},
+    {"kind":"primary-key","alias":"proof-prepared-row","value":"schema-proof-prepared-row","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001","STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-WRITE-001"],"expectation_ids":[]},
+    {"kind":"primary-key","alias":"proof-committed-row","value":"schema-proof-committed-row","step_ids":["STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-WRITE-001","STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-WRITE-001"],"expectation_ids":[]},
     {
       "kind": "schema",
       "alias": "schema-v1",
@@ -1216,6 +1247,8 @@
     }
   ],
   "native_lifecycle_boundaries": [
+    {"id":"schema_proof_prepared_stop","phase":"setup","after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-BOOTSTRAP-001","user_id":"user-a","client_id":"client-schema-proof-prepared","method":"stop"},
+    {"id":"schema_proof_committed_stop","phase":"setup","after_step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-BOOTSTRAP-001","user_id":"user-a","client_id":"client-schema-proof-committed","method":"stop"},
     {
       "id": "schema_stop_prewarm_class1_1",
       "phase": "setup",
@@ -1438,7 +1471,8 @@
         "call_id": "schema_current_1",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Observe exact-current schema dispatch for an independent client.",
       "measurement_sample": {
@@ -1494,7 +1528,8 @@
         "call_id": "schema_current_2",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Repeat exact-current schema dispatch for another client.",
       "measurement_sample": {
@@ -1550,7 +1585,8 @@
         "call_id": "schema_current_3",
         "stage": "synchronous",
         "method": "start",
-        "completion": "idle"
+        "completion": "idle",
+        "initialization": "current"
       },
       "description": "Repeat exact-current schema dispatch for a third client.",
       "measurement_sample": {
@@ -1580,15 +1616,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1620,15 +1652,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1660,15 +1688,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1700,15 +1724,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1786,7 +1806,10 @@
               "relation": "public.items",
               "membership_function": "synchro.scope_items",
               "positive_fanout_bound": 8,
-              "evaluations": []
+               "evaluations": [
+                 {"row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019schema-proof-prepared-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-prepared-row\""},"scopes":["user:user-a"]},
+                 {"row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u001aschema-proof-committed-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-committed-row\""},"scopes":["user:user-a"]}
+               ]
             }
           ],
           "dependency_impacts": []
@@ -1856,15 +1879,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1912,15 +1931,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -1968,15 +1983,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2008,15 +2019,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2048,15 +2055,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-a"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2103,6 +2106,18 @@
         "disposition": "success"
       }
     },
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-COMMIT-001","phase":"setup","transport":"model","native_binding":{"kind":"controller"},"operation":{"contract_operation":"model","name":"commit-source-transaction","payload":{"stream_generation":"stream-1","commit_lsn":"20","end_lsn":"21","events":[
+      {"event_ordinal":1,"relation":"public.items","operation":"insert","before":null,"after":{"identity":{"kind":"synced","synced_row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0019schema-proof-prepared-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-prepared-row\""},"capture_key":null},"fields":[{"field":"id","type":"string","wire_json":"\"schema-proof-prepared-row\""},{"field":"value","type":"string","wire_json":"\"41\""}],"version":"proof-prepared-baseline","checksum":"5073565713d435d4aa4a48cae46df6cf6ed449728d5274bd0c5a987cba5b3409","deleted":false}},
+      {"event_ordinal":2,"relation":"public.items","operation":"insert","before":null,"after":{"identity":{"kind":"synced","synced_row":{"canonical_identity_bytes":"synchro:v3:row-identity:v1\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0005items\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002id\u0001\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u001aschema-proof-committed-row","table_id":"items","primary_key_field_id":"id","portable_type":"string","canonical_wire_json":"\"schema-proof-committed-row\""},"capture_key":null},"fields":[{"field":"id","type":"string","wire_json":"\"schema-proof-committed-row\""},{"field":"value","type":"string","wire_json":"\"42\""}],"version":"proof-committed-baseline","checksum":"5f9ad1b3cd2cdb2ebfb7b0fdbd45ff1a9944437419dffcded618938608a56279","deleted":false}}
+    ]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-BASELINE-MATERIALIZE-001","phase":"setup","transport":"process","native_binding":{"kind":"controller"},"operation":{"contract_operation":"process","name":"materialize-source-transaction","payload":{"stream_generation":"stream-1","commit_lsn":"20"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-BOOTSTRAP-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-prepared","call_id":"schema_proof_prepared_s1","stage":"synchronous","method":"start","completion":"idle"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-prepared","runtime_version":3,"protocol_version":3,"schema_reset":false,"schema":{"version":0,"hash":""},"scope_set_version":0,"known_scopes":[]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-BOOTSTRAP-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_s1","stage":"synchronous","method":"start","completion":"idle"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed","runtime_version":3,"protocol_version":3,"schema_reset":false,"schema":{"version":0,"hash":""},"scope_set_version":0,"known_scopes":[]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-WRITE-001","phase":"setup","transport":"local","native_binding":{"kind":"local-write","user_id":"user-a","client_id":"client-schema-proof-prepared"},"operation":{"contract_operation":"local","name":"write","payload":{"authenticated_user_id":"user-a","client_id":"client-schema-proof-prepared","mutation_id":"00000000-0000-4000-8000-000000033101","table_id":"items","pk":{"id":"schema-proof-prepared-row"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"operation":"update","base_version":"proof-prepared-baseline","client_version":"2026-10-09T00:00:01.000000Z","columns":{"value":"42"}}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-WRITE-001","phase":"setup","transport":"local","native_binding":{"kind":"local-write","user_id":"user-a","client_id":"client-schema-proof-committed"},"operation":{"contract_operation":"local","name":"write","payload":{"authenticated_user_id":"user-a","client_id":"client-schema-proof-committed","mutation_id":"00000000-0000-4000-8000-000000033102","table_id":"items","pk":{"id":"schema-proof-committed-row"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"operation":"update","base_version":"proof-committed-baseline","client_version":"2026-10-09T00:00:02.000000Z","columns":{"value":"41"}}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-CONNECT-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_m1_initial","stage":"synchronous","method":"start","completion":"blocked"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed","runtime_version":3,"protocol_version":3,"client_generation":1,"schema_reset":false,"schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"scope_set_version":1,"known_scopes":[{"scope_id":"user:user-a"}]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_m1_initial","stage":"synchronous","method":"start","completion":"blocked"},"operation":{"contract_operation":"push","name":"submit","payload":{"authenticated_user_id":"user-a","request":{"client_id":"client-schema-proof-committed","client_generation":1,"batch_id":"00000000-0000-4000-8000-000000033111","schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"mutations":[{"mutation_id":"00000000-0000-4000-8000-000000033102","table":"items","pk":{"id":"schema-proof-committed-row"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"op":"update","base_version":"proof-committed-baseline","client_version":"2026-10-09T00:00:02.000000Z","columns":{"value":"41"}}]},"delivery":"drop_after_server","commit_lsn":"30","end_lsn":"31"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-RESTART-001","phase":"setup","transport":"process","native_binding":{"kind":"process","user_id":"user-a","client_id":"client-schema-proof-committed"},"operation":{"contract_operation":"process","name":"restart-client","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed"}},"expected_outcome":{"disposition":"success"}},
     {
       "id": "STEP-PERF-SCHEMA-CHECK-CLASS2-PUBLISH-001",
       "phase": "setup",
@@ -2186,6 +2201,18 @@
         "disposition": "success"
       }
     },
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-MIGRATE-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-prepared","call_id":"schema_proof_prepared_migrate","stage":"begin","method":"start","checkpoint":"migration_prepared"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-prepared","runtime_version":3,"protocol_version":3,"client_generation":1,"schema_reset":false,"schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"scope_set_version":1,"known_scopes":[{"scope_id":"user:user-a"}]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-CUT-001","phase":"setup","transport":"process","native_binding":{"kind":"process","user_id":"user-a","client_id":"client-schema-proof-prepared"},"operation":{"contract_operation":"process","name":"restart-client","payload":{"user_id":"user-a","client_id":"client-schema-proof-prepared"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVER-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-prepared","call_id":"schema_proof_prepared_recover","stage":"begin","method":"start","checkpoint":"migration_committed"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-prepared","runtime_version":3,"protocol_version":3,"client_generation":1,"schema_reset":false,"schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"scope_set_version":1,"known_scopes":[{"scope_id":"user:user-a"}]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-PUSH-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-prepared","call_id":"schema_proof_prepared_recover","stage":"await-step"},"operation":{"contract_operation":"push","name":"submit","payload":{"authenticated_user_id":"user-a","request":{"client_id":"client-schema-proof-prepared","client_generation":1,"batch_id":"00000000-0000-4000-8000-000000033112","schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"mutations":[{"mutation_id":"00000000-0000-4000-8000-000000033101","table":"items","pk":{"id":"schema-proof-prepared-row"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"op":"update","base_version":"proof-prepared-baseline","client_version":"2026-10-09T00:00:01.000000Z","columns":{"value":"42"}}]},"delivery":"apply","commit_lsn":"40","end_lsn":"41"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-COMPLETE-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-prepared","call_id":"schema_proof_prepared_recover","stage":"await-call","completion":"idle"},"operation":{"contract_operation":"pull","name":"request-page","payload":{"user_id":"user-a","client_id":"client-schema-proof-prepared","client_generation":1,"schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"scope_set_version":1,"scopes":[{"scope_id":"user:user-a","cursor_source":"client_checkpoint"}],"limit":100}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-MIGRATE-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_migrate","stage":"begin","method":"start","checkpoint":"migration_committed"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed","runtime_version":3,"protocol_version":3,"client_generation":1,"schema_reset":false,"schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"scope_set_version":1,"known_scopes":[{"scope_id":"user:user-a"}]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-CUT-001","phase":"setup","transport":"process","native_binding":{"kind":"process","user_id":"user-a","client_id":"client-schema-proof-committed"},"operation":{"contract_operation":"process","name":"restart-client","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVER-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_recover","stage":"begin","method":"start","checkpoint":"migration_committed"},"operation":{"contract_operation":"connect","name":"send","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed","runtime_version":3,"protocol_version":3,"client_generation":1,"schema_reset":false,"schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"scope_set_version":1,"known_scopes":[{"scope_id":"user:user-a"}]}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-WRITE-001","phase":"setup","transport":"local","native_binding":{"kind":"local-write","user_id":"user-a","client_id":"client-schema-proof-committed"},"operation":{"contract_operation":"local","name":"write","payload":{"authenticated_user_id":"user-a","client_id":"client-schema-proof-committed","mutation_id":"00000000-0000-4000-8000-000000033103","table_id":"items","pk":{"id":"schema-proof-committed-row"},"authored_schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"operation":"update","base_version":"proof-committed-baseline","client_version":"2026-10-09T00:00:03.000000Z","columns":{"value":"42","note":"later-note"}}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_recover","stage":"await-step"},"operation":{"contract_operation":"push","name":"submit","payload":{"authenticated_user_id":"user-a","request":{"client_id":"client-schema-proof-committed","client_generation":1,"batch_id":"00000000-0000-4000-8000-000000033113","schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"mutations":[{"mutation_id":"00000000-0000-4000-8000-000000033102","table":"items","pk":{"id":"schema-proof-committed-row"},"authored_schema":{"version":1,"hash":"721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"},"op":"update","base_version":"proof-committed-baseline","client_version":"2026-10-09T00:00:02.000000Z","columns":{"value":"41"}}]},"delivery":"apply","commit_lsn":"30","end_lsn":"31"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-REPLY-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_recover","stage":"await-step"},"operation":{"contract_operation":"push","name":"submit","payload":{"authenticated_user_id":"user-a","request":{"client_id":"client-schema-proof-committed","client_generation":1,"batch_id":"00000000-0000-4000-8000-000000033114","schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"mutations":[{"mutation_id":"00000000-0000-4000-8000-000000033103","table":"items","pk":{"id":"schema-proof-committed-row"},"authored_schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"op":"update","base_version":"proof-committed-baseline","client_version":"2026-10-09T00:00:03.000000Z","columns":{"value":"42","note":"later-note"}}]},"delivery":"apply","commit_lsn":"50","end_lsn":"51"}},"expected_outcome":{"disposition":"success"}},
+    {"id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-COMPLETE-001","phase":"setup","transport":"http","native_binding":{"kind":"public-call","user_id":"user-a","client_id":"client-schema-proof-committed","call_id":"schema_proof_committed_recover","stage":"await-call","completion":"idle"},"operation":{"contract_operation":"pull","name":"request-page","payload":{"user_id":"user-a","client_id":"client-schema-proof-committed","client_generation":1,"schema":{"version":2,"hash":"2222222222222222222222222222222222222222222222222222222222222222"},"scope_set_version":1,"scopes":[{"scope_id":"user:user-a","cursor_source":"client_checkpoint"}],"limit":100}},"expected_outcome":{"disposition":"success"}},
     {
       "id": "STEP-PERF-SCHEMA-CHECK-007",
       "phase": "exercise",
@@ -2499,15 +2526,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2539,15 +2562,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2579,15 +2598,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2619,15 +2634,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2659,15 +2670,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -2699,15 +2706,11 @@
           "client_generation": 1,
           "schema_reset": false,
           "schema": {
-            "version": 1,
-            "hash": "721d2c95e6f34cd9733feea9f5118fba391eee10d07663dad066cfc59439fa44"
+            "version": 0,
+            "hash": ""
           },
-          "scope_set_version": 1,
-          "known_scopes": [
-            {
-              "scope_id": "user:user-b"
-            }
-          ]
+          "scope_set_version": 0,
+          "known_scopes": []
         }
       },
       "expected_outcome": {
@@ -3530,13 +3533,27 @@
     }
   ],
   "wire_expectations": [
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-BOOTSTRAP-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"replace"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-BOOTSTRAP-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"replace"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-CONNECT-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"none"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEND-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"transport_failure","http_status":0,"error_code":null,"retryable":true},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-MIGRATE-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"replace"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVER-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"none"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-PUSH-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"push_success","http_status":200,"error_code":null,"retryable":false},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-PREPARED-COMPLETE-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"pull_success","http_status":200,"error_code":null,"retryable":false},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-MIGRATE-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"replace"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVER-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"connect_success","http_status":200,"error_code":null,"retryable":false,"action":"none"},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-REPLAY-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"push_success","http_status":200,"error_code":null,"retryable":false},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-REPLY-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"push_success","http_status":200,"error_code":null,"retryable":false},
+    {"step_id":"STEP-PERF-SCHEMA-CHECK-PROOF-COMMITTED-COMPLETE-001","assertion_id":"ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001","contract_case":"pull_success","http_status":200,"error_code":null,"retryable":false},
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-001",
       "assertion_id": "ASSERT-PERF-SCHEMA-CHECK-SEMANTIC-001",
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-002",
@@ -3544,7 +3561,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-003",
@@ -3552,7 +3570,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-001",
@@ -3560,7 +3579,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-002",
@@ -3568,7 +3588,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS1-003",
@@ -3576,7 +3597,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-004",
@@ -3584,7 +3606,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-005",
@@ -3592,7 +3615,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-006",
@@ -3600,7 +3624,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "none"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-001",
@@ -3608,7 +3633,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-002",
@@ -3616,7 +3642,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS2-003",
@@ -3624,7 +3651,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-007",
@@ -3632,7 +3660,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-008",
@@ -3640,7 +3669,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-009",
@@ -3648,7 +3678,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-001",
@@ -3656,7 +3687,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-002",
@@ -3664,7 +3696,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-AFFECTED-003",
@@ -3672,7 +3705,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-001",
@@ -3680,7 +3714,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-002",
@@ -3688,7 +3723,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS3-UNAFFECTED-003",
@@ -3696,7 +3732,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-001",
@@ -3704,7 +3741,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-002",
@@ -3712,7 +3750,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-BASELINE-CLASS4-003",
@@ -3720,7 +3759,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-010",
@@ -3728,7 +3768,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-011",
@@ -3736,7 +3777,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-012",
@@ -3744,7 +3786,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "rebuild_local"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-013",
@@ -3752,7 +3795,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-014",
@@ -3760,7 +3804,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-015",
@@ -3768,7 +3813,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-001",
@@ -3776,7 +3822,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-002",
@@ -3784,7 +3831,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-PREWARM-CLASS4-003",
@@ -3792,7 +3840,8 @@
       "contract_case": "connect_success",
       "http_status": 200,
       "error_code": null,
-      "retryable": false
+      "retryable": false,
+      "action": "replace"
     },
     {
       "step_id": "STEP-PERF-SCHEMA-CHECK-016",
@@ -3918,8 +3967,8 @@
       "detects_control_ids": []
     },
     {"id":"ASSERT-PERF-SCHEMA-CHECK-PROJECTION-001","requirement_ids":["SYNC-SCHEMA-005"],"description":"Class 3 projection bootstrap remains causally bound and atomically activated.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-005"]},
-    {"id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_ids":["SYNC-SCHEMA-006"],"description":"Each native client retains a verified schema migration state across interruption.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-006"]},
-    {"id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","requirement_ids":["SYNC-SCHEMA-007"],"description":"Compatible schema transitions retain only server-issued same-position cursors.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-007"]},
-    {"id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_ids":["SYNC-OUTCOME-002"],"description":"Schema transitions preserve immutable historical mutation outcome bindings.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-SEMANTIC-001"],"predicate":{"contract_predicate":"wire-outcome","name":"canonical-wire-outcome","payload":{}},"oracle":{"kind":"wire-contract","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-OUTCOME-002"]}
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-MIGRATION-001","requirement_ids":["SYNC-SCHEMA-006"],"description":"Each native client retains a verified schema migration state across interruption.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-S1-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-INTENT-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-JOURNAL-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVERED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-FINAL-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-S1-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-JOURNAL-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVERED-001"],"predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{}},"oracle":{"kind":"state-transition","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-006"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-CURSOR-001","requirement_ids":["SYNC-SCHEMA-007"],"description":"Compatible schema transitions retain only server-issued same-position cursors.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-JOURNAL-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-PREPARED-RECOVERED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-JOURNAL-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-RECOVERED-001"],"predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{}},"oracle":{"kind":"state-transition","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-SCHEMA-007"]},
+    {"id":"ASSERT-PERF-SCHEMA-CHECK-OUTCOME-001","requirement_ids":["SYNC-OUTCOME-002"],"description":"Schema transitions preserve immutable historical mutation outcome bindings.","expectation_ids":["EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SEALED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-ACCEPTED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-INTENT-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-BEFORE-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M1-SERVER-AFTER-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-M2-PAUSED-001","EXPECT-PERF-SCHEMA-CHECK-PROOF-COMMITTED-FINAL-001"],"predicate":{"contract_predicate":"state-transition","name":"legal-state-transition","payload":{}},"oracle":{"kind":"state-transition","expected_source":"authored-model","observed_source":"system-under-test"},"detects_control_ids":["CTRL-OUTCOME-002"]}
   ]
 }

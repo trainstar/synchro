@@ -106,6 +106,17 @@ GRADLE
     cp android/app/build/outputs/apk/debug/app-debug.apk "$work/$side.apk"
     ;;
   ios)
+    sed 's/withModuleName: "SynchroConsumer"/withModuleName: "SynchroUpgrade"/' \
+      "$source_dir/../../react-native/AppDelegate.swift" > ios/SynchroUpgrade/AppDelegate.swift
+    plist=ios/SynchroUpgrade/Info.plist
+    if ! /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest" "$plist" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest dict" "$plist"
+    fi
+    if /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes" "$plist" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Set :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes false" "$plist"
+    else
+      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes bool false" "$plist"
+    fi
     if [ "$side" = predecessor ]; then
       synchro_pod="pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v$version'"
     else
@@ -116,8 +127,8 @@ template, output, synchro_pod = ARGV
 content = File.read(template)
 target = "target 'SynchroUpgrade' do\n"
 abort "application Podfile target was not found" unless content.include?(target)
-abort "application Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '16.0'")
-pods = "#{target}  #{synchro_pod}\n  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.0.0'\n"
+abort "application Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '17.0'")
+pods = "#{target}  #{synchro_pod}\n  pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'\n"
 File.write(output, content.sub(target, pods))
 RUBY
     (cd ios && pod install)
@@ -136,7 +147,7 @@ RUBY
       -sdk iphonesimulator \
       -derivedDataPath "$work/derived-data" \
       PRODUCT_BUNDLE_IDENTIFIER=dev.synchro.upgrade \
-      IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+      IPHONEOS_DEPLOYMENT_TARGET=17.0 \
       CURRENT_PROJECT_VERSION="$code" \
       CODE_SIGNING_ALLOWED=NO \
       DEBUG_INFORMATION_FORMAT=dwarf \

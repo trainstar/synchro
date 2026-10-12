@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 // RegistryActivationObservation contains bounded generation evidence around one
@@ -183,16 +185,20 @@ func postgresTypeForAuthoredField(fieldType string) (string, error) {
 // TransitionSyncedTableField changes one synced table field and preserves its
 // active registration settings in one source transaction.
 func (executor *OperatorExecutor) TransitionSyncedTableField(
-	ctx context.Context, relation, removed, added, typeChanged, authoredType string,
+	ctx context.Context, relation, removed string, added *scenarios.QueueReplaySchemaField, typeChanged, authoredType string,
 ) error {
 	if executor == nil || executor.harness == nil || !executor.harness.sourceReady || ctx == nil || relation == "" {
 		return errors.New("operator executor is unavailable")
 	}
-	if (removed == "" && added == "" && typeChanged == "") ||
-		(removed != "" && removed == added) ||
+	addedName := ""
+	if added != nil {
+		addedName = added.Name
+	}
+	if (removed == "" && added == nil && typeChanged == "") ||
+		(removed != "" && removed == addedName) ||
 		(removed != "" && !validSchemaTransitionColumn(removed)) ||
-		(added != "" && !validSchemaTransitionColumn(added)) ||
-		(typeChanged != "" && (!validSchemaTransitionColumn(typeChanged) || typeChanged == removed || typeChanged == added)) ||
+		(added != nil && !validSchemaTransitionColumn(addedName)) ||
+		(typeChanged != "" && (!validSchemaTransitionColumn(typeChanged) || typeChanged == removed || typeChanged == addedName)) ||
 		(typeChanged == "" && authoredType != "") {
 		return errors.New("schema transition fields are invalid")
 	}
@@ -202,6 +208,33 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		postgresType, err = postgresTypeForAuthoredField(authoredType)
 		if err != nil {
 			return err
+		}
+	}
+	addedDefinition := ""
+	if added != nil {
+		addedType, err := postgresTypeForAuthoredField(added.Type)
+		if err != nil {
+			return err
+		}
+		addedDefinition = quoteIdentifier(added.Name) + " " + addedType
+		if added.DefaultWireJSON != nil {
+			var defaultValue *string
+			if added.Type != "string" || json.Unmarshal([]byte(*added.DefaultWireJSON), &defaultValue) != nil || defaultValue == nil {
+				return errors.New("synced schema transition default must be an authored JSON string for a string field")
+			}
+			expression := quotePostgresLiteral(*defaultValue) + "::" + addedType
+			if added.Writable {
+				addedDefinition += " DEFAULT " + expression
+			} else {
+				addedDefinition += " GENERATED ALWAYS AS (" + expression + ") STORED"
+			}
+		} else if !added.Writable {
+			return errors.New("read-only synced schema transition field requires an authored string default")
+		}
+		if added.Nullable {
+			addedDefinition += " NULL"
+		} else {
+			addedDefinition += " NOT NULL"
 		}
 	}
 	database, err := executor.harness.openDatabase(ctx, executor.harness.names.Database, executor.harness.env.Admin, false)
@@ -275,9 +308,8 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 			return errors.New("drop synced schema transition field failed")
 		}
 	}
-	if added != "" {
-		// A class 2 addition must accept rows from the earlier schema.
-		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+physicalRelation+" ADD COLUMN "+quoteIdentifier(added)+" TEXT NULL"); err != nil {
+	if added != nil {
+		if _, err := transaction.ExecContext(ctx, "ALTER TABLE "+physicalRelation+" ADD COLUMN "+addedDefinition); err != nil {
 			return errors.New("add synced schema transition field failed")
 		}
 	}
@@ -291,7 +323,7 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		}
 	}
 
-	registration.syncColumns = transitionSchemaColumns(registration.syncColumns, removed, added)
+	registration.syncColumns = transitionSchemaColumns(registration.syncColumns, removed, addedName)
 	registration.excludeColumns = transitionSchemaColumns(registration.excludeColumns, removed, "")
 	syncColumns := registration.syncColumns
 	excludeColumns := []string{}
@@ -335,7 +367,7 @@ func (executor *OperatorExecutor) TransitionSyncedTableField(
 		return errors.New("commit synced schema transition failed")
 	}
 	committed = true
-	return executor.bootstrapStagedTransition(ctx, database, added != "" || typeChanged != "", nonempty)
+	return executor.bootstrapStagedTransition(ctx, database, added != nil || typeChanged != "", nonempty)
 }
 
 func transitionSchemaColumns(columns []string, removed, added string) []string {

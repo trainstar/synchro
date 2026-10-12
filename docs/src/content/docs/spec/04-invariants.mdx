@@ -58,7 +58,20 @@ A native client MUST send pull in each normal sync cycle, also when it knows no 
 
 ### Registered Scope Assignment Function
 
-At most one registered assignment function MUST contribute scopes, and registration MUST reject a function that breaks a rule in Scope assignment in [ADR 004]. Each evaluation MUST confirm the registered definition hash. It MUST reject a null result, an empty result, a `user:` result, and more distinct results than `max_scopes`. A rejected evaluation MUST fail the complete connect or pull with `500 sync_integrity_failure` and no assignment change. Treating a failure as an empty set, truncating results, or evaluating a changed definition is a violation.
+At most one registered assignment function MUST contribute scopes.
+Registration MUST reject a function that breaks a rule in Scope assignment in [ADR 004].
+The registration function MUST keep its `(text, integer)` identity, default bound of 1000, and `void` result.
+Registration and removal MUST require `synchro_operator` permission.
+A NULL function name MUST return SQL NULL and MUST change no registration, also when the bound is NULL or invalid.
+Each non-NULL bound MUST be an integer from 1 through 1000.
+SQL NULL MUST select unbounded evaluation of the complete DISTINCT result set through operator-only registration.
+That selection MUST remove only the assignment-result count limit.
+Authorization, function restrictions, definition hash checks, result validation, and reconciliation MUST remain required.
+Each evaluation MUST confirm the registered definition hash.
+Both modes MUST reject a NULL scope result, a scope that is blank after trim, or a scope that starts with `user:`.
+A bounded evaluation MUST reject more distinct results than `max_scopes`.
+A rejected evaluation MUST fail the complete connect or pull with `500 sync_integrity_failure` and no assignment change.
+Treating a failure as an empty set, truncating results, or evaluating a changed definition is a violation.
 
 ### Scope Set Version Monotonicity
 
@@ -237,6 +250,9 @@ Repeated evaluation of the same authoritative row and dependency state MUST prod
 ### Deterministic Scope Function Contract
 
 Membership and impact functions MUST satisfy the exact registered signatures and restrictions in [ADR 004], including schema qualification, `LANGUAGE SQL`, `STABLE`, `SECURITY INVOKER`, declared dependencies, capture-only dependency registrations, commit-ordered projection access, and positive bounds. A function that reads a live application relation, or activation after any contract violation, is a conformance violation.
+
+Assignment functions MUST satisfy the separate signature and restrictions in Scope assignment in [ADR 004].
+Their result count bound MUST be 1 through 1000, or SQL NULL for administrator-selected unbounded evaluation.
 
 ### Dependency Driven Membership Propagation
 

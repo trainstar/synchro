@@ -120,6 +120,122 @@
     }
 
     #[pg_test]
+    fn test_rebuild_checks_each_row_digest_from_one_generation() {
+        setup_test_tables();
+        register_client("u1", "c1");
+        register_client("u1", "c2");
+        let valid_id = "bde20000-0000-0000-0000-000000000001";
+        let corrupted_id = "bde20000-0000-0000-0000-000000000002";
+        for (record_id, title) in [(valid_id, "Valid digest"), (corrupted_id, "Corrupted digest")] {
+            Spi::run_with_args(
+                "INSERT INTO test_orders (id, user_id, title) VALUES ($1::uuid, 'u1', $2)",
+                &[record_id.into(), title.into()],
+            )
+            .unwrap();
+            insert_edge("test_orders", record_id, "user:u1");
+            insert_changelog("user:u1", "test_orders", record_id, 1);
+        }
+
+        let baseline = rebuild_client("u1", "c1", "user:u1", None, 100);
+        assert!(baseline["error"].is_null(), "{baseline}");
+        let records = baseline["records"].as_array().expect("baseline records");
+        assert_eq!(records.len(), 2, "{baseline}");
+        let primary_key_field_id = field_id("test_orders", "id");
+        assert_eq!(records[0]["pk"][&primary_key_field_id].as_str(), Some(valid_id));
+        assert_eq!(records[1]["pk"][&primary_key_field_id].as_str(), Some(corrupted_id));
+        assert_eq!(baseline["has_more"].as_bool(), Some(false));
+        assert!(baseline["final_scope_cursor"].as_str().is_some());
+        assert_eq!(baseline["checksum"]["algorithm"].as_str(), Some("sha256"));
+        assert_ne!(
+            records[1]["row_checksum"]["digest"].as_str(),
+            Some("a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5")
+        );
+
+        // Preserve all source fields and the first row's checksum.
+        let source_state_query =
+            "SELECT jsonb_build_object(
+                 'generations', count(DISTINCT captured.registry_generation),
+                 'rows', jsonb_agg(jsonb_build_object(
+                     'record_id', edge.record_id,
+                     'captured', to_jsonb(captured) -
+                         CASE WHEN edge.record_id = $2 THEN 'checksum' ELSE '' END,
+                     'edge', to_jsonb(edge) -
+                         CASE WHEN edge.record_id = $2 THEN 'checksum' ELSE '' END
+                 ) ORDER BY edge.relation_id, edge.record_id)
+             )
+             FROM sync_bucket_edges edge
+             JOIN sync_captured_rows captured
+               ON captured.relation_id = edge.relation_id
+              AND captured.record_id = edge.record_id
+             WHERE edge.table_name = 'test_orders'
+               AND edge.bucket_id = 'user:u1'
+               AND edge.record_id IN ($1, $2)";
+        let before: pgrx::JsonB = Spi::get_one_with_args(
+            source_state_query,
+            &[valid_id.into(), corrupted_id.into()],
+        )
+        .unwrap()
+        .expect("source rows before corruption");
+        assert_eq!(before.0["generations"].as_i64(), Some(1));
+        assert_eq!(before.0["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(before.0["rows"][0]["record_id"].as_str(), Some(valid_id));
+        assert_eq!(before.0["rows"][1]["record_id"].as_str(), Some(corrupted_id));
+
+        // Match both checksums so per-row digest verification must reject them.
+        let changed: pgrx::JsonB = Spi::get_one_with_args(
+            "WITH captured_changed AS (
+                 UPDATE sync_captured_rows captured
+                 SET checksum = decode(repeat('a5', 32), 'hex')
+                 FROM sync_bucket_edges edge
+                 WHERE edge.table_name = 'test_orders'
+                   AND edge.bucket_id = 'user:u1'
+                   AND edge.record_id = $1
+                   AND captured.relation_id = edge.relation_id
+                   AND captured.record_id = edge.record_id
+                 RETURNING captured.record_id
+             ), edge_changed AS (
+                 UPDATE sync_bucket_edges
+                 SET checksum = decode(repeat('a5', 32), 'hex')
+                 WHERE table_name = 'test_orders'
+                   AND bucket_id = 'user:u1'
+                   AND record_id = $1
+                 RETURNING record_id
+             )
+             SELECT jsonb_build_object(
+                 'captured', (SELECT jsonb_agg(record_id) FROM captured_changed),
+                 'edges', (SELECT jsonb_agg(record_id) FROM edge_changed)
+             )",
+            &[corrupted_id.into()],
+        )
+        .unwrap()
+        .expect("corrupted row counts");
+        assert_eq!(changed.0["captured"], json!([corrupted_id]));
+        assert_eq!(changed.0["edges"], json!([corrupted_id]));
+        let after: pgrx::JsonB = Spi::get_one_with_args(
+            source_state_query,
+            &[valid_id.into(), corrupted_id.into()],
+        )
+        .unwrap()
+        .expect("source rows after corruption");
+        assert_eq!(after.0, before.0);
+
+        // The second client requires a fresh snapshot after corruption.
+        let response = rebuild_client("u1", "c2", "user:u1", None, 100);
+        assert_eq!(
+            response["error"]["code"].as_str(),
+            Some("sync_integrity_failure"),
+            "{response}"
+        );
+        assert_eq!(response["error"]["retryable"].as_bool(), Some(false));
+        let staged_sessions: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM sync_rebuild_sessions
+             WHERE user_id = 'u1' AND client_id = 'c2' AND scope_id = 'user:u1'",
+        )
+        .unwrap();
+        assert_eq!(staged_sessions, Some(0));
+    }
+
+    #[pg_test]
     fn test_rebuild_cursor_pagination() {
         setup_test_tables();
         register_client("u1", "c1");

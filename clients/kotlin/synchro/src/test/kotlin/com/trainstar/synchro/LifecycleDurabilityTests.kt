@@ -69,6 +69,68 @@ class LifecycleDurabilityTests {
     }
 
     @Test
+    fun recoveryDefersAbsentAffectedCursorsAndRejectsScopePhaseCorruption() {
+        val dbName = databaseName()
+        try {
+            val database = SynchroDatabase.open(context, dbName)
+            try {
+                val source = protocolOrdersSchemaManifest()
+                installTestSchema(database, 1, source.schemaHash, source.localTables())
+                val target = targetManifest()
+                val response = migrationResponse(target).copy(
+                    schema = SchemaDescriptor(2, target.schemaHash, SchemaAction.REBUILD_LOCAL),
+                    affectedScopes = listOf("orders:a", "orders:b"),
+                    scopeCursorUpdates = mapOf("orders:a" to null, "orders:b" to null),
+                )
+                val manager = SchemaManager(database)
+                manager.prepareConnectMigration(response, target.localTables(), true)
+                val canonical = database.queryOne("SELECT action, affected_scopes_json, scope_cursor_updates_json, phase FROM _synchro_migration_journal")!!
+                for (mutation in listOf(
+                    "action = 'replace'",
+                    "affected_scopes_json = '[]'",
+                    "affected_scopes_json = '[\"orders:b\",\"orders:a\"]'",
+                    "affected_scopes_json = '[\"orders:a\",\"orders:a\"]'",
+                    "scope_cursor_updates_json = '{}'",
+                    "scope_cursor_updates_json = '{\"orders:a\":null}'",
+                    "scope_cursor_updates_json = '{\"orders:a\":\"c1\",\"orders:b\":null}'",
+                    "scope_cursor_updates_json = '{\"orders:a\":null,\"orders:b\":null,\"unrelated\":null}'",
+                    "phase = 'ddl_applied'",
+                )) {
+                    database.execute("UPDATE _synchro_migration_journal SET $mutation")
+                    val before = database.queryOne("SELECT * FROM _synchro_migration_journal")
+                    assertThrows(SynchroError.InvalidResponse::class.java) { manager.recoverPendingMigration() }
+                    assertEquals(before, database.queryOne("SELECT * FROM _synchro_migration_journal"))
+                    assertEquals(1L, database.readTransaction { SynchroMeta.getInt64(it, MetaKey.SCHEMA_VERSION) })
+                    assertFalse(database.query("PRAGMA table_info(orders)").any { it["name"] == "notes" })
+                    database.execute(
+                        "UPDATE _synchro_migration_journal SET action = ?, affected_scopes_json = ?, scope_cursor_updates_json = ?, phase = ?",
+                        arrayOf(canonical["action"], canonical["affected_scopes_json"], canonical["scope_cursor_updates_json"], canonical["phase"]),
+                    )
+                }
+                manager.recoverPendingMigration()
+                assertTrue(database.readTransaction { SynchroMeta.getAllScopes(it).isEmpty() })
+                assertEquals("awaiting_rebuild", database.queryOne("SELECT phase FROM _synchro_migration_journal")?.get("phase"))
+                database.execute("UPDATE _synchro_migration_journal SET phase = 'ddl_applied'")
+                assertThrows(SynchroError.InvalidResponse::class.java) { manager.recoverPendingMigration() }
+                database.execute("UPDATE _synchro_migration_journal SET phase = 'awaiting_rebuild'")
+                manager.completeMigrationIfReady()
+                assertEquals(1, database.query("SELECT * FROM _synchro_migration_journal").size)
+                database.writeTransaction { SynchroMeta.upsertScope(it, "orders:a", null, null) }
+                manager.completeMigrationIfReady(authoritativeAssignmentsInstalled = true)
+                assertEquals("[\"orders:a\"]", database.queryOne("SELECT affected_scopes_json FROM _synchro_migration_journal")?.get("affected_scopes_json"))
+                manager.recoverPendingMigration()
+                database.writeTransaction { SynchroMeta.upsertScope(it, "orders:a", "final", "verified") }
+                manager.completeMigrationIfReady()
+                assertTrue(database.query("SELECT * FROM _synchro_migration_journal").isEmpty())
+            } finally {
+                database.close()
+            }
+        } finally {
+            context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test
     fun preparedMigrationJournalRecoversAfterDatabaseReopen() {
         for (transition in listOf("class_2", "class_3")) {
             val dbName = databaseName()
@@ -298,7 +360,7 @@ class LifecycleDurabilityTests {
     fun newServerMigrationSupersedesCommittedMigrationAwaitingRebuildAcrossReopen() {
         val intermediate = targetManifest()
         val target = nextIndexedManifest(intermediate)
-        for (resetMaterialization in listOf(false, true)) {
+        for ((resetMaterialization, absentScope) in listOf(false to false, false to true, true to false, true to true)) {
             val dbName = databaseName()
             try {
                 val first = SynchroDatabase.open(context, dbName)
@@ -323,6 +385,7 @@ class LifecycleDurabilityTests {
                     )
                     first.writeSyncLockedTransaction { db -> schemaManager.applyPreparedMigrationInTransaction(db) }
                     first.writeTransaction { db -> SynchroMeta.upsertScope(db, "orders:final", "c2", "k2") }
+                    if (absentScope) first.writeTransaction { db -> SynchroMeta.deleteScope(db, "orders:pending") }
                 } finally {
                     first.close()
                 }
@@ -354,11 +417,18 @@ class LifecycleDurabilityTests {
                     )
                     assertEquals(if (resetMaterialization) 1L else 0L, journal["reset_materialization"])
                     assertEquals("awaiting_rebuild", journal["phase"])
+                    assertEquals("rebuild_local", reopened.queryOne("SELECT action FROM _synchro_migration_journal")?.get("action"))
+                    assertEquals(
+                        mapOf("orders:pending" to null),
+                        Json.decodeFromString<Map<String, String?>>(reopened.queryOne("SELECT scope_cursor_updates_json FROM _synchro_migration_journal")!!["scope_cursor_updates_json"] as String),
+                    )
                     assertEquals(
                         target.schemaHash,
                         reopened.readTransaction { db -> SynchroMeta.get(db, MetaKey.SCHEMA_HASH) },
                     )
 
+                    schemaManager.completeMigrationIfReady()
+                    assertEquals(1, reopened.query("SELECT * FROM _synchro_migration_journal").size)
                     reopened.writeTransaction { db -> SynchroMeta.upsertScope(db, "orders:pending", "c3", "k3") }
                     schemaManager.completeMigrationIfReady()
                     assertEquals(
@@ -545,11 +615,14 @@ class LifecycleDurabilityTests {
 
     @Test
     fun migrationRecoveryRejectsEveryMutatedClientOwnedPhysicalObject() {
+        assertRecoveryRejectsPhysicalMutation("generated column") { database, _ ->
+            database.execute("ALTER TABLE orders ADD COLUMN injected TEXT GENERATED ALWAYS AS (user_id) VIRTUAL")
+        }
         assertRecoveryRejectsPhysicalMutation("column type") { database, table ->
             replaceOrdersPhysicalTable(database, table, "id BLOB PRIMARY KEY")
         }
         assertRecoveryRejectsPhysicalMutation("column nullability") { database, table ->
-            replaceOrdersPhysicalTable(database, table, "id TEXT PRIMARY KEY", "user_id TEXT")
+            replaceOrdersPhysicalTable(database, table, "id TEXT PRIMARY KEY", "ship_address TEXT NOT NULL")
         }
         assertRecoveryRejectsPhysicalMutation("primary key") { database, table ->
             replaceOrdersPhysicalTable(database, table, "id TEXT")
@@ -653,7 +726,7 @@ class LifecycleDurabilityTests {
         database: SynchroDatabase,
         table: LocalSchemaTable,
         idDefinition: String,
-        userIDDefinition: String = "user_id TEXT NOT NULL",
+        shipAddressDefinition: String = "ship_address TEXT",
     ) {
         database.writeTransaction { db ->
             SQLiteSchema.expectedCDCTriggerSQL(table).keys.forEach { trigger ->
@@ -664,8 +737,8 @@ class LifecycleDurabilityTests {
                 """
                 CREATE TABLE orders (
                     $idDefinition,
-                    ship_address TEXT,
-                    $userIDDefinition,
+                    $shipAddressDefinition,
+                    user_id TEXT NOT NULL,
                     notes TEXT,
                     updated_at TEXT NOT NULL,
                     deleted_at TEXT

@@ -3,6 +3,10 @@
     {
       "version": "0.3.2",
       "artifact_sha256": "212f4fdc73f5db20bddc4a080fdedfc9897ed5948534ab97066ca951b7875405"
+    },
+    {
+      "version": "0.4.0-rc.1",
+      "artifact_sha256": "cbab034e39aee08dcdd606e95c68031f22dfa0f70845d8fbbf39740dc1835dac"
     }
   ]
 }

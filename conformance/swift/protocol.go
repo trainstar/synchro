@@ -19,6 +19,7 @@ import (
 	"syscall"
 
 	"github.com/trainstar/synchro/conformance/internal/jsonstrict"
+	"github.com/trainstar/synchro/conformance/scenarios"
 )
 
 const (
@@ -34,24 +35,25 @@ const (
 var schemaHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type runnerCommand struct {
-	SchemaVersion      int                 `json:"schema_version"`
-	Operation          string              `json:"operation"`
-	DatabasePath       string              `json:"database_path,omitempty"`
-	ServerURL          string              `json:"server_url,omitempty"`
-	AuthToken          string              `json:"auth_token,omitempty"`
-	ClientID           string              `json:"client_id,omitempty"`
-	SeedDatabasePath   string              `json:"seed_database_path,omitempty"`
-	Platform           string              `json:"platform,omitempty"`
-	AppVersion         string              `json:"app_version,omitempty"`
-	PullPageSize       int                 `json:"pull_page_size,omitempty"`
-	PushBatchSize      int                 `json:"push_batch_size,omitempty"`
-	TransportCapacity  int                 `json:"transport_capacity,omitempty"`
-	LocalAction        *runnerLocalAction  `json:"local_action,omitempty"`
-	LifecycleOperation string              `json:"lifecycle_operation,omitempty"`
-	TransportOperation string              `json:"transport_operation,omitempty"`
-	CallID             string              `json:"call_id,omitempty"`
-	Method             string              `json:"method,omitempty"`
-	RowSelectors       []runnerRowSelector `json:"row_selectors,omitempty"`
+	SchemaVersion      int                           `json:"schema_version"`
+	Operation          string                        `json:"operation"`
+	DatabasePath       string                        `json:"database_path,omitempty"`
+	ServerURL          string                        `json:"server_url,omitempty"`
+	AuthToken          string                        `json:"auth_token,omitempty"`
+	ClientID           string                        `json:"client_id,omitempty"`
+	SeedDatabasePath   string                        `json:"seed_database_path,omitempty"`
+	LocalFixture       *scenarios.NativeLocalFixture `json:"local_fixture,omitempty"`
+	Platform           string                        `json:"platform,omitempty"`
+	AppVersion         string                        `json:"app_version,omitempty"`
+	PullPageSize       int                           `json:"pull_page_size,omitempty"`
+	PushBatchSize      int                           `json:"push_batch_size,omitempty"`
+	TransportCapacity  int                           `json:"transport_capacity,omitempty"`
+	LocalAction        *runnerLocalAction            `json:"local_action,omitempty"`
+	LifecycleOperation string                        `json:"lifecycle_operation,omitempty"`
+	TransportOperation string                        `json:"transport_operation,omitempty"`
+	CallID             string                        `json:"call_id,omitempty"`
+	Method             string                        `json:"method,omitempty"`
+	RowSelectors       []runnerRowSelector           `json:"row_selectors,omitempty"`
 }
 
 type runnerLocalAction struct {
@@ -88,48 +90,54 @@ func (e *runnerCommandError) Error() string {
 }
 
 type runnerResult struct {
-	Status                          *string                       `json:"status"`
-	RowsAffected                    *int                          `json:"rows_affected"`
-	RetainedDeleteCaptured          *bool                         `json:"retained_delete_captured"`
-	PendingChangeCount              *int                          `json:"pending_change_count"`
-	ApplicationRowCount             *int                          `json:"application_row_count"`
-	MutationLedgerCount             *int                          `json:"mutation_ledger_count"`
-	MutationOutcomeCount            *int                          `json:"mutation_outcome_count"`
-	SealedBatchCount                *int                          `json:"sealed_batch_count"`
-	RejectedMutationCount           *int                          `json:"rejected_mutation_count"`
-	ScopeStateCount                 *int                          `json:"scope_state_count"`
-	ScopeRowCount                   *int                          `json:"scope_row_count"`
-	ProvenanceCount                 *int                          `json:"provenance_count"`
-	RowMetadataCount                *int                          `json:"row_metadata_count"`
-	RebuildAttemptCount             *int                          `json:"rebuild_attempt_count"`
-	RebuildReceiptCount             *int                          `json:"rebuild_receipt_count"`
-	Schema                          *schemaRef                    `json:"schema"`
-	ApplicationRows                 []map[string]json.RawMessage  `json:"application_rows"`
-	ApplicationRowStorageClasses    []map[string]string           `json:"application_row_storage_classes"`
-	RetainedMutations               []retainedMutation            `json:"retained_mutations"`
-	RejectedMutations               []retainedRejection           `json:"rejected_mutations"`
-	ScopeStates                     []scopeStateRecord            `json:"scope_states"`
-	ScopeRows                       []scopeRowRecord              `json:"scope_rows"`
-	RowMetadata                     *rowMetadataRecord            `json:"row_metadata"`
-	RowMetadataRecords              []rowMetadataRecord           `json:"row_metadata_records"`
-	RebuildAttempts                 []rebuildAttemptRecord        `json:"rebuild_attempts"`
-	RebuildReceipts                 []rebuildReceiptRecord        `json:"rebuild_receipts"`
-	ScopeStatesTruncated            *bool                         `json:"scope_states_truncated"`
-	ScopeRowsTruncated              *bool                         `json:"scope_rows_truncated"`
-	RebuildAttemptsTruncated        *bool                         `json:"rebuild_attempts_truncated"`
-	RebuildReceiptsTruncated        *bool                         `json:"rebuild_receipts_truncated"`
-	RowMetadataTruncated            *bool                         `json:"row_metadata_truncated"`
-	CaptureOverflowed               *bool                         `json:"capture_overflowed"`
-	ProvenanceMaintenanceWorkCursor *int64                        `json:"provenance_maintenance_work_cursor"`
-	Events                          []eventRecord                 `json:"events"`
-	Failure                         *runnerFailure                `json:"failure"`
-	TransportObservations           *transportObservationSnapshot `json:"transport_observations"`
-	CallID                          *string                       `json:"call_id"`
-	State                           *string                       `json:"state"`
-	Completion                      *string                       `json:"completion"`
-	CallErrorCategory               *string                       `json:"call_error_category"`
-	ProcessID                       string                        `json:"process_id"`
-	DatabaseIdentityFingerprint     string                        `json:"database_identity_fingerprint"`
+	Status                            *string                       `json:"status"`
+	RowsAffected                      *int                          `json:"rows_affected"`
+	RetainedDeleteCaptured            *bool                         `json:"retained_delete_captured"`
+	PendingChangeCount                *int                          `json:"pending_change_count"`
+	ApplicationRowCount               *int                          `json:"application_row_count"`
+	MutationLedgerCount               *int                          `json:"mutation_ledger_count"`
+	MutationOutcomeCount              *int                          `json:"mutation_outcome_count"`
+	SealedBatchCount                  *int                          `json:"sealed_batch_count"`
+	RejectedMutationCount             *int                          `json:"rejected_mutation_count"`
+	ScopeStateCount                   *int                          `json:"scope_state_count"`
+	ScopeRowCount                     *int                          `json:"scope_row_count"`
+	ProvenanceCount                   *int                          `json:"provenance_count"`
+	RowMetadataCount                  *int                          `json:"row_metadata_count"`
+	RebuildAttemptCount               *int                          `json:"rebuild_attempt_count"`
+	RebuildReceiptCount               *int                          `json:"rebuild_receipt_count"`
+	Schema                            *schemaRef                    `json:"schema"`
+	ApplicationRows                   []map[string]json.RawMessage  `json:"application_rows"`
+	ApplicationRowStorageClasses      []map[string]string           `json:"application_row_storage_classes"`
+	RetainedMutations                 []retainedMutation            `json:"retained_mutations"`
+	AcceptedMutationOutcomes          acceptedMutationOutcomes      `json:"accepted_mutation_outcomes,omitempty"`
+	AcceptedMutationOutcomesTruncated *bool                         `json:"accepted_mutation_outcomes_truncated,omitempty"`
+	RejectedMutations                 []retainedRejection           `json:"rejected_mutations"`
+	ScopeStates                       []scopeStateRecord            `json:"scope_states"`
+	ScopeRows                         []scopeRowRecord              `json:"scope_rows"`
+	RowMetadata                       *rowMetadataRecord            `json:"row_metadata"`
+	RowMetadataRecords                []rowMetadataRecord           `json:"row_metadata_records"`
+	RebuildAttempts                   []rebuildAttemptRecord        `json:"rebuild_attempts"`
+	RebuildReceipts                   []rebuildReceiptRecord        `json:"rebuild_receipts"`
+	ScopeStatesTruncated              *bool                         `json:"scope_states_truncated"`
+	ScopeRowsTruncated                *bool                         `json:"scope_rows_truncated"`
+	RebuildAttemptsTruncated          *bool                         `json:"rebuild_attempts_truncated"`
+	RebuildReceiptsTruncated          *bool                         `json:"rebuild_receipts_truncated"`
+	RowMetadataTruncated              *bool                         `json:"row_metadata_truncated"`
+	CaptureOverflowed                 *bool                         `json:"capture_overflowed"`
+	MigrationJournal                  json.RawMessage               `json:"migration_journal,omitempty"`
+	MigrationJournalTruncated         *bool                         `json:"migration_journal_truncated,omitempty"`
+	PhysicalSchema                    json.RawMessage               `json:"physical_schema,omitempty"`
+	PhysicalSchemaTruncated           *bool                         `json:"physical_schema_truncated,omitempty"`
+	ProvenanceMaintenanceWorkCursor   *int64                        `json:"provenance_maintenance_work_cursor"`
+	Events                            []eventRecord                 `json:"events"`
+	Failure                           *runnerFailure                `json:"failure"`
+	TransportObservations             *transportObservationSnapshot `json:"transport_observations"`
+	CallID                            *string                       `json:"call_id"`
+	State                             *string                       `json:"state"`
+	Completion                        *string                       `json:"completion"`
+	CallErrorCategory                 *string                       `json:"call_error_category"`
+	ProcessID                         string                        `json:"process_id"`
+	DatabaseIdentityFingerprint       string                        `json:"database_identity_fingerprint"`
 }
 
 type schemaRef struct {
@@ -225,6 +233,59 @@ type transportObservation struct {
 	RequestFacts               *transportRequestFacts
 	RebuildResponseFacts       *transportRebuildResponseFacts
 	PullResponseFacts          *transportPullResponseFacts
+	ConnectResponseFacts       *transportConnectResponseFacts
+}
+
+type transportConnectResponseFacts struct {
+	Action                     string
+	SchemaVersion              int64
+	SchemaHash                 string
+	AffectedScopeFingerprints  []string
+	AffectedScopesComplete     bool
+	ScopeCursorUpdates         map[string]*string
+	ScopeCursorUpdatesComplete bool
+}
+
+func (f *transportConnectResponseFacts) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *int64              `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(data) != nil || decoder.Decode(&raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return errors.New("decode transport connect response facts failed")
+	}
+	f.Action = *raw.Action
+	f.SchemaVersion = *raw.SchemaVersion
+	f.SchemaHash = *raw.SchemaHash
+	f.AffectedScopeFingerprints = *raw.AffectedScopeFingerprints
+	f.AffectedScopesComplete = *raw.AffectedScopesComplete
+	f.ScopeCursorUpdates = *raw.ScopeCursorUpdates
+	f.ScopeCursorUpdatesComplete = *raw.ScopeCursorUpdatesComplete
+	return f.validate()
+}
+
+func (f *transportConnectResponseFacts) validate() error {
+	switch f.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return errors.New("transport connect response action is invalid")
+	}
+	if f.SchemaVersion <= 0 || !validLowerHexDigest(f.SchemaHash) || f.AffectedScopeFingerprints == nil || !validCursorFingerprintSet(f.AffectedScopeFingerprints) || f.ScopeCursorUpdates == nil || len(f.ScopeCursorUpdates) > 16 {
+		return errors.New("transport connect response facts are invalid")
+	}
+	for scope, cursor := range f.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return errors.New("transport connect cursor updates are invalid")
+		}
+	}
+	return nil
 }
 
 type transportRequestFacts struct {
@@ -369,6 +430,7 @@ func (o *transportObservation) UnmarshalJSON(data []byte) error {
 		RequestFacts               *transportRequestFacts         `json:"request_facts"`
 		RebuildResponseFacts       *transportRebuildResponseFacts `json:"rebuild_response_facts"`
 		PullResponseFacts          *transportPullResponseFacts    `json:"pull_response_facts"`
+		ConnectResponseFacts       *transportConnectResponseFacts `json:"connect_response_facts"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -393,6 +455,7 @@ func (o *transportObservation) UnmarshalJSON(data []byte) error {
 	o.RequestFacts = raw.RequestFacts
 	o.RebuildResponseFacts = raw.RebuildResponseFacts
 	o.PullResponseFacts = raw.PullResponseFacts
+	o.ConnectResponseFacts = raw.ConnectResponseFacts
 	return nil
 }
 
@@ -775,6 +838,12 @@ func DecodeResponse(data []byte) (Result, error) {
 }
 
 func validateRunnerCommand(command runnerCommand) error {
+	if err := scenarios.ValidateNativeLocalFixture(command.LocalFixture); err != nil {
+		return err
+	}
+	if command.LocalFixture != nil && (command.Operation != "open" || command.SeedDatabasePath != "") {
+		return errors.New("local fixture requires an initial empty open")
+	}
 	if command.SchemaVersion != 1 || command.Operation == "" {
 		return errors.New("runner command is invalid")
 	}
@@ -822,7 +891,7 @@ func validateRunnerCommand(command runnerCommand) error {
 			return errors.New("runner lifecycle command is invalid")
 		}
 	case "arm-transport-pause", "await-transport-pause":
-		if !validRunnerTransportOperation(command.TransportOperation) || command.LocalAction != nil || command.LifecycleOperation != "" || command.CallID != "" || command.Method != "" || len(command.RowSelectors) != 0 {
+		if (!validRunnerTransportOperation(command.TransportOperation) && command.TransportOperation != "migration_prepared" && command.TransportOperation != "migration_committed") || command.LocalAction != nil || command.LifecycleOperation != "" || command.CallID != "" || command.Method != "" || len(command.RowSelectors) != 0 {
 			return errors.New("runner transport pause command is invalid")
 		}
 	case "resume-transport-pause":
@@ -1022,6 +1091,12 @@ func validRunnerCallID(value string) bool {
 }
 
 func validateRunnerResult(result runnerResult) error {
+	if err := result.validateAcceptedMutationOutcomes(); err != nil {
+		return err
+	}
+	if err := result.validateMigrationCapture(); err != nil {
+		return err
+	}
 	if !validProcessID(result.ProcessID) || !validLowerHexDigest(result.DatabaseIdentityFingerprint) {
 		return errors.New("runner process identity is invalid")
 	}
@@ -1081,6 +1156,178 @@ func validateRunnerResult(result runnerResult) error {
 		}
 	}
 	return nil
+}
+
+type acceptedMutationOutcomes map[string]string
+
+func (values *acceptedMutationOutcomes) UnmarshalJSON(raw []byte) error {
+	var decoded map[string]*string
+	wrapped := append(append([]byte(`{"outcomes":`), raw...), '}')
+	if jsonstrict.ValidateValue(wrapped) != nil || json.Unmarshal(raw, &decoded) != nil || decoded == nil || len(decoded) > maximumRunnerRecords {
+		return errors.New("accepted mutation outcomes map is invalid or out of bounds")
+	}
+	result := make(acceptedMutationOutcomes, len(decoded))
+	size := 0
+	for id, outcome := range decoded {
+		if id == "" || len(id) > 256 || outcome == nil {
+			return errors.New("accepted mutation outcome entry is invalid")
+		}
+		size += len(id) + len(*outcome)
+		if size > 65_536 {
+			return errors.New("accepted mutation outcomes bytes are out of bounds")
+		}
+		var identity struct {
+			MutationID    string    `json:"mutation_id"`
+			Status        string    `json:"status"`
+			Schema        schemaRef `json:"outcome_schema"`
+			ServerVersion string    `json:"server_version"`
+		}
+		if jsonstrict.ValidateValue([]byte(*outcome)) != nil || json.Unmarshal([]byte(*outcome), &identity) != nil || identity.MutationID != id || identity.Status != "applied" || identity.ServerVersion == "" || identity.Schema.Version <= 0 || !validLowerHexDigest(identity.Schema.Hash) {
+			return errors.New("stored accepted outcome identity is invalid")
+		}
+		result[id] = *outcome
+	}
+	*values = result
+	return nil
+}
+
+func (result runnerResult) validateAcceptedMutationOutcomes() error {
+	if result.AcceptedMutationOutcomes == nil && result.AcceptedMutationOutcomesTruncated == nil {
+		return nil
+	}
+	if result.AcceptedMutationOutcomes == nil || result.AcceptedMutationOutcomesTruncated == nil {
+		return errors.New("accepted outcome capture fields are incomplete")
+	}
+	encoded, err := json.Marshal(result.AcceptedMutationOutcomes)
+	if err != nil {
+		return err
+	}
+	var checked acceptedMutationOutcomes
+	return json.Unmarshal(encoded, &checked)
+}
+
+func (result runnerResult) requireCompleteAcceptedMutationOutcomes() error {
+	if result.AcceptedMutationOutcomes == nil || result.AcceptedMutationOutcomesTruncated == nil || *result.AcceptedMutationOutcomesTruncated || result.MutationLedgerCount == nil || len(result.RetainedMutations)+len(result.AcceptedMutationOutcomes) != *result.MutationLedgerCount {
+		return errors.New("accepted outcome capture is incomplete or does not close the ledger")
+	}
+	return result.validateAcceptedMutationOutcomes()
+}
+
+type migrationJournalCapture struct {
+	Source schemaRef         `json:"source"`
+	Target schemaRef         `json:"target"`
+	Action string            `json:"action"`
+	Phase  string            `json:"phase"`
+	Stored map[string]string `json:"stored"`
+}
+
+func decodeMigrationJournal(raw json.RawMessage) (*migrationJournalCapture, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var value struct {
+		Source *struct {
+			Version *int64  `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"source"`
+		Target *struct {
+			Version *int64  `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"target"`
+		Action *string             `json:"action"`
+		Phase  *string             `json:"phase"`
+		Stored *map[string]*string `json:"stored"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(raw) != nil || decoder.Decode(&value) != nil || value.Source == nil || value.Target == nil || value.Source.Version == nil || value.Source.Hash == nil || value.Target.Version == nil || value.Target.Hash == nil || value.Action == nil || value.Phase == nil || value.Stored == nil {
+		return nil, errors.New("migration journal capture is incomplete or invalid")
+	}
+	if *value.Source.Version < 0 || (*value.Source.Version == 0) != (*value.Source.Hash == "") || *value.Source.Version > 0 && !validLowerHexDigest(*value.Source.Hash) || *value.Target.Version <= 0 || !validLowerHexDigest(*value.Target.Hash) || (*value.Action != "replace" && *value.Action != "rebuild_local") || (*value.Phase != "prepared" && *value.Phase != "applied") {
+		return nil, errors.New("migration journal capture header is invalid")
+	}
+	keys := []string{"target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json", "migration_plan_json", "migration_plan_hash", "journal_version", "migration_plan_version", "is_schema_reset"}
+	if len(*value.Stored) != len(keys) {
+		return nil, errors.New("migration journal stored fields are invalid")
+	}
+	stored := make(map[string]string, len(keys))
+	size := len(*value.Action) + len(*value.Phase) + len(*value.Source.Hash) + len(*value.Target.Hash)
+	for _, key := range keys {
+		text, found := (*value.Stored)[key]
+		if !found || text == nil {
+			return nil, errors.New("migration journal stored field is absent or invalid")
+		}
+		size += len(*text)
+		stored[key] = *text
+	}
+	if size > 65_536 {
+		return nil, errors.New("migration journal capture is out of bounds")
+	}
+	return &migrationJournalCapture{Source: schemaRef{Version: *value.Source.Version, Hash: *value.Source.Hash}, Target: schemaRef{Version: *value.Target.Version, Hash: *value.Target.Hash}, Action: *value.Action, Phase: *value.Phase, Stored: stored}, nil
+}
+
+type physicalSchemaColumn struct {
+	TableName          string `json:"table_name"`
+	Name               string `json:"name"`
+	Type               string `json:"type"`
+	NotNull            bool   `json:"not_null"`
+	PrimaryKeyPosition int    `json:"primary_key_position"`
+}
+
+func decodePhysicalSchema(raw json.RawMessage) ([]physicalSchemaColumn, error) {
+	var values []struct {
+		TableName          *string `json:"table_name"`
+		Name               *string `json:"name"`
+		Type               *string `json:"type"`
+		NotNull            *bool   `json:"not_null"`
+		PrimaryKeyPosition *int    `json:"primary_key_position"`
+	}
+	wrapped := append(append([]byte(`{"columns":`), raw...), '}')
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(wrapped) != nil || decoder.Decode(&values) != nil || requireDecoderEOF(decoder) != nil || values == nil || len(values) > maximumRunnerRecords {
+		return nil, errors.New("physical schema capture is absent or out of bounds")
+	}
+	columns := make([]physicalSchemaColumn, 0, len(values))
+	seen := make(map[[2]string]bool, len(values))
+	size := 0
+	for _, value := range values {
+		if value.TableName == nil || value.Name == nil || value.Type == nil || value.NotNull == nil || value.PrimaryKeyPosition == nil || *value.TableName == "" || *value.Name == "" || *value.PrimaryKeyPosition < 0 || *value.PrimaryKeyPosition > maximumRunnerRecords {
+			return nil, errors.New("physical schema column is incomplete or invalid")
+		}
+		key := [2]string{*value.TableName, *value.Name}
+		if seen[key] {
+			return nil, errors.New("physical schema column is duplicated")
+		}
+		seen[key] = true
+		size += len(*value.TableName) + len(*value.Name) + len(*value.Type)
+		columns = append(columns, physicalSchemaColumn{TableName: *value.TableName, Name: *value.Name, Type: *value.Type, NotNull: *value.NotNull, PrimaryKeyPosition: *value.PrimaryKeyPosition})
+	}
+	if size > 65_536 {
+		return nil, errors.New("physical schema capture is out of bounds")
+	}
+	return columns, nil
+}
+
+func (result runnerResult) validateMigrationCapture() error {
+	if len(result.MigrationJournal) == 0 && result.MigrationJournalTruncated == nil && len(result.PhysicalSchema) == 0 && result.PhysicalSchemaTruncated == nil {
+		return nil
+	}
+	if len(result.MigrationJournal) == 0 || result.MigrationJournalTruncated == nil || len(result.PhysicalSchema) == 0 || result.PhysicalSchemaTruncated == nil {
+		return errors.New("migration capture fields are incomplete")
+	}
+	if _, err := decodeMigrationJournal(result.MigrationJournal); err != nil {
+		return err
+	}
+	_, err := decodePhysicalSchema(result.PhysicalSchema)
+	return err
+}
+
+func (result runnerResult) requireCompleteMigrationCapture() error {
+	if result.CaptureOverflowed == nil || *result.CaptureOverflowed || len(result.MigrationJournal) == 0 || result.MigrationJournalTruncated == nil || *result.MigrationJournalTruncated || len(result.PhysicalSchema) == 0 || result.PhysicalSchemaTruncated == nil || *result.PhysicalSchemaTruncated {
+		return errors.New("migration capture is missing or truncated")
+	}
+	return result.validateMigrationCapture()
 }
 
 func validProcessID(value string) bool {
@@ -1196,6 +1443,15 @@ func validateTransportObservation(observation transportObservation) error {
 	if err := validateTransportRequestAndResponseFacts(observation); err != nil {
 		return err
 	}
+	if observation.OperationClass == "connect" {
+		if observation.CursorFingerprints == nil && observation.CursorFingerprintsComplete == nil {
+			return nil
+		}
+		if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+			return errors.New("runner connect cursor fingerprints are invalid")
+		}
+		return nil
+	}
 	if observation.OperationClass != "pull" {
 		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 			return errors.New("runner transport cursor fingerprints are not pull evidence")
@@ -1251,6 +1507,11 @@ func transportErrorRetryable(code string) bool {
 }
 
 func validateTransportRequestAndResponseFacts(observation transportObservation) error {
+	if response := observation.ConnectResponseFacts; response != nil {
+		if observation.OperationClass != "connect" || observation.StatusCode != 200 || response.validate() != nil {
+			return errors.New("runner connect response facts are invalid")
+		}
+	}
 	facts := observation.RequestFacts
 	switch observation.OperationClass {
 	case "connect":
@@ -1396,6 +1657,15 @@ func cloneTransportObservation(value transportObservation) transportObservation 
 		facts := *value.PullResponseFacts
 		facts.ScopeCursorFingerprints = append([]string(nil), value.PullResponseFacts.ScopeCursorFingerprints...)
 		copy.PullResponseFacts = &facts
+	}
+	if value.ConnectResponseFacts != nil {
+		facts := *value.ConnectResponseFacts
+		facts.AffectedScopeFingerprints = cloneFingerprintSet(facts.AffectedScopeFingerprints)
+		facts.ScopeCursorUpdates = make(map[string]*string, len(value.ConnectResponseFacts.ScopeCursorUpdates))
+		for scope, cursor := range value.ConnectResponseFacts.ScopeCursorUpdates {
+			facts.ScopeCursorUpdates[scope] = cloneOptionalString(cursor)
+		}
+		copy.ConnectResponseFacts = &facts
 	}
 	return copy
 }

@@ -9,6 +9,14 @@ export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 artifact_dir=${1:?artifact directory is required}
 apple_package="$artifact_dir/apple/Synchro"
 
+if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
+  cell_result=${PACKAGED_SMOKE_CELL_RESULT:?PACKAGED_SMOKE_CELL_RESULT is required}
+  environment_dir="$cell_result.environments"
+  release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
+  test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+  : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
+fi
+
 if [ ! -f "$apple_package/Package.swift" ]; then
   printf '%s\n' "Packaged Swift artifact is missing: $apple_package/Package.swift" >&2
   exit 1
@@ -60,7 +68,7 @@ xcodebuild \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$work_dir/device-derived-data" \
-  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 \
   CODE_SIGNING_ALLOWED=NO \
   build
 
@@ -75,7 +83,8 @@ else
   ')
 fi
 
-simulator_version=$(xcrun simctl list devices booted -j | ruby -rjson -e '
+if [ -z "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
+  simulator_version=$(xcrun simctl list devices booted -j | ruby -rjson -e '
   udid = ARGV.fetch(0)
   JSON.parse(STDIN.read).fetch("devices").each do |runtime, devices|
     if devices.any? { |device| device["udid"] == udid && device["state"] == "Booted" }
@@ -86,14 +95,15 @@ simulator_version=$(xcrun simctl list devices booted -j | ruby -rjson -e '
   abort "the selected iOS simulator is not booted"
 ' "$simulator_udid")
 
-if [ -n "${SUPPORT_PLATFORM_VERSION:-}" ]; then
-  case "$SUPPORT_PLATFORM_VERSION" in
-    *.*) actual_version=$simulator_version ;;
-    *) actual_version=${simulator_version%%.*} ;;
-  esac
-  if [ "$actual_version" != "$SUPPORT_PLATFORM_VERSION" ]; then
-    printf '%s\n' "iOS simulator version $simulator_version does not match SUPPORT_PLATFORM_VERSION $SUPPORT_PLATFORM_VERSION" >&2
-    exit 1
+  if [ -n "${SUPPORT_PLATFORM_VERSION:-}" ]; then
+    case "$SUPPORT_PLATFORM_VERSION" in
+      *.*) actual_version=$simulator_version ;;
+      *) actual_version=${simulator_version%%.*} ;;
+    esac
+    if [ "$actual_version" != "$SUPPORT_PLATFORM_VERSION" ]; then
+      printf '%s\n' "iOS simulator version $simulator_version does not match SUPPORT_PLATFORM_VERSION $SUPPORT_PLATFORM_VERSION" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -104,7 +114,7 @@ xcodebuild \
   -sdk iphonesimulator \
   -destination "platform=iOS Simulator,id=$simulator_udid" \
   -derivedDataPath "$work_dir/derived-data" \
-  IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 \
   CODE_SIGNING_ALLOWED=NO \
   build
 
@@ -115,8 +125,8 @@ xcrun simctl install "$simulator_udid" "$app_path"
 app_installed=1
 
 if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
-  cell_result=${PACKAGED_SMOKE_CELL_RESULT:?PACKAGED_SMOKE_CELL_RESULT is required}
   tool="$repo_root/verification/packaged_smoke.py"
+  probe="$repo_root/verification/probe_support_environment.py"
   archive="$artifact_dir/apple/synchro-spm-$(tr -d '\n' < "$repo_root/VERSION").tar.gz"
   test -f "$archive"
   python3 "$tool" config \
@@ -130,6 +140,8 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
 
   container=$(xcrun simctl get_app_container "$simulator_udid" "$bundle_id" data)
   cp "$work_dir/initial-config.json" "$container/Documents/packaged-smoke-config.json"
+  python3 "$probe" ios --cell "$PACKAGED_SMOKE_CELL_ID" --simulator-udid "$simulator_udid" \
+    --output "$environment_dir/initial.json"
   launch_output=$(launch_app "$simulator_udid" "$bundle_id")
   initial_pid=${launch_output##*: }
   case "$initial_pid" in *[!0-9]*|'') printf '%s\n' "iOS initial process id is invalid" >&2; exit 1 ;; esac
@@ -181,6 +193,8 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
 
   python3 "$tool" author-remote --config "$work_dir/initial-config.json" --output "$work_dir/remote.json"
   cp "$work_dir/resume-config.json" "$container/Documents/packaged-smoke-config.json"
+  python3 "$probe" ios --cell "$PACKAGED_SMOKE_CELL_ID" --simulator-udid "$simulator_udid" \
+    --output "$environment_dir/resume.json"
   launch_output=$(launch_app "$simulator_udid" "$bundle_id")
   resume_pid=${launch_output##*: }
   case "$resume_pid" in *[!0-9]*|'') printf '%s\n' "iOS resume process id is invalid" >&2; exit 1 ;; esac
@@ -230,7 +244,10 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     --resume "$work_dir/resume.json" \
     --killed-pid "$initial_pid" \
     --remote "$work_dir/remote.json" \
-    --server-verification "$work_dir/server.json"
+    --server-verification "$work_dir/server.json" \
+    --initial-environment "$environment_dir/initial.json" \
+    --resume-environment "$environment_dir/resume.json" \
+    --release-manifest "$release_manifest"
   distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$archive}
   for artifact in $distribution_artifacts; do
     set -- "$@" --artifact "$artifact"

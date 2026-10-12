@@ -40,6 +40,13 @@ struct SchemaMigrationPlan: Codable, Sendable, Equatable {
         schemaReset: Bool
     ) throws -> SchemaMigrationPlan {
         try targetManifest.validate()
+        guard Set(sourceTables.map(\.tableID)).count == sourceTables.count,
+              sourceTables.allSatisfy({ table in
+                  Set(table.columns.map(\.fieldID)).count == table.columns.count &&
+                  Set(table.indexes.map(\.indexID)).count == table.indexes.count
+              }) else {
+            throw SynchroError.invalidResponse(message: "schema migration source identifiers are duplicated")
+        }
         guard try Integrity.schemaManifestHash(targetManifest) == targetManifest.schemaHash else {
             throw SynchroError.invalidResponse(message: "schema migration target hash is invalid")
         }
@@ -208,6 +215,18 @@ struct SchemaMigrationJournal: Sendable, Equatable {
               plan.target == target,
               plan.schemaReset == schemaReset else {
             throw SynchroError.invalidResponse(message: "schema migration journal binding is invalid")
+        }
+        try source.validate(allowFresh: true)
+        guard (action == .rebuildLocal) == !affectedScopes.isEmpty,
+              affectedScopes.allSatisfy({ !$0.isEmpty }),
+              Set(affectedScopes).count == affectedScopes.count,
+              affectedScopes == affectedScopes.sorted(by: {
+                  Array($0.utf8).lexicographicallyPrecedes(Array($1.utf8))
+              }),
+              scopeCursorUpdates.keys.allSatisfy({ !$0.isEmpty }),
+              !schemaReset || Set(scopeCursorUpdates.keys) == Set(affectedScopes),
+              affectedScopes.allSatisfy({ scopeCursorUpdates[$0] == .some(nil) }) else {
+            throw SynchroError.invalidResponse(message: "schema migration journal scope state is invalid")
         }
         try targetManifest.validate()
         guard try Integrity.schemaManifestHash(targetManifest) == target.hash else {

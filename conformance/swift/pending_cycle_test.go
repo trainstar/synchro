@@ -64,13 +64,15 @@ func TestSwiftPendingCycleWaitsForRecoveredPullApply(t *testing.T) {
 						"process_id": "1234", "database_identity_fingerprint": strings.Repeat("a", 64),
 						"transport_observations": map[string]any{"observations": observations, "overflowed": false, "sequence_checkpoint": len(observations)},
 					}
+					result["migration_journal"] = nil
+					result["accepted_mutation_outcomes"] = map[string]string{}
 					for _, field := range []string{"application_row_count", "mutation_ledger_count", "mutation_outcome_count", "sealed_batch_count", "rejected_mutation_count", "scope_state_count", "scope_row_count", "provenance_count", "row_metadata_count", "rebuild_attempt_count", "rebuild_receipt_count", "provenance_maintenance_work_cursor"} {
 						result[field] = 0
 					}
-					for _, field := range []string{"application_rows", "retained_mutations", "rejected_mutations", "scope_states", "scope_rows", "row_metadata_records", "rebuild_attempts", "rebuild_receipts", "events"} {
+					for _, field := range []string{"application_rows", "retained_mutations", "rejected_mutations", "scope_states", "scope_rows", "row_metadata_records", "rebuild_attempts", "rebuild_receipts", "physical_schema", "events"} {
 						result[field] = []any{}
 					}
-					for _, field := range []string{"scope_states_truncated", "scope_rows_truncated", "rebuild_attempts_truncated", "rebuild_receipts_truncated", "row_metadata_truncated", "capture_overflowed"} {
+					for _, field := range []string{"scope_states_truncated", "scope_rows_truncated", "rebuild_attempts_truncated", "rebuild_receipts_truncated", "row_metadata_truncated", "migration_journal_truncated", "physical_schema_truncated", "accepted_mutation_outcomes_truncated", "capture_overflowed"} {
 						result[field] = false
 					}
 					encoded, err := json.Marshal(map[string]any{"schema_version": 1, "outcome": "passed", "result": result, "error_code": nil})

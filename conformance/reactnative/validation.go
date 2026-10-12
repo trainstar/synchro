@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
@@ -59,12 +60,43 @@ type transportObservation struct {
 	Sequence                   uint64          `json:"sequence"`
 	OperationClass             string          `json:"operationClass"`
 	StatusCode                 int             `json:"statusCode"`
+	ErrorCode                  *string         `json:"errorCode,omitempty"`
+	Retryable                  *bool           `json:"retryable,omitempty"`
 	DurationNanoseconds        uint64          `json:"durationNanoseconds"`
 	CursorFingerprints         []string        `json:"cursorFingerprints"`
 	CursorFingerprintsComplete *bool           `json:"cursorFingerprintsComplete"`
 	RequestFacts               json.RawMessage `json:"requestFacts"`
 	RebuildResponseFacts       json.RawMessage `json:"rebuildResponseFacts"`
 	PullResponseFacts          json.RawMessage `json:"pullResponseFacts"`
+	ConnectResponseFacts       json.RawMessage `json:"connectResponseFacts"`
+}
+
+func (o *transportObservation) UnmarshalJSON(data []byte) error {
+	type observation transportObservation
+	var decoded observation
+	if jsonstrict.Decode(data, &decoded) != nil {
+		return errors.New("React Native transport observation is invalid")
+	}
+	if hasJSONValue(decoded.ConnectResponseFacts) {
+		if decoded.OperationClass != "connect" || decoded.StatusCode != 200 {
+			return errors.New("React Native connect facts are attached to an unsupported response")
+		}
+		if _, err := decodeConnectResponseFacts(decoded.ConnectResponseFacts); err != nil {
+			return err
+		}
+	}
+	*o = transportObservation(decoded)
+	return nil
+}
+
+type connectResponseFacts struct {
+	Action                     string
+	SchemaVersion              uint64
+	SchemaHash                 string
+	AffectedScopeFingerprints  []string
+	AffectedScopesComplete     bool
+	ScopeCursorUpdates         map[string]*string
+	ScopeCursorUpdatesComplete bool
 }
 
 type rebuildResponseFacts struct {
@@ -120,22 +152,189 @@ type rebuildAttempt struct {
 }
 
 type inspectedClientState struct {
-	Schema                          *clientSchema      `json:"schema"`
-	ScopeStates                     []clientScopeState `json:"scopeStates"`
-	ScopeRows                       []clientScopeRow   `json:"scopeRows"`
-	RebuildAttempts                 []rebuildAttempt   `json:"rebuildAttempts"`
-	ApplicationRowCount             uint64             `json:"applicationRowCount"`
-	MutationLedgerCount             uint64             `json:"mutationLedgerCount"`
-	MutationOutcomeCount            uint64             `json:"mutationOutcomeCount"`
-	SealedBatchCount                uint64             `json:"sealedBatchCount"`
-	RejectedMutationCount           uint64             `json:"rejectedMutationCount"`
-	ScopeStateCount                 uint64             `json:"scopeStateCount"`
-	ScopeRowCount                   uint64             `json:"scopeRowCount"`
-	ProvenanceCount                 uint64             `json:"provenanceCount"`
-	RowMetadataCount                uint64             `json:"rowMetadataCount"`
-	RebuildAttemptCount             uint64             `json:"rebuildAttemptCount"`
-	RebuildReceiptCount             uint64             `json:"rebuildReceiptCount"`
-	ProvenanceMaintenanceWorkCursor string             `json:"provenanceMaintenanceWorkCursor"`
+	Schema                            *clientSchema      `json:"schema"`
+	ScopeStates                       []clientScopeState `json:"scopeStates"`
+	ScopeRows                         []clientScopeRow   `json:"scopeRows"`
+	RebuildAttempts                   []rebuildAttempt   `json:"rebuildAttempts"`
+	ApplicationRowCount               uint64             `json:"applicationRowCount"`
+	MutationLedgerCount               uint64             `json:"mutationLedgerCount"`
+	MutationOutcomeCount              uint64             `json:"mutationOutcomeCount"`
+	SealedBatchCount                  uint64             `json:"sealedBatchCount"`
+	RejectedMutationCount             uint64             `json:"rejectedMutationCount"`
+	ScopeStateCount                   uint64             `json:"scopeStateCount"`
+	ScopeRowCount                     uint64             `json:"scopeRowCount"`
+	ProvenanceCount                   uint64             `json:"provenanceCount"`
+	RowMetadataCount                  uint64             `json:"rowMetadataCount"`
+	RebuildAttemptCount               uint64             `json:"rebuildAttemptCount"`
+	RebuildReceiptCount               uint64             `json:"rebuildReceiptCount"`
+	ProvenanceMaintenanceWorkCursor   string             `json:"provenanceMaintenanceWorkCursor"`
+	MigrationJournal                  json.RawMessage    `json:"migration_journal,omitempty"`
+	MigrationJournalTruncated         *bool              `json:"migration_journal_truncated,omitempty"`
+	PhysicalSchema                    json.RawMessage    `json:"physical_schema,omitempty"`
+	PhysicalSchemaTruncated           *bool              `json:"physical_schema_truncated,omitempty"`
+	CaptureOverflowed                 *bool              `json:"capture_overflowed,omitempty"`
+	ScopeStatesTruncated              *bool              `json:"scope_states_truncated,omitempty"`
+	ScopeRowsTruncated                *bool              `json:"scope_rows_truncated,omitempty"`
+	RebuildAttemptsTruncated          *bool              `json:"rebuild_attempts_truncated,omitempty"`
+	RebuildReceiptsTruncated          *bool              `json:"rebuild_receipts_truncated,omitempty"`
+	RowMetadataTruncated              *bool              `json:"row_metadata_truncated,omitempty"`
+	AcceptedMutationOutcomes          map[string]string  `json:"accepted_mutation_outcomes,omitempty"`
+	AcceptedMutationOutcomesTruncated *bool              `json:"accepted_mutation_outcomes_truncated,omitempty"`
+}
+
+func (state inspectedClientState) requireCompleteAcceptedOutcomes() error {
+	if state.AcceptedMutationOutcomes == nil || state.AcceptedMutationOutcomesTruncated == nil || *state.AcceptedMutationOutcomesTruncated || len(state.AcceptedMutationOutcomes) > 512 {
+		return errors.New("accepted mutation outcome capture is missing or truncated")
+	}
+	size := 0
+	for id, raw := range state.AcceptedMutationOutcomes {
+		size += len(id) + len(raw)
+		if id == "" || len(id) > 256 || size > 65_536 {
+			return errors.New("accepted mutation outcome capture is out of bounds")
+		}
+		var outcome struct {
+			MutationID    string        `json:"mutation_id"`
+			Status        string        `json:"status"`
+			OutcomeSchema *clientSchema `json:"outcome_schema"`
+			ServerVersion string        `json:"server_version"`
+		}
+		if jsonstrict.Decode([]byte(raw), &outcome) != nil || outcome.MutationID != id || outcome.Status != "applied" || outcome.OutcomeSchema == nil || outcome.OutcomeSchema.Version == 0 || !validLowerHexDigest(outcome.OutcomeSchema.Hash) || outcome.ServerVersion == "" {
+			return errors.New("accepted mutation outcome has an invalid exact mutation identity")
+		}
+	}
+	return nil
+}
+
+type migrationJournalCapture struct {
+	Source clientSchema      `json:"source"`
+	Target clientSchema      `json:"target"`
+	Action string            `json:"action"`
+	Phase  string            `json:"phase"`
+	Stored map[string]string `json:"stored"`
+}
+
+func decodeMigrationJournal(raw json.RawMessage) (*migrationJournalCapture, error) {
+	if isJSONNull(raw) {
+		return nil, nil
+	}
+	var value struct {
+		Source *struct {
+			Version *uint64 `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"source"`
+		Target *struct {
+			Version *uint64 `json:"version"`
+			Hash    *string `json:"hash"`
+		} `json:"target"`
+		Action *string             `json:"action"`
+		Phase  *string             `json:"phase"`
+		Stored *map[string]*string `json:"stored"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(raw) != nil || decoder.Decode(&value) != nil || value.Source == nil || value.Target == nil || value.Source.Version == nil || value.Source.Hash == nil || value.Target.Version == nil || value.Target.Hash == nil || value.Action == nil || value.Phase == nil || value.Stored == nil {
+		return nil, errors.New("migration journal capture is incomplete or invalid")
+	}
+	if *value.Source.Version > warmConnectMaximumSafeInteger || (*value.Source.Version == 0) != (*value.Source.Hash == "") || *value.Source.Version > 0 && !validLowerHexDigest(*value.Source.Hash) || *value.Target.Version == 0 || *value.Target.Version > warmConnectMaximumSafeInteger || !validLowerHexDigest(*value.Target.Hash) || (*value.Action != "replace" && *value.Action != "rebuild_local") {
+		return nil, errors.New("migration journal capture header is invalid")
+	}
+	keys := []string{"journal_version", "target_manifest_json", "affected_scopes_json", "scope_cursor_updates_json", "migration_plan_version", "migration_plan_json", "migration_plan_hash"}
+	switch len(*value.Stored) {
+	case 8:
+		keys = append(keys, "is_schema_reset")
+		if *value.Phase != "prepared" && *value.Phase != "applied" {
+			return nil, errors.New("Swift migration journal phase is invalid")
+		}
+	case 9:
+		keys = append(keys, "target_tables_json", "reset_materialization")
+		if *value.Phase != "prepared" && *value.Phase != "ddl_applied" && *value.Phase != "awaiting_rebuild" {
+			return nil, errors.New("Kotlin migration journal phase is invalid")
+		}
+	default:
+		return nil, errors.New("migration journal stored fields are invalid")
+	}
+	stored := make(map[string]string, len(keys))
+	size := len(*value.Action) + len(*value.Phase) + len(*value.Source.Hash) + len(*value.Target.Hash)
+	for _, key := range keys {
+		text, found := (*value.Stored)[key]
+		if !found || text == nil {
+			return nil, errors.New("migration journal stored field is absent or invalid")
+		}
+		size += len(*text)
+		stored[key] = *text
+	}
+	if size > 65_536 {
+		return nil, errors.New("migration journal capture is out of bounds")
+	}
+	return &migrationJournalCapture{Source: clientSchema{Version: *value.Source.Version, Hash: *value.Source.Hash}, Target: clientSchema{Version: *value.Target.Version, Hash: *value.Target.Hash}, Action: *value.Action, Phase: *value.Phase, Stored: stored}, nil
+}
+
+type physicalSchemaColumn struct {
+	TableName          string `json:"table_name"`
+	Name               string `json:"name"`
+	Type               string `json:"type"`
+	NotNull            bool   `json:"not_null"`
+	PrimaryKeyPosition uint64 `json:"primary_key_position"`
+}
+
+func decodePhysicalSchema(raw json.RawMessage) ([]physicalSchemaColumn, error) {
+	var values []struct {
+		TableName          *string `json:"table_name"`
+		Name               *string `json:"name"`
+		Type               *string `json:"type"`
+		NotNull            *bool   `json:"not_null"`
+		PrimaryKeyPosition *uint64 `json:"primary_key_position"`
+	}
+	wrapped := append(append([]byte(`{"columns":`), raw...), '}')
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if jsonstrict.ValidateValue(wrapped) != nil || decoder.Decode(&values) != nil || values == nil || len(values) > 512 {
+		return nil, errors.New("physical schema capture is absent or out of bounds")
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return nil, errors.New("physical schema capture contains trailing JSON")
+	}
+	columns := make([]physicalSchemaColumn, 0, len(values))
+	seen := make(map[[2]string]bool, len(values))
+	size := 0
+	for _, value := range values {
+		if value.TableName == nil || value.Name == nil || value.Type == nil || value.NotNull == nil || value.PrimaryKeyPosition == nil || *value.TableName == "" || *value.Name == "" || *value.PrimaryKeyPosition > 512 {
+			return nil, errors.New("physical schema column is incomplete or invalid")
+		}
+		key := [2]string{*value.TableName, *value.Name}
+		if seen[key] {
+			return nil, errors.New("physical schema column is duplicated")
+		}
+		seen[key] = true
+		size += len(*value.TableName) + len(*value.Name) + len(*value.Type)
+		columns = append(columns, physicalSchemaColumn{TableName: *value.TableName, Name: *value.Name, Type: *value.Type, NotNull: *value.NotNull, PrimaryKeyPosition: *value.PrimaryKeyPosition})
+	}
+	if size > 65_536 {
+		return nil, errors.New("physical schema capture is out of bounds")
+	}
+	return columns, nil
+}
+
+func (state inspectedClientState) validateMigrationCapture() error {
+	if len(state.MigrationJournal) == 0 && state.MigrationJournalTruncated == nil && len(state.PhysicalSchema) == 0 && state.PhysicalSchemaTruncated == nil {
+		return nil
+	}
+	if len(state.MigrationJournal) == 0 || state.MigrationJournalTruncated == nil || len(state.PhysicalSchema) == 0 || state.PhysicalSchemaTruncated == nil {
+		return errors.New("migration capture fields are incomplete")
+	}
+	if _, err := decodeMigrationJournal(state.MigrationJournal); err != nil {
+		return err
+	}
+	_, err := decodePhysicalSchema(state.PhysicalSchema)
+	return err
+}
+
+func (state inspectedClientState) requireCompleteMigrationCapture() error {
+	if state.CaptureOverflowed == nil || *state.CaptureOverflowed || len(state.MigrationJournal) == 0 || state.MigrationJournalTruncated == nil || *state.MigrationJournalTruncated || len(state.PhysicalSchema) == 0 || state.PhysicalSchemaTruncated == nil || *state.PhysicalSchemaTruncated {
+		return errors.New("migration capture is missing or truncated")
+	}
+	return state.validateMigrationCapture()
 }
 
 type durableMetadata struct {
@@ -581,13 +780,15 @@ func validateWarmConnectConnectRequest(observation transportObservation, fresh b
 func transportObservationsEqual(left, right transportObservation) bool {
 	if left.Sequence != right.Sequence || left.OperationClass != right.OperationClass ||
 		left.StatusCode != right.StatusCode || left.DurationNanoseconds != right.DurationNanoseconds ||
+		!reflect.DeepEqual(left.ErrorCode, right.ErrorCode) || !reflect.DeepEqual(left.Retryable, right.Retryable) ||
 		!reflect.DeepEqual(left.CursorFingerprints, right.CursorFingerprints) ||
 		!reflect.DeepEqual(left.CursorFingerprintsComplete, right.CursorFingerprintsComplete) {
 		return false
 	}
 	return semanticRawJSONEqual(left.RequestFacts, right.RequestFacts) &&
 		semanticRawJSONEqual(left.RebuildResponseFacts, right.RebuildResponseFacts) &&
-		semanticRawJSONEqual(left.PullResponseFacts, right.PullResponseFacts)
+		semanticRawJSONEqual(left.PullResponseFacts, right.PullResponseFacts) &&
+		semanticRawJSONEqual(left.ConnectResponseFacts, right.ConnectResponseFacts)
 }
 
 func semanticRawJSONEqual(left, right json.RawMessage) bool {
@@ -620,6 +821,9 @@ func validateTraceOperation(observation transportObservation, operation string) 
 		return fmt.Errorf("operation facts are absent or invalid: class_matches=%t status=%d duration_valid=%t request_facts_present=%t",
 			classMatches, observation.StatusCode, durationValid, requestFactsPresent)
 	}
+	if observation.ErrorCode != nil || observation.Retryable != nil {
+		return errors.New("successful transport observation contains contradictory error facts")
+	}
 	if err := validateBoundedJSON(observation.RequestFacts, maximumExchangeBytes); err != nil {
 		return err
 	}
@@ -631,8 +835,22 @@ func validateTraceOperation(observation transportObservation, operation string) 
 			!*observation.CursorFingerprintsComplete || !validCursorFingerprintSet(observation.CursorFingerprints) {
 			return errors.New("pull cursor fingerprints are incomplete")
 		}
+	} else if operation == "connect" {
+		if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
+			if observation.CursorFingerprints == nil || observation.CursorFingerprintsComplete == nil || !validCursorFingerprintSet(observation.CursorFingerprints) {
+				return errors.New("connect cursor fingerprints are invalid")
+			}
+		}
 	} else if observation.CursorFingerprints != nil || observation.CursorFingerprintsComplete != nil {
 		return errors.New("cursor fingerprints are not pull evidence")
+	}
+	if hasJSONValue(observation.ConnectResponseFacts) {
+		if operation != "connect" {
+			return errors.New("connect response facts are attached to an unsupported response")
+		}
+		if _, err := decodeConnectResponseFacts(observation.ConnectResponseFacts); err != nil {
+			return err
+		}
 	}
 	switch operation {
 	case "connect":
@@ -673,6 +891,41 @@ func validatePortableRequestIntegers(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+func decodeConnectResponseFacts(data json.RawMessage) (connectResponseFacts, error) {
+	var raw struct {
+		Action                     *string             `json:"action"`
+		SchemaVersion              *uint64             `json:"schema_version"`
+		SchemaHash                 *string             `json:"schema_hash"`
+		AffectedScopeFingerprints  *[]string           `json:"affected_scope_fingerprints"`
+		AffectedScopesComplete     *bool               `json:"affected_scopes_complete"`
+		ScopeCursorUpdates         *map[string]*string `json:"scope_cursor_updates"`
+		ScopeCursorUpdatesComplete *bool               `json:"scope_cursor_updates_complete"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if validateBoundedJSON(data, maximumExchangeBytes) != nil || decoder.Decode(&raw) != nil || raw.Action == nil || raw.SchemaVersion == nil || raw.SchemaHash == nil || raw.AffectedScopeFingerprints == nil || raw.AffectedScopesComplete == nil || raw.ScopeCursorUpdates == nil || raw.ScopeCursorUpdatesComplete == nil {
+		return connectResponseFacts{}, errors.New("React Native connect response facts are incomplete or invalid")
+	}
+	switch *raw.Action {
+	case "none", "replace", "rebuild_local", "unsupported":
+	default:
+		return connectResponseFacts{}, errors.New("React Native connect action is invalid")
+	}
+	if *raw.SchemaVersion == 0 || *raw.SchemaVersion > warmConnectMaximumSafeInteger || !validLowerHexDigest(*raw.SchemaHash) || !validCursorFingerprintSet(*raw.AffectedScopeFingerprints) || len(*raw.ScopeCursorUpdates) > 16 {
+		return connectResponseFacts{}, errors.New("React Native connect response facts are invalid")
+	}
+	for scope, cursor := range *raw.ScopeCursorUpdates {
+		if !validLowerHexDigest(scope) || cursor != nil && !validLowerHexDigest(*cursor) {
+			return connectResponseFacts{}, errors.New("React Native connect cursor updates are invalid")
+		}
+	}
+	return connectResponseFacts{
+		Action: *raw.Action, SchemaVersion: *raw.SchemaVersion, SchemaHash: *raw.SchemaHash,
+		AffectedScopeFingerprints: *raw.AffectedScopeFingerprints, AffectedScopesComplete: *raw.AffectedScopesComplete,
+		ScopeCursorUpdates: *raw.ScopeCursorUpdates, ScopeCursorUpdatesComplete: *raw.ScopeCursorUpdatesComplete,
+	}, nil
 }
 
 func decodeRebuildResponseFacts(raw json.RawMessage) (rebuildResponseFacts, error) {
@@ -781,6 +1034,9 @@ func decodeClientState(raw json.RawMessage) (inspectedClientState, error) {
 	var state inspectedClientState
 	if err := jsonstrict.Decode(raw, &state); err != nil || state.Schema == nil {
 		return inspectedClientState{}, errors.New("React Native client state is invalid")
+	}
+	if err := state.validateMigrationCapture(); err != nil {
+		return inspectedClientState{}, err
 	}
 	if state.Schema.Version == 0 || state.Schema.Version > warmConnectMaximumSafeInteger || len(state.Schema.Hash) != 64 ||
 		state.ProvenanceMaintenanceWorkCursor == "" {

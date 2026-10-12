@@ -751,6 +751,113 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         }
     }
 
+    func testMigrationRecoveryRejectsScopeAndPlanCorruptionInBothPhases() throws {
+        let corruptions = [
+            "UPDATE _synchro_schema_migration SET affected_scopes_json = '[]'",
+            "UPDATE _synchro_schema_migration SET action = 'replace'",
+            "UPDATE _synchro_schema_migration SET affected_scopes_json = '[\"scope-a\",\"scope-a\"]'",
+            "UPDATE _synchro_schema_migration SET affected_scopes_json = '[\"\"]'",
+            "UPDATE _synchro_schema_migration SET affected_scopes_json = '[\"scope-b\",\"scope-a\"]'",
+            "UPDATE _synchro_schema_migration SET scope_cursor_updates_json = '{}'",
+            "UPDATE _synchro_schema_migration SET scope_cursor_updates_json = '{\"scope-a\":\"old\",\"scope-b\":null}'",
+            "UPDATE _synchro_schema_migration SET affected_scopes_json = '[\"scope-a\"]'",
+            "typed-plan",
+        ]
+        for applied in [false, true] {
+            for corruption in corruptions {
+                let environment = try makePreparedMigration("journal-corruption")
+                let database = environment.database
+                let manager = SchemaManager(database: database)
+                let target = try XCTUnwrap(manager.activeMigration()).targetManifest
+                try database.writeTransaction { connection in
+                    try SynchroMeta.clearSchemaMigrationJournal(connection)
+                    for scopeID in ["scope-a", "scope-b"] {
+                        try SynchroMeta.upsertScope(connection, scopeID: scopeID, cursor: "old", checksum: "old")
+                    }
+                }
+                _ = try manager.prepareMigration(
+                    targetManifest: target, action: .rebuildLocal, affectedScopes: ["scope-a", "scope-b"],
+                    scopeCursorUpdates: ["scope-a": nil, "scope-b": nil], schemaReset: true
+                )
+                if applied {
+                    _ = try database.writeSchemaMigrationTransaction { try manager.applyPreparedMigrationInTransaction($0) }
+                }
+                try database.writeTransaction { connection in
+                    if corruption == "typed-plan" {
+                        let journal = try XCTUnwrap(SynchroMeta.getSchemaMigrationJournal(connection))
+                        let plan = SchemaMigrationPlan(
+                            source: journal.source, target: journal.target, schemaReset: journal.schemaReset,
+                            operations: journal.plan.operations.filter { $0.kind != .activateManifest }
+                        )
+                        let encoded = try JSONEncoder.synchroEncoder().encode(plan)
+                        try connection.execute(
+                            sql: "UPDATE _synchro_schema_migration SET migration_plan_json = ?, migration_plan_hash = ?",
+                            arguments: [String(decoding: encoded, as: UTF8.self), Integrity.sha256Hex(
+                                domain: "synchro:v3:client-migration-plan:v1", data: encoded
+                            )]
+                        )
+                    } else {
+                        try connection.execute(sql: corruption)
+                    }
+                }
+                let before = try durableSnapshot(database)
+                let pending = try ChangeTracker(database: database).inspectPendingMutations()
+                try database.close()
+                let reopened = try SynchroDatabase(path: environment.path)
+                XCTAssertThrowsError(try SchemaManager(database: reopened).recoverMigrationIfNeeded(), corruption)
+                try assertNoDurableProgress(before, reopened)
+                XCTAssertEqual(try ChangeTracker(database: reopened).inspectPendingMutations(), pending)
+                try reopened.close()
+            }
+        }
+    }
+
+    func testAppliedMigrationRejectsDuplicatedArchivedSourceIdentifiers() throws {
+        for duplicated in ["table", "field", "index"] {
+            let environment = try makePreparedMigration("duplicate-source-\(duplicated)")
+            let database = environment.database
+            let manager = SchemaManager(database: database)
+            let journal = try database.writeSchemaMigrationTransaction {
+                try manager.applyPreparedMigrationInTransaction($0)
+            }
+            try database.writeTransaction { connection in
+                let tables = try XCTUnwrap(SynchroMeta.getArchivedSchemaTables(
+                    connection, version: journal.source.version, hash: journal.source.hash
+                ))
+                let encoded = try JSONEncoder.synchroEncoder().encode(tables)
+                var objects = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [[String: Any]])
+                switch duplicated {
+                case "table":
+                    objects.append(objects[0])
+                case "field":
+                    var columns = try XCTUnwrap(objects[0]["columns"] as? [[String: Any]])
+                    columns.append(columns[0])
+                    objects[0]["columns"] = columns
+                default:
+                    let index: [String: Any] = [
+                        "indexID": "duplicate", "name": "orders_duplicate", "fieldIDs": ["field-id"], "unique": false,
+                    ]
+                    objects[0]["indexes"] = [index, index]
+                }
+                let changed = try JSONSerialization.data(withJSONObject: objects)
+                try connection.execute(
+                    sql: "UPDATE _synchro_schema_archive SET schema_json = ? WHERE schema_version = ? AND schema_hash = ?",
+                    arguments: [String(decoding: changed, as: UTF8.self), journal.source.version, journal.source.hash]
+                )
+            }
+            let before = try durableSnapshot(database)
+            try database.close()
+            let reopened = try SynchroDatabase(path: environment.path)
+            XCTAssertThrowsError(try SchemaManager(database: reopened).recoverMigrationIfNeeded()) { error in
+                guard case SynchroError.invalidResponse = error else {
+                    return XCTFail("Recovery did not report invalid source metadata")
+                }
+            }
+            try assertNoDurableProgress(before, reopened)
+            try reopened.close()
+        }
+    }
+
     func testPortableSeedContinuesNormallyAndTamperingNeverPublishesDatabase() async throws {
         try assertSeedRejection("seed-missing-continuation") { connection in
             try connection.execute(sql: "DELETE FROM _synchro_seed_receipts")
