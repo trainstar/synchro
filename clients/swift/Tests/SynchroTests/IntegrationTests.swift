@@ -143,15 +143,37 @@ final class IntegrationTests: XCTestCase {
     }
 
     private func syncAndWaitForScheduledRetry(_ client: SynchroClient) async throws {
-        do {
-            try await client.syncNow()
-        } catch let error as RetryableError where error.classification == .http503 {
-            // A real server answers with retryable 503 capture_pending until WAL
-            // capture reaches accepted writes. The error names no protocol code,
-            // and a retryable 503 admits only capture_pending and
-            // temporary_unavailable, so every other failure propagates.
-            try await waitForCondition(timeoutNanoseconds: 15_000_000_000) {
-                client.getSyncStatus() == .ready
+        let deadline = DispatchTime.now().uptimeNanoseconds + 15_000_000_000
+        while true {
+            var retryCaller = false
+            do {
+                try await client.syncNow()
+                return
+            } catch let error as RetryableError where error.classification == .http503 {
+                // The engine must complete its persisted retry request before
+                // another manual sync can start.
+            } catch SynchroError.notStarted {
+                guard client.getSyncStatus() == .backoff else {
+                    throw SynchroError.notStarted
+                }
+                retryCaller = true
+            }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else {
+                XCTFail("timed out waiting for scheduled sync retry")
+                throw SynchroError.notStarted
+            }
+            var reachedReady = false
+            try await waitForCondition(timeoutNanoseconds: deadline - now) {
+                let ready = client.getSyncStatus() == .ready
+                reachedReady = ready
+                return ready
+            }
+            guard reachedReady else {
+                throw SynchroError.notStarted
+            }
+            if !retryCaller {
+                return
             }
         }
     }
@@ -190,6 +212,27 @@ final class IntegrationTests: XCTestCase {
                 XCTFail("Expected authRequired protocol error, got \(error)")
             }
         }
+    }
+
+    func testScheduledRetryHelperPropagatesStoppedClient() async throws {
+        let client = try SynchroClient(config: makeConfig(
+            userID: UUID().uuidString.lowercased(),
+            dbPath: tempDBPath()
+        ))
+        addTeardownBlock { await self.stopAndClose(client) }
+
+        try await client.start()
+        await client.stop()
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
+
+        do {
+            try await syncAndWaitForScheduledRetry(client)
+            XCTFail("Expected stopped client to reject syncNow")
+        } catch SynchroError.notStarted {
+        } catch {
+            XCTFail("Expected notStarted, got \(error)")
+        }
+        XCTAssertEqual(client.getSyncStatus(), .stopped)
     }
 
     func testPushPullBetweenTwoClients() async throws {

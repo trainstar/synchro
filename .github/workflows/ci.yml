@@ -289,7 +289,9 @@ jobs:
       - name: Start local PostgreSQL
         run: |
           make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+          adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          echo "::add-mask::$adapter_test_url"
+          echo "ADAPTER_TEST_URL=$adapter_test_url" >> "$GITHUB_ENV"
 
       - name: Enable KVM permissions
         run: |
@@ -457,7 +459,9 @@ jobs:
       - name: Start local PostgreSQL
         run: |
           make local-postgres-start
-          echo "ADAPTER_TEST_URL=$(cat .ignore/r2/tmp/local-postgres/postgres.url)" >> "$GITHUB_ENV"
+          adapter_test_url="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          echo "::add-mask::$adapter_test_url"
+          echo "ADAPTER_TEST_URL=$adapter_test_url" >> "$GITHUB_ENV"
 
       - name: Enable KVM permissions
         run: |
