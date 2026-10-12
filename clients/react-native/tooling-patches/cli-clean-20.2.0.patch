@@ -1,0 +1,21 @@
+diff --git a/build/clean.js b/build/clean.js
+index 0cad23b..942fb42 100644
+--- a/build/clean.js
++++ b/build/clean.js
+@@ -157,13 +157,13 @@ async function clean(_argv, ctx, cleanOptions) {
+       description: 'Metro, haste-map caches',
+       tasks: [{
+         label: 'Clean Metro cache',
+-        action: () => cleanDir(`${_os().default.tmpdir()}/metro-*`)
++        action: () => cleanDir(`${_fastGlob().default.convertPathToPattern(_os().default.tmpdir())}/metro-*`)
+       }, {
+         label: 'Clean Haste cache',
+-        action: () => cleanDir(`${_os().default.tmpdir()}/haste-map-*`)
++        action: () => cleanDir(`${_fastGlob().default.convertPathToPattern(_os().default.tmpdir())}/haste-map-*`)
+       }, {
+         label: 'Clean React Native cache',
+-        action: () => cleanDir(`${_os().default.tmpdir()}/react-*`)
++        action: () => cleanDir(`${_fastGlob().default.convertPathToPattern(_os().default.tmpdir())}/react-*`)
+       }]
+     },
+     bun: {

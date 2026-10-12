@@ -1,0 +1,13 @@
+diff --git a/build/config/findComponentDescriptors.js b/build/config/findComponentDescriptors.js
+index 36fdb7c..4e857d0 100644
+--- a/build/config/findComponentDescriptors.js
++++ b/build/config/findComponentDescriptors.js
+@@ -42,7 +42,7 @@ function findComponentDescriptors(packageRoot) {
+   } catch (error) {
+     // no jsSrcsDir, continue with default glob pattern
+   }
+-  const globPattern = jsSrcsDir ? `${jsSrcsDir}/**/*{.js,.jsx,.ts,.tsx}` : '**/*{.js,.jsx,.ts,.tsx}';
++  const globPattern = jsSrcsDir ? `${_fastGlob().default.convertPathToPattern(jsSrcsDir)}/**/*{.js,.jsx,.ts,.tsx}` : '**/*{.js,.jsx,.ts,.tsx}';
+   const files = _fastGlob().default.sync(globPattern, {
+     cwd: (0, _cliTools().unixifyPaths)(packageRoot),
+     onlyFiles: true,

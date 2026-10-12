@@ -16,6 +16,11 @@
       "types": "./lib/typescript/src/inspection.d.ts",
       "default": "./lib/module/inspection.js"
     },
+    "./tooling-patches/apply": "./tooling-patches/apply.cjs",
+    "./tooling-patches/cli-config-android-20.2.0.patch": "./tooling-patches/cli-config-android-20.2.0.patch",
+    "./tooling-patches/cli-clean-20.2.0.patch": "./tooling-patches/cli-clean-20.2.0.patch",
+    "./tooling-patches/react-native-builder-bob-0.40.18.patch": "./tooling-patches/react-native-builder-bob-0.40.18.patch",
+    "./tooling-patches/stream-json-1.9.1.patch": "./tooling-patches/stream-json-1.9.1.patch",
     "./package.json": "./package.json"
   },
   "files": [
@@ -25,6 +30,7 @@
     "ios",
     "ios-test-host",
     "ios-tests",
+    "tooling-patches",
     "*.podspec",
     "!ios/build",
     "!android/build",
@@ -93,6 +99,13 @@
   "workspaces": [
     "example"
   ],
+  "resolutions": {
+    "@react-native-community/cli-config-android@npm:20.2.0": "patch:@react-native-community/cli-config-android@npm%3A20.2.0#./tooling-patches/cli-config-android-20.2.0.patch",
+    "@react-native-community/cli-clean@npm:20.2.0": "patch:@react-native-community/cli-clean@npm%3A20.2.0#./tooling-patches/cli-clean-20.2.0.patch",
+    "react-native-builder-bob@npm:^0.40.18": "patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch",
+    "stream-json@npm:^1.7.4": "patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch",
+    "stream-json@npm:^1.7.5": "patch:stream-json@npm%3A1.9.1#./tooling-patches/stream-json-1.9.1.patch"
+  },
   "packageManager": "yarn@4.11.0",
   "react-native-builder-bob": {
     "source": "src",

@@ -23,6 +23,54 @@ use the local artifact flow in
 npm install @trainstar/synchro-react-native@0.4.0-rc.2
 ```
 
+Apply the delivered React Native CLI correction after each fresh npm install and
+before you run Codegen, bundle, or native build commands:
+
+```sh
+npm install --save-dev --save-exact \
+  @react-native-community/cli@20.2.0 \
+  @react-native-community/cli-platform-android@20.2.0 \
+  @react-native-community/cli-platform-ios@20.2.0
+```
+
+Pin these CLI packages before the patch command. Default React Native templates
+can install an older CLI.
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs cli
+```
+
+The command resolves the CLI from the application that calls it. It verifies
+the expected `20.2.0` source and post-patch SHA-256 values. It rejects another
+version, a missing target, or a target outside the application installation.
+The correction escapes the documented `jsSrcsDir` directory before the CLI
+adds its fixed source-extension glob. It also preserves the CLI's authored
+temporary-cache suffix patterns while treating the host temporary directory as
+a literal prefix. It does not change the upstream version.
+
+Applications that use `bunyamin` 1.6.3 with `stream-json` 1.9.1 must also apply
+the delivered correction before they run that tooling:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs stream-json
+```
+
+This correction backports upstream commit
+`2f2d35bbb547306991ded6487a279154d865a358` for both Assembler writes. It
+preserves the installed `stream-json` version and its 1.9.1 reviver behavior.
+
+Library projects that run `bob build` must apply the delivered Bob correction
+after each fresh npm installation and before they build:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
+```
+
+The correction replaces Bob's glob-based removal of its resolved output and
+TypeScript build-info paths with its installed `fs-extra` literal operation.
+It rejects the current project directory and paths outside it before removal.
+It does not change compilation or TypeScript generation.
+
 Before you run `pod install`, add these published Synchro `0.4.0-rc.2` dependencies to the
 application `ios/Podfile`:
 
