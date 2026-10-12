@@ -27,6 +27,16 @@ Apply the delivered React Native CLI correction after each fresh npm install and
 before you run Codegen, bundle, or native build commands:
 
 ```sh
+npm install --save-dev --save-exact \
+  @react-native-community/cli@20.2.0 \
+  @react-native-community/cli-platform-android@20.2.0 \
+  @react-native-community/cli-platform-ios@20.2.0
+```
+
+Pin these CLI packages before the patch command. Default React Native templates
+can install an older CLI.
+
+```sh
 node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs cli
 ```
 

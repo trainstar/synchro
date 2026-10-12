@@ -20,6 +20,7 @@ const repairs = {
   },
   'stream-json': {
     caller: 'bunyamin',
+    callerVersion: '1.6.3',
     packageName: 'stream-json',
     version: '1.9.1',
     source: 'Assembler.js',
@@ -41,17 +42,20 @@ function resolvedPackageRoot(request, paths) {
 function assertInsideInstall(target) {
   const relative = path.relative(appRoot, target);
   if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
-    fail(`resolved target is outside the caller installation: ${target}`);
+    fail('resolved target is outside the caller installation');
   }
   if (!relative.split(path.sep).includes('node_modules')) {
-    fail(`resolved target is not in node_modules: ${target}`);
+    fail('resolved target is not in node_modules');
   }
 }
 
-function packageVersion(packageRoot, expected, label) {
-  const value = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')).version;
-  if (value !== expected) {
-    fail(`${label} version is ${value}, expected ${expected}`);
+function packageIdentity(packageRoot, expectedName, expectedVersion) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
+  if (manifest.name !== expectedName) {
+    fail('unexpected package identity');
+  }
+  if (manifest.version !== expectedVersion) {
+    fail('unexpected package version');
   }
 }
 
@@ -90,15 +94,13 @@ function applyRepair(name) {
   }
   const caller = callerRoot(repair);
   assertInsideInstall(caller);
-  if (repair.callerVersion) {
-    packageVersion(caller, repair.callerVersion, repair.caller);
-  }
+  packageIdentity(caller, repair.caller, repair.callerVersion);
   const target = targetRoot(repair, caller);
   assertInsideInstall(target);
-  packageVersion(target, repair.version, repair.packageName);
+  packageIdentity(target, repair.packageName, repair.version);
   const source = path.join(target, repair.source);
   if (!fs.existsSync(source) || fs.realpathSync(source) !== source) {
-    fail(`unexpected or missing source target: ${source}`);
+    fail('unexpected or missing source target');
   }
   const actual = hashFile(source);
   if (actual === repair.postimage) {
@@ -106,7 +108,7 @@ function applyRepair(name) {
     return;
   }
   if (actual !== repair.preimage) {
-    fail(`${repair.packageName} source hash is ${actual}, expected ${repair.preimage}`);
+    fail('unexpected source hash');
   }
   const patchFile = path.join(__dirname, repair.patch);
   const result = spawnSync('patch', ['--batch', '--forward', '--fuzz=0', '-p1', '-d', target], {
@@ -115,17 +117,17 @@ function applyRepair(name) {
     stdio: ['pipe', 'inherit', 'inherit']
   });
   if (result.error || result.status !== 0) {
-    fail(`patch command failed for ${repair.packageName}`);
+    fail('patch command failed');
   }
   const postimage = hashFile(source);
   if (postimage !== repair.postimage) {
-    fail(`${repair.packageName} postimage hash is ${postimage}, expected ${repair.postimage}`);
+    fail('postimage verification failed');
   }
   process.stdout.write(`applied verified ${repair.packageName} ${repair.version} patch\n`);
 }
 
 const name = process.argv[2] || 'cli';
 if (!Object.prototype.hasOwnProperty.call(repairs, name)) {
-  fail('usage: node tooling-patches/apply.cjs <cli|stream-json>');
+  fail('unsupported repair');
 }
 applyRepair(name);
