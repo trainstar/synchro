@@ -266,7 +266,10 @@ class Runner:
             self.check_adb_server()
             status = self.command_process.returncode
             if status:
-                raise RunnerError(f"Command failed with status {status}: {shlex.join(command)}")
+                diagnostic = ""
+                if Path(command[0]).name == "emulator" and "-version" in command:
+                    diagnostic = "\n" + output[-4096:].rstrip()
+                raise RunnerError(f"Command failed with status {status}: {shlex.join(command)}{diagnostic}")
         except BaseException as error:
             failure = error
             raise
@@ -377,7 +380,7 @@ class Runner:
             if not cached:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 archive.replace(cache)
-        version = self.command([str(directory / "emulator"), "-version"])
+        version = self.command([str(directory / "emulator"), "-no-window", "-version"])
         if not re.search(r"\bAndroid emulator version 37\.2\.12\b.*\(build_id 16428233\)", version):
             raise RunnerError("The emulator executable version or build does not match the pin")
         identity = f"Emulator SHA-256 {ARCHIVE_SHA256}, version {VERSION}, build {BUILD}"

@@ -183,6 +183,9 @@ class EmulatorRunnerTests(unittest.TestCase):
             "--connect-timeout", "30", "--max-time", "180", "--output",
         ])
         self.assertEqual(curl[-1], runner.ARCHIVE_URL)
+        self.assertEqual(self.commands("emulator")[0][0], [
+            str(self.sdk / "emulator/emulator"), "-no-window", "-version",
+        ])
         self.assertEqual(self.commands("sdkmanager")[0][0], [
             str(self.manager), f"--sdk_root={self.sdk}", "platforms;android-34",
             "system-images;android-34;google_apis;x86_64",
