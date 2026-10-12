@@ -130,12 +130,44 @@ func (h *Handler) servePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.queryJSONB(
-		r.Context(),
-		"SELECT synchro.synchro_push($1, $2::pg_catalog.jsonb)",
-		userID,
-		string(raw),
-	)
+	var resp []byte
+	var err error
+	if h.preparePush == nil {
+		resp, err = h.queryJSONB(
+			r.Context(),
+			"SELECT synchro.synchro_push($1, $2::pg_catalog.jsonb)",
+			userID,
+			string(raw),
+		)
+	} else {
+		queryTimeout := h.queryTimeout
+		if queryTimeout <= 0 {
+			queryTimeout = DefaultDatabaseQueryTimeout
+		}
+		queryContext, cancel := context.WithTimeout(r.Context(), queryTimeout)
+		defer cancel()
+
+		tx, beginErr := h.db.BeginTx(queryContext, nil)
+		err = beginErr
+		if err == nil {
+			defer func() { _ = tx.Rollback() }()
+			err = h.preparePush(queryContext, tx)
+			if err == nil {
+				err = tx.QueryRowContext(
+					queryContext,
+					"SELECT synchro.synchro_push($1, $2::pg_catalog.jsonb)",
+					userID,
+					string(raw),
+				).Scan(&resp)
+			}
+			if err == nil {
+				err = tx.Commit()
+			}
+		}
+		if err != nil && r.Context().Err() == nil && queryContext.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("%w: %w", errAdapterQueryTimeout, err)
+		}
+	}
 	if err != nil {
 		mapSQLError(w, err)
 		return

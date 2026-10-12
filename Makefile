@@ -561,7 +561,7 @@ test-docs-contract:
 	cd docs && npm run verify:contract
 
 conformance-mod-download:
-	cd conformance && GOFLAGS= GOWORK=off go mod download all
+	cd conformance && GOFLAGS= GOWORK=off go mod download
 
 build-conformance: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go build ./...
