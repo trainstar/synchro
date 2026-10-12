@@ -30,6 +30,11 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 - Swift clients apply remote changes after a later accepted or conflict outcome replaces a terminal rejection. ([#331](https://github.com/trainstar/synchro/issues/331))
 - Kotlin clients preserve rows when fields become nullable and support required-field additions without invented defaults. ([#331](https://github.com/trainstar/synchro/issues/331))
 
+### Security
+
+- React Native CLI setup preserves literal Codegen source-directory names. Apply the [delivered tooling correction](https://trainstar.github.io/synchro/reference/support-policy/#react-native-tooling-corrections) after dependency installation. ([#312](https://github.com/trainstar/synchro/issues/312))
+- Trace tooling retains prototype-named JSON data without changing object prototypes or thread remapping. The package delivers the stream-json 1.9.1 upstream backport. ([#330](https://github.com/trainstar/synchro/issues/330))
+
 ## [0.4.0-rc.1] - 2026-10-01
 
 This release candidate is for consumer validation of `0.4.0`.

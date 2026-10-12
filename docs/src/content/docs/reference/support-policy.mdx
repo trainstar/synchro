@@ -39,6 +39,29 @@ The [upstream correction](https://github.com/react/react-native/commit/faeef2b90
 Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
 The example and consumer hosts use this lifecycle.
 
+## React Native Tooling Corrections
+
+The supported CLI toolchain uses CLI 20.2.0 and its Android and iOS platform packages at the same version.
+The package delivers a version-bound correction for CLI Android configuration 20.2.0.
+It escapes the documented Codegen source directory before constructing the fixed source-extension pattern.
+This preserves directory names with literal braces or brackets.
+
+Follow the [npm setup steps](/synchro/clients/consumption/#react-native) after each fresh installation.
+Yarn applications must preserve the same correction through Yarn's patch protocol.
+The published package exports its canonical patch at `@trainstar/synchro-react-native/tooling-patches/cli-config-android-20.2.0.patch`.
+
+The package also exports the stream-json 1.9.1 Assembler correction for bunyamin 1.6.3 trace tooling.
+It backports [upstream property handling](https://github.com/uhop/stream-json/commit/2f2d35bbb547306991ded6487a279154d865a358) without changing the dependency major.
+Applications with this trace tool must apply the delivered correction before they use it:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs stream-json
+```
+
+The setup command verifies exact package identities and source hashes.
+It rejects an unexpected installation and accepts repeated execution only for the exact verified postimage.
+These corrections do not change the upstream package versions.
+
 ## React Native 0.82.1 fmt Backport
 
 RN 0.82.1 pins fmt 11.0.2, which fails with the Xcode 27 compiler.

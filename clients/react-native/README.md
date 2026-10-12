@@ -46,8 +46,8 @@ version, a missing target, or a target outside the application installation.
 The correction escapes the documented `jsSrcsDir` directory before the CLI
 adds its fixed source-extension glob. It does not change the upstream version.
 
-Applications that use `bunyamin` must also apply the delivered `stream-json`
-1.9.1 correction before they run that tooling:
+Applications that use `bunyamin` 1.6.3 with `stream-json` 1.9.1 must also apply
+the delivered correction before they run that tooling:
 
 ```sh
 node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs stream-json

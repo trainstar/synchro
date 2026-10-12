@@ -261,6 +261,20 @@ For local development, install the staged package:
 npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.2.tgz
 ```
 
+Pin the CLI toolchain and apply its delivered correction after each fresh npm installation:
+
+```sh
+npm install --save-dev --save-exact \
+  @react-native-community/cli@20.2.0 \
+  @react-native-community/cli-platform-android@20.2.0 \
+  @react-native-community/cli-platform-ios@20.2.0
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs cli
+```
+
+Run this command before Codegen, bundle, or native build commands.
+The correction preserves literal source-directory names and verifies the installed source identity.
+See [tooling correction requirements](/synchro/reference/support-policy/#react-native-tooling-corrections) for provenance and trace-tooling setup.
+
 ### React Native iOS Podfile requirements
 
 The React Native bridge requires both Synchro and GRDB. Use these exact Git
