@@ -10,6 +10,9 @@ import tempfile
 import time
 import unittest
 
+from verification import packaged_smoke
+from verification.test_support_environments import valid_records
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERIAL = "emulator-5554"
@@ -108,6 +111,8 @@ import sys
 import time
 with Path(os.environ["PREPARE_CHILD_LOG"]).open("a") as stream:
     record = {"kind": sys.argv[1], "arguments": sys.argv[2:], "android": os.environ.get("ANDROID_SERIAL"), "kotlin": os.environ.get("KOTLIN_ANDROID_SERIAL"), "manifest": os.environ.get("PACKAGED_SMOKE_RELEASE_MANIFEST")}
+    if os.environ.get("PACKAGED_SMOKE_LOCAL_INPUTS"):
+        record["local_inputs"] = os.environ["PACKAGED_SMOKE_LOCAL_INPUTS"]
     if os.environ.get("PREPARE_CHILD_MODE"):
         record["makeflags"] = os.environ.get("MAKEFLAGS", "")
     stream.write(json.dumps(record) + "\n")
@@ -131,7 +136,7 @@ import os
 import sys
 if sys.argv[1:3] == ["verification/packaged_smoke.py", "begin-cell"]:
     raise SystemExit(0)
-if sys.argv[1:3] != ["verification/probe_support_environment.py", "resolve-android-serial"]:
+if sys.argv[1:3] not in (["verification/probe_support_environment.py", "resolve-android-serial"], ["verification/packaged_smoke.py", "validate-local-consumer-inputs"]):
     raise SystemExit("Unexpected fixture Python command")
 os.execv(sys.executable, [sys.executable, "-B", *sys.argv[1:]])
 """
@@ -253,7 +258,7 @@ class AndroidEmulatorPrepareTests(unittest.TestCase):
         return [json.loads(line) for line in self.child_log.read_text().splitlines()] if self.child_log.exists() else []
 
     def smoke_variables(self) -> dict[str, str]:
-        return {"MAKE": str(self.child_make), "PACKAGED_SMOKE_RELEASE_MANIFEST": str(self.manifest), "PACKAGED_SMOKE_TMP_ROOT": str(self.root / "tmp"), "PACKAGED_SMOKE_CELL_ID": "SUP-ANDROID-MIN-001", "PACKAGED_SMOKE_CELL_RESULT": str(self.root / "cell.json")}
+        return {"MAKE": str(self.child_make), "PACKAGED_SMOKE_RELEASE_MANIFEST": str(self.manifest), "PACKAGED_SMOKE_LOCAL_INPUTS": "", "PACKAGED_SMOKE_TMP_ROOT": str(self.root / "tmp"), "PACKAGED_SMOKE_CELL_ID": "SUP-ANDROID-MIN-001", "PACKAGED_SMOKE_CELL_RESULT": str(self.root / "cell.json")}
 
     def test_supported_preparation_without_locksettings(self) -> None:
         self.assertFalse((self.device_bin / "locksettings").exists())
@@ -389,21 +394,65 @@ class AndroidEmulatorPrepareTests(unittest.TestCase):
                 for name in inherited:
                     self.environment.pop(name)
 
-    def test_manifest_rejection_precedes_smoke_builds_and_devices(self) -> None:
+    def test_explicit_input_rejection_precedes_smoke_builds_and_devices(self) -> None:
         for target in ("test-consumer-kotlin-device-smoke", "test-consumer-rn-android-smoke"):
-            for manifest in ("", str(self.root / "missing.json"), str(self.root), str(self.manifest)):
-                with self.subTest(target=target, manifest=manifest):
+            for kind, path, diagnostic in (
+                ("missing", "", "exactly one lifecycle input"),
+                ("both", str(self.manifest), "exactly one lifecycle input"),
+                *[(kind, path, "lifecycle input must be readable") for kind in ("release", "local")
+                  for path in (str(self.root / "missing.json"), str(self.root), str(self.manifest))],
+            ):
+                with self.subTest(target=target, kind=kind, path=path):
                     variables = self.smoke_variables()
-                    variables["PACKAGED_SMOKE_RELEASE_MANIFEST"] = manifest
-                    if manifest == str(self.manifest):
-                        self.environment["PREPARE_UNREADABLE_MANIFEST"] = manifest
+                    variables["PACKAGED_SMOKE_RELEASE_MANIFEST"] = path if kind in {"release", "both"} else ""
+                    variables["PACKAGED_SMOKE_LOCAL_INPUTS"] = path if kind in {"local", "both"} else ""
+                    if kind != "both" and path == str(self.manifest):
+                        self.environment["PREPARE_UNREADABLE_MANIFEST"] = path
                         variables["SHELL"] = str(self.fixture_shell)
                     result = self.invoke(target=target, variables=variables, no_sleep=True)
                     self.environment["PREPARE_UNREADABLE_MANIFEST"] = ""
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file", result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
                     self.assertEqual(self.commands, [])
                     self.assertEqual(self.children(), [])
+
+    def test_explicit_local_binding_precedes_children_and_propagates(self) -> None:
+        version = (REPO_ROOT / "VERSION").read_text().strip()
+        artifacts = self.root / "artifacts"
+        base = artifacts / "maven/fit/trainstar/synchro" / version / f"synchro-{version}"
+        base.parent.mkdir(parents=True)
+        aar, pom = Path(str(base) + ".aar"), Path(str(base) + ".pom")
+        aar.write_bytes(b"authored AAR fixture")
+        pom.write_text(f"<project><groupId>fit.trainstar</groupId><artifactId>synchro</artifactId><version>{version}</version><packaging>aar</packaging></project>")
+        npm = artifacts / "npm" / f"trainstar-synchro-react-native-{version}.tgz"
+        npm.parent.mkdir()
+        npm.write_bytes(b"authored npm fixture")
+        environments = self.root / "expected.json"
+        packaged_smoke.write_json(environments, valid_records())
+        for target, cell, files in (
+            ("test-consumer-kotlin-device-smoke", "SUP-ANDROID-MIN-001", [aar, pom]),
+            ("test-consumer-rn-android-smoke", "SUP-RN-ANDROID-MIN-001", [npm, aar, pom]),
+        ):
+            with self.subTest(target=target):
+                inputs = self.root / "local.json"
+                packaged_smoke.prepare_local_cell(REPO_ROOT, cell, environments, files, inputs, artifact_dir=artifacts)
+                variables = {**self.smoke_variables(), "PACKAGED_SMOKE_RELEASE_MANIFEST": "",
+                             "PACKAGED_SMOKE_LOCAL_INPUTS": str(inputs), "PACKAGED_SMOKE_CELL_ID": cell,
+                             "CLIENT_ARTIFACT_DIR": str(artifacts), "CLIENT_ARTIFACTS_PREPARED": "1",
+                             "PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS": " ".join(map(str, files)),
+                             "PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES": " ".join(packaged_smoke.hash_files(files))}
+                result = self.invoke(target=target, variables=variables, no_sleep=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.commands, [["devices", "-l"]])
+                self.assertTrue(self.children())
+                for record in self.children():
+                    self.assertEqual(record["local_inputs"], str(inputs))
+                    self.assertEqual(record["manifest"], "")
+                variables["PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS"] = str(npm)
+                result = self.invoke(target=target, variables=variables, no_sleep=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.commands, [])
+                self.assertEqual(self.children(), [])
 
     def test_ordered_smoke_goals_manifest_and_empty_command_line_serials(self) -> None:
         self.environment.pop("ANDROID_SERIAL")

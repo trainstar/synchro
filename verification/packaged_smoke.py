@@ -8,6 +8,8 @@ import base64
 import hashlib
 import hmac
 import http.server
+import importlib.util
+import io
 import json
 import math
 import os
@@ -19,8 +21,10 @@ import socketserver
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import uuid
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -30,10 +34,16 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import support_environments
 
+_release_spec = importlib.util.spec_from_file_location("release_artifacts", Path(__file__).resolve().parents[1] / "scripts/release-artifacts.py")
+assert _release_spec and _release_spec.loader
+release_artifacts = importlib.util.module_from_spec(_release_spec)
+_release_spec.loader.exec_module(release_artifacts)
+
 
 SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
 CELL_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 1
+LOCAL_EVIDENCE_KIND = "local-source-artifacts"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 APP_RESULT_PATH = "/result"
@@ -149,6 +159,19 @@ def source_commit(repo_root: Path) -> str:
         raise EvidenceError(f"cannot resolve the repository commit: {error}") from error
     if not COMMIT.fullmatch(commit):
         raise EvidenceError("repository HEAD is not a full commit hash")
+    return commit
+
+
+def clean_source_commit(repo_root: Path) -> str:
+    commit = source_commit(repo_root)
+    try:
+        status = subprocess.check_output(
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=normal"], text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceError("cannot verify clean local source") from error
+    if status:
+        raise EvidenceError("local lifecycle requires a clean exact source checkout")
     return commit
 
 
@@ -786,9 +809,162 @@ def manifest_environments(repo_root: Path, manifest: object) -> list[dict[str, A
     return environment_records(repo_root, manifest.get("resolved_support_cells"))
 
 
+def validate_local_inputs(repo_root: Path, value: object, cell_id: str) -> dict[str, Any]:
+    members = {"schema_version", "kind", "source_commit", "cell_id", "resolved_support_cells", "artifact_hashes"}
+    if not isinstance(value, dict) or set(value) != members:
+        raise EvidenceError("local lifecycle inputs have invalid members")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["kind"] != LOCAL_EVIDENCE_KIND:
+        raise EvidenceError("local lifecycle inputs have an invalid schema or kind")
+    commit = value["source_commit"]
+    if not isinstance(commit, str) or not COMMIT.fullmatch(commit) or commit != clean_source_commit(repo_root):
+        raise EvidenceError("local lifecycle input source commit does not match clean HEAD")
+    if cell_id not in required_cells(repo_root) or value["cell_id"] != cell_id:
+        raise EvidenceError("local lifecycle input cell identity is invalid")
+    environment_records(repo_root, value["resolved_support_cells"])
+    hashes = validate_hash_list(value["artifact_hashes"], "local artifact hashes")
+    if "0" * 64 in hashes:
+        raise EvidenceError("local artifact hashes must be positive")
+    return value
+
+
+def validate_local_consumer_inputs(
+    repo_root: Path, cell_id: str, artifacts: list[Path], artifact_dir: Path | None,
+    *, version: str | None = None, inputs: Path | None = None, expected_hashes: list[str] | None = None,
+    git_dir: Path | None = None,
+) -> list[str]:
+    commit = clean_source_commit(repo_root)
+    if cell_id not in required_cells(repo_root) or cell_id == "SUP-PG-LINUX-X64-001":
+        raise EvidenceError("local consumer binding requires a client support cell")
+    if artifact_dir is None or not artifact_dir.is_dir():
+        raise EvidenceError("local client binding requires the selected consumer artifact directory")
+    try:
+        source_version = release_artifacts.git_output("-C", str(repo_root), "show", f"{commit}:VERSION").decode().strip()
+        if version is not None and version != source_version:
+            raise EvidenceError("local consumer version does not match source")
+        version = source_version
+        required: list[Path] = []
+        if cell_id.startswith("SUP-RN-"):
+            if (os.environ.get("SYNCHRO_CONSUMER_RESOLUTION") or "prepublication") != "prepublication":
+                raise EvidenceError("local RN consumers require prepublication resolution")
+            if "IOS" in cell_id and os.environ.get("SYNCHRO_PREPUBLICATION_GIT_URL"):
+                raise EvidenceError("local RN iOS rejects an externally supplied Git URL")
+            required.append(artifact_dir / "npm" / f"trainstar-synchro-react-native-{version}.tgz")
+        if "ANDROID" in cell_id:
+            base = artifact_dir / "maven" / "fit/trainstar/synchro" / version / f"synchro-{version}"
+            aar, pom_path, module_path = (Path(str(base) + suffix) for suffix in (".aar", ".pom", ".module"))
+            pom = ElementTree.parse(pom_path).getroot()
+            identity = tuple(pom.findtext(f"{{*}}{field}") for field in ("groupId", "artifactId", "version", "packaging"))
+            if identity != ("fit.trainstar", "synchro", version, "aar"):
+                raise EvidenceError("local consumed Maven POM identity is invalid")
+            required.extend((aar, pom_path))
+            if module_path.exists():
+                module = load_json(module_path, "consumed Gradle module metadata")
+                component = module.get("component") if isinstance(module, dict) else None
+                if not isinstance(component, dict) or tuple(component.get(field) for field in ("group", "module", "version")) != ("fit.trainstar", "synchro", version):
+                    raise EvidenceError("local consumed Gradle module identity is invalid")
+                variants = module.get("variants")
+                if not isinstance(variants, list) or not variants:
+                    raise EvidenceError("local consumed Gradle module variants are missing")
+                for variant in variants:
+                    if not isinstance(variant, dict) or not isinstance(variant.get("attributes"), dict):
+                        raise EvidenceError("local consumed Gradle module variant is invalid")
+                    if variant["attributes"].get("org.gradle.category") == "documentation":
+                        continue
+                    files = variant.get("files")
+                    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict) or files[0].get("name") != aar.name or files[0].get("url") != aar.name:
+                        raise EvidenceError("local Gradle module resolves a foreign artifact")
+                required.append(module_path)
+            elif "published-with-gradle-metadata" in pom_path.read_text():
+                raise EvidenceError("local Maven POM requires missing Gradle module metadata")
+        if "IOS" in cell_id:
+            package = artifact_dir / "apple/Synchro"
+            if any(re.fullmatch(r"package@swift-.*\.swift", entry.name, re.IGNORECASE) for entry in package.iterdir()):
+                raise EvidenceError("local Apple package contains a version-specific Swift manifest")
+            archive_path = artifact_dir / "apple" / f"synchro-spm-{version}.tar.gz"
+            source_tar = release_artifacts.git_output("-C", str(repo_root), "archive", "--format=tar", "--prefix=Synchro/", commit, *release_artifacts.APPLE_SOURCE_PATHS)
+            maps = []
+            for source in (io.BytesIO(source_tar), archive_path):
+                with (tarfile.open(fileobj=source, mode="r:") if isinstance(source, io.BytesIO) else tarfile.open(source, "r:gz")) as archive:
+                    files = {}
+                    seen = set()
+                    for member in archive.getmembers():
+                        name = release_artifacts.safe_relative(member.name.rstrip("/"), "local Apple archive path").as_posix()
+                        if name in seen or not (member.isdir() or member.isfile()):
+                            raise EvidenceError("local Apple archive contains a duplicate or unsupported entry")
+                        seen.add(name)
+                        if member.isfile():
+                            stream = archive.extractfile(member)
+                            assert stream is not None
+                            files[name] = stream.read()
+                    maps.append(files)
+            if maps[0] != maps[1]:
+                raise EvidenceError("local Apple archive does not match clean source")
+            expanded = {}
+            for authored in release_artifacts.APPLE_SOURCE_PATHS:
+                path = package / authored
+                for parent in (path, *path.parents):
+                    if parent == artifact_dir.parent:
+                        break
+                    if parent.is_symlink():
+                        raise EvidenceError("local Apple source uses a foreign linked directory")
+                names = release_artifacts.regular_files(path) if path.is_dir() else [""]
+                for name in names:
+                    file = path / name if name else path
+                    expanded["Synchro/" + file.relative_to(package).as_posix()] = file.read_bytes()
+            if expanded != maps[0]:
+                raise EvidenceError("local expanded Apple sources do not match archive and clean source")
+            required.append(archive_path)
+            if git_dir is not None:
+                tag = release_artifacts.git_output("--git-dir", str(git_dir), "rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}").decode().strip()
+                origin = release_artifacts.git_output("--git-dir", str(git_dir), "config", "--get", "remote.origin.url").decode().strip()
+                bare = release_artifacts.git_output("--git-dir", str(git_dir), "rev-parse", "--is-bare-repository").decode().strip()
+                if tag != commit or origin != str(repo_root.resolve()) or bare != "true":
+                    raise EvidenceError("local RN Git clone does not bind the clean source and candidate tag")
+        if not artifacts or len(artifacts) != len(required) or {path.resolve() for path in artifacts} != {path.resolve() for path in required}:
+            raise EvidenceError("local artifact list does not identify the selected consumer files")
+        root = artifact_dir.resolve()
+        if any(not path.is_file() or path.stat().st_size == 0 or not path.resolve().is_relative_to(root) for path in required):
+            raise EvidenceError("local consumer files are missing, empty, or foreign")
+        hashes = hash_files(required)
+        if inputs is not None:
+            local = validate_local_inputs(repo_root, load_json(inputs, "local lifecycle inputs"), cell_id)
+            if sorted(hashes) != sorted(local["artifact_hashes"]):
+                raise EvidenceError("consumed local artifact hashes do not match prepared inputs")
+        if expected_hashes is not None and sorted(hashes) != sorted(validate_hash_list(expected_hashes, "expected artifact hashes")):
+            raise EvidenceError("consumed local artifact hashes do not match expected hashes")
+        return hashes
+    except (OSError, UnicodeError, ElementTree.ParseError, tarfile.TarError, release_artifacts.ReleaseError) as error:
+        raise EvidenceError(f"local consumer input binding failed: {error}") from error
+
+
+def prepare_local_cell(repo_root: Path, cell_id: str, environments: Path, artifacts: list[Path], output: Path,
+                       *, artifact_dir: Path | None = None) -> None:
+    commit = clean_source_commit(repo_root)
+    resolved = environment_records(repo_root, load_json(environments, "authoritative support environments"))
+    if not artifacts or any(not path.is_file() or path.stat().st_size == 0 for path in artifacts):
+        raise EvidenceError("local lifecycle preparation requires real nonempty artifact files")
+    hashes = hash_files(artifacts) if cell_id == "SUP-PG-LINUX-X64-001" else validate_local_consumer_inputs(repo_root, cell_id, artifacts, artifact_dir)
+    value = {
+        "schema_version": 1, "kind": LOCAL_EVIDENCE_KIND, "source_commit": commit, "cell_id": cell_id,
+        "resolved_support_cells": resolved, "artifact_hashes": hashes,
+    }
+    validate_local_inputs(repo_root, value, cell_id)
+    write_json(output, value)
+
+
 def completion_environment(
-    repo_root: Path, cell_id: str, initial_path: Path, resume_path: Path, manifest_path: Path,
+    repo_root: Path, cell_id: str, initial_path: Path, resume_path: Path, manifest_path: Path | None = None,
+    local_inputs: Path | None = None, artifact_hashes: list[str] | None = None,
 ) -> dict[str, str]:
+    if (manifest_path is None) == (local_inputs is None):
+        raise EvidenceError("exactly one of release-manifest or local-inputs is required")
+    if local_inputs is not None:
+        local = validate_local_inputs(repo_root, load_json(local_inputs, "local lifecycle inputs"), cell_id)
+        if sorted(local["artifact_hashes"]) != sorted(artifact_hashes or []):
+            raise EvidenceError("actual artifact hashes do not match local inputs")
+        selected = local["resolved_support_cells"]
+    else:
+        selected = manifest_environments(repo_root, load_json(manifest_path, "sealed release manifest"))
     measured = []
     for label, path in (("initial", initial_path), ("resume", resume_path)):
         records = environment_records(repo_root, [load_json(path, f"{label} measured environment")], complete=False)
@@ -796,12 +972,12 @@ def completion_environment(
         if record["id"] != cell_id:
             raise EvidenceError(f"{label} measured environment has the wrong cell ID")
         measured.append(record)
-    selected = manifest_environments(repo_root, load_json(manifest_path, "sealed release manifest"))
     if measured[0] != measured[1]:
         raise EvidenceError("initial and resume measured environments differ")
     expected = next(record for record in selected if record["id"] == cell_id)
     if measured[0] != expected:
-        raise EvidenceError("measured environment does not match sealed manifest")
+        raise EvidenceError("measured environment does not match local inputs" if local_inputs is not None
+                            else "measured environment does not match sealed manifest")
     return measured[0]["environment"]
 
 
@@ -818,7 +994,9 @@ def complete_cell(
     server_path: Path,
     initial_environment_path: Path,
     resume_environment_path: Path,
-    release_manifest: Path,
+    release_manifest: Path | None = None,
+    *, local_inputs: Path | None = None, artifact_dir: Path | None = None,
+    version: str | None = None, git_dir: Path | None = None,
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
@@ -857,14 +1035,22 @@ def complete_cell(
         raise EvidenceError("packaged smoke cell has no packaged artifact hash")
     expected = validate_hash_list(expected_hashes, "expected artifact hashes")
     if sorted(hashes) != sorted(expected):
-        raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
-    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path, release_manifest)
+        raise EvidenceError("packaged smoke artifact hashes do not match expected artifact hashes" if local_inputs is not None
+                            else "packaged smoke artifact hashes do not match sealed artifact hashes")
+    if local_inputs is not None:
+        if cell_id.startswith("SUP-RN-IOS-") and git_dir is None:
+            raise EvidenceError("local RN iOS completion requires its default bare clone")
+        validate_local_consumer_inputs(repo_root, cell_id, artifacts, artifact_dir, version=version,
+                                       inputs=local_inputs, expected_hashes=expected, git_dir=git_dir)
+    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path,
+                                         release_manifest, local_inputs, hashes)
     write_json(
         output,
         {
             "schema_version": CELL_SCHEMA_VERSION,
             "cell_id": cell_id,
             "source_commit": source_commit(repo_root),
+            **({"evidence_kind": LOCAL_EVIDENCE_KIND} if local_inputs is not None else {}),
             "status": "passed",
             "artifact_hashes": hashes,
             "operations": operation_entries("passed", 1),
@@ -903,7 +1089,8 @@ def complete_server_cell(
     repo_root: Path, cell_id: str, output: Path, initial_path: Path, resume_path: Path,
     killed_pid: int, artifacts: list[Path], expected_hashes: list[str], remote_path: Path,
     server_path: Path, initial_environment_path: Path, resume_environment_path: Path,
-    release_manifest: Path,
+    release_manifest: Path | None = None,
+    *, local_inputs: Path | None = None,
 ) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
@@ -921,14 +1108,17 @@ def complete_server_cell(
         raise EvidenceError("server replay digest differs from the persisted push")
     hashes = hash_files(artifacts)
     if sorted(hashes) != sorted(validate_hash_list(expected_hashes, "expected artifact hashes")):
-        raise EvidenceError("packaged smoke artifact hashes do not match sealed artifact hashes")
-    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path, release_manifest)
+        raise EvidenceError("packaged smoke artifact hashes do not match expected artifact hashes" if local_inputs is not None
+                            else "packaged smoke artifact hashes do not match sealed artifact hashes")
+    environment = completion_environment(repo_root, cell_id, initial_environment_path, resume_environment_path,
+                                         release_manifest, local_inputs, hashes)
     write_json(
         output,
         {
             "schema_version": CELL_SCHEMA_VERSION,
             "cell_id": cell_id,
             "source_commit": source_commit(repo_root),
+            **({"evidence_kind": LOCAL_EVIDENCE_KIND} if local_inputs is not None else {}),
             "status": "passed",
             "artifact_hashes": hashes,
             "operations": operation_entries("passed", 1),
@@ -960,7 +1150,7 @@ def validate_hash_list(value: object, field: str, allow_empty: bool = False) -> 
     return result
 
 
-def validate_cell(value: object, expected_cell: str, expected_commit: str) -> dict[str, object]:
+def validate_cell(value: object, expected_cell: str, expected_commit: str, *, local: bool = False) -> dict[str, object]:
     if not isinstance(value, dict):
         raise EvidenceError(f"cell {expected_cell} evidence must be an object")
     if value.get("schema_version") != CELL_SCHEMA_VERSION:
@@ -983,6 +1173,10 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
     }
     if status == "passed" or "environment" in value:
         expected_members.add("environment")
+    if local:
+        expected_members.add("evidence_kind")
+        if value.get("evidence_kind") != LOCAL_EVIDENCE_KIND:
+            raise EvidenceError(f"cell {expected_cell} does not contain local source-artifact evidence")
     if set(value) != expected_members:
         raise EvidenceError(f"cell {expected_cell} has invalid members")
     try:
@@ -1059,6 +1253,26 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str) -> di
     if environment is not None:
         result["environment"] = environment
     return result
+
+
+def verify_local_cell(
+    repo_root: Path, cell_id: str, inputs: Path, cell_path: Path, artifacts: list[Path], expected_hashes: list[str],
+    *, artifact_dir: Path | None = None, version: str | None = None,
+) -> None:
+    local = validate_local_inputs(repo_root, load_json(inputs, "local lifecycle inputs"), cell_id)
+    cell = validate_cell(load_json(cell_path, "local completed cell"), cell_id, clean_source_commit(repo_root), local=True)
+    if cell["status"] != "passed":
+        raise EvidenceError("local lifecycle cell did not pass")
+    hashes = hash_files(artifacts)
+    expected = validate_hash_list(expected_hashes, "expected artifact hashes")
+    if cell_id != "SUP-PG-LINUX-X64-001":
+        validate_local_consumer_inputs(repo_root, cell_id, artifacts, artifact_dir, version=version,
+                                       inputs=inputs, expected_hashes=expected)
+    if any(sorted(value) != sorted(local["artifact_hashes"]) for value in (hashes, expected, cell["artifact_hashes"])):
+        raise EvidenceError("local lifecycle artifact hashes differ")
+    selected = next(record for record in local["resolved_support_cells"] if record["id"] == cell_id)
+    if cell.get("environment") != selected["environment"]:
+        raise EvidenceError("local completed cell environment does not match local inputs")
 
 
 def missing_cell(cell_id: str) -> dict[str, object]:
@@ -1442,7 +1656,12 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--server-verification", type=Path, required=True)
     complete.add_argument("--initial-environment", type=Path, required=True)
     complete.add_argument("--resume-environment", type=Path, required=True)
-    complete.add_argument("--release-manifest", type=Path, required=True)
+    complete_input = complete.add_mutually_exclusive_group(required=True)
+    complete_input.add_argument("--release-manifest", type=Path)
+    complete_input.add_argument("--local-inputs", type=Path)
+    complete.add_argument("--artifact-dir", type=Path)
+    complete.add_argument("--version")
+    complete.add_argument("--git-dir", type=Path)
 
     author = subparsers.add_parser("author-remote")
     author.add_argument("--config", type=Path, required=True)
@@ -1463,7 +1682,37 @@ def parse_args() -> argparse.Namespace:
     server_complete.add_argument("--server-verification", type=Path, required=True)
     server_complete.add_argument("--initial-environment", type=Path, required=True)
     server_complete.add_argument("--resume-environment", type=Path, required=True)
-    server_complete.add_argument("--release-manifest", type=Path, required=True)
+    server_input = server_complete.add_mutually_exclusive_group(required=True)
+    server_input.add_argument("--release-manifest", type=Path)
+    server_input.add_argument("--local-inputs", type=Path)
+
+    prepare_local = subparsers.add_parser("prepare-local-cell")
+    prepare_local.add_argument("--repo-root", type=Path, required=True)
+    prepare_local.add_argument("--cell", required=True)
+    prepare_local.add_argument("--support-environments", type=Path, required=True)
+    prepare_local.add_argument("--artifact", action="append", type=Path, required=True)
+    prepare_local.add_argument("--output", type=Path, required=True)
+    prepare_local.add_argument("--artifact-dir", type=Path)
+
+    bind_local = subparsers.add_parser("validate-local-consumer-inputs")
+    bind_local.add_argument("--repo-root", type=Path, required=True)
+    bind_local.add_argument("--cell", required=True)
+    bind_local.add_argument("--local-inputs", type=Path, required=True)
+    bind_local.add_argument("--artifact-dir", type=Path, required=True)
+    bind_local.add_argument("--artifact", action="append", type=Path, required=True)
+    bind_local.add_argument("--expected-artifact-hash", action="append", required=True)
+    bind_local.add_argument("--version")
+    bind_local.add_argument("--git-dir", type=Path)
+
+    verify_local = subparsers.add_parser("verify-local-cell")
+    verify_local.add_argument("--repo-root", type=Path, required=True)
+    verify_local.add_argument("--cell", required=True)
+    verify_local.add_argument("--local-inputs", type=Path, required=True)
+    verify_local.add_argument("--cell-result", type=Path, required=True)
+    verify_local.add_argument("--artifact", action="append", type=Path, required=True)
+    verify_local.add_argument("--expected-artifact-hash", action="append", required=True)
+    verify_local.add_argument("--artifact-dir", type=Path)
+    verify_local.add_argument("--version")
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--repo-root", type=Path, required=True)
@@ -1531,7 +1780,10 @@ def main() -> int:
                 args.server_verification.resolve(),
                 args.initial_environment.resolve(),
                 args.resume_environment.resolve(),
-                args.release_manifest.resolve(),
+                args.release_manifest.resolve() if args.release_manifest is not None else None,
+                local_inputs=args.local_inputs.resolve() if args.local_inputs is not None else None,
+                artifact_dir=args.artifact_dir.absolute() if args.artifact_dir is not None else None,
+                version=args.version, git_dir=args.git_dir.resolve() if args.git_dir is not None else None,
             )
         elif args.command == "author-remote":
             author_remote_value(args.config.resolve(), args.output.resolve())
@@ -1542,8 +1794,24 @@ def main() -> int:
                 args.repo_root.resolve(), args.cell, args.output.resolve(), args.initial.resolve(),
                 args.resume.resolve(), args.killed_pid, [path.resolve() for path in args.artifact],
                 args.expected_artifact_hash, args.remote.resolve(), args.server_verification.resolve(),
-                args.initial_environment.resolve(), args.resume_environment.resolve(), args.release_manifest.resolve(),
+                args.initial_environment.resolve(), args.resume_environment.resolve(),
+                args.release_manifest.resolve() if args.release_manifest is not None else None,
+                local_inputs=args.local_inputs.resolve() if args.local_inputs is not None else None,
             )
+        elif args.command == "prepare-local-cell":
+            prepare_local_cell(args.repo_root.resolve(), args.cell, args.support_environments.resolve(),
+                               [path.absolute() for path in args.artifact], args.output.resolve(),
+                               artifact_dir=args.artifact_dir.absolute() if args.artifact_dir is not None else None)
+        elif args.command == "validate-local-consumer-inputs":
+            validate_local_consumer_inputs(args.repo_root.resolve(), args.cell, [path.absolute() for path in args.artifact],
+                                          args.artifact_dir.absolute(), version=args.version, inputs=args.local_inputs.resolve(),
+                                          expected_hashes=args.expected_artifact_hash,
+                                          git_dir=args.git_dir.resolve() if args.git_dir is not None else None)
+        elif args.command == "verify-local-cell":
+            verify_local_cell(args.repo_root.resolve(), args.cell, args.local_inputs.resolve(), args.cell_result.resolve(),
+                              [path.absolute() for path in args.artifact], args.expected_artifact_hash,
+                              artifact_dir=args.artifact_dir.absolute() if args.artifact_dir is not None else None,
+                              version=args.version)
         elif args.command == "collect":
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":

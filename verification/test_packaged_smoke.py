@@ -7,6 +7,9 @@ import copy
 import base64
 import hashlib
 import hmac
+import gzip
+import io
+import itertools
 import json
 import os
 import re
@@ -14,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import unittest
 import urllib.error
@@ -127,6 +131,397 @@ adb_command() {
                     self.assertNotIn(secret, evidence.read_text())
                     self.assertNotIn(secret, run.stdout + run.stderr)
                 self.assertLess(evidence.stat().st_size, 2048)
+
+    def consumer_artifacts(self, directory: Path, cell: str) -> list[Path]:
+        directory.mkdir(parents=True, exist_ok=True)
+        version = (REPO_ROOT / "VERSION").read_text().strip()
+        files = []
+        if cell.startswith("SUP-RN-"):
+            npm = directory / "npm" / f"trainstar-synchro-react-native-{version}.tgz"
+            npm.parent.mkdir(parents=True, exist_ok=True)
+            npm.write_bytes(b"authored npm fixture")
+            files.append(npm)
+        if "ANDROID" in cell:
+            base = directory / "maven/fit/trainstar/synchro" / version / f"synchro-{version}"
+            base.parent.mkdir(parents=True, exist_ok=True)
+            aar, pom, module = (Path(str(base) + suffix) for suffix in (".aar", ".pom", ".module"))
+            aar.write_bytes(b"authored AAR fixture")
+            pom.write_text(f"<project><groupId>fit.trainstar</groupId><artifactId>synchro</artifactId><version>{version}</version><packaging>aar</packaging></project>")
+            packaged_smoke.write_json(module, {"formatVersion": "1.1",
+                "component": {"group": "fit.trainstar", "module": "synchro", "version": version},
+                "variants": [{"name": "releaseRuntimeElements", "attributes": {"org.gradle.category": "library"},
+                              "files": [{"name": aar.name, "url": aar.name}]}]})
+            files.extend((aar, pom, module))
+        if "IOS" in cell:
+            data = packaged_smoke.release_artifacts.git_output("-C", str(REPO_ROOT), "archive", "--format=tar", "--prefix=Synchro/", "HEAD", *packaged_smoke.release_artifacts.APPLE_SOURCE_PATHS)
+            apple = directory / "apple"
+            apple.mkdir()
+            archive_path = apple / f"synchro-spm-{version}.tar.gz"
+            archive_path.write_bytes(gzip.compress(data, mtime=0))
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+                for member in archive.getmembers():
+                    if member.isfile():
+                        path = apple / member.name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(archive.extractfile(member).read())
+            files.append(archive_path)
+        return files
+
+    def local_inputs(self, directory: Path, arguments: tuple) -> Path:
+        environments = directory / "expected-environments.json"
+        output = directory / "local-inputs.json"
+        packaged_smoke.write_json(environments, selected_environments())
+        if arguments[1] != "SUP-PG-LINUX-X64-001":
+            arguments[6][:] = self.consumer_artifacts(directory / "consumer", arguments[1])
+            arguments[7][:] = packaged_smoke.hash_files(arguments[6])
+        if arguments[1].startswith("SUP-RN-IOS-"):
+            subprocess.run(["git", "clone", "--bare", "--quiet", str(REPO_ROOT), str(directory / "source.git")], check=True)
+            subprocess.run(["git", "--git-dir", str(directory / "source.git"), "tag", "-f", "v" + (REPO_ROOT / "VERSION").read_text().strip(), packaged_smoke.source_commit(REPO_ROOT)], check=True, capture_output=True)
+        packaged_smoke.prepare_local_cell(REPO_ROOT, arguments[1], environments, arguments[6], output,
+                                          artifact_dir=directory / "consumer")
+        return output
+
+    def local_completion_options(self, arguments: tuple) -> dict:
+        if arguments[1] == "SUP-PG-LINUX-X64-001":
+            return {}
+        options = {"artifact_dir": arguments[2].parent / "consumer"}
+        if arguments[1].startswith("SUP-RN-IOS-"):
+            options["git_dir"] = arguments[2].parent / "source.git"
+        return options
+
+    def test_prepared_a_cannot_certify_consumed_b_for_each_client_path(self) -> None:
+        for cell in ("SUP-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-RN-ANDROID-MIN-001", "SUP-RN-IOS-CURRENT-001"):
+            with self.subTest(cell=cell), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, cell)
+                inputs = self.local_inputs(root, arguments)
+                other = root / "other-consumer"
+                other_files = self.consumer_artifacts(other, cell)
+                version = (REPO_ROOT / "VERSION").read_text().strip()
+                if cell.startswith("SUP-RN-"):
+                    command = ["sh", str(REPO_ROOT / "verification/consumers/react-native/test-consumer.sh"), "android" if "ANDROID" in cell else "ios", str(other), version]
+                elif "ANDROID" in cell:
+                    command = ["sh", str(REPO_ROOT / "verification/consumers/kotlin/test-consumer-device.sh"), str(REPO_ROOT), str(other), cell, str(arguments[2]), version]
+                else:
+                    command = ["sh", str(REPO_ROOT / "verification/consumers/swift-ios/test-consumer.sh"), str(other)]
+                blocked = root / "blocked-commands"
+                blocked.mkdir()
+                calls = root / "native-command-called"
+                for name in ("xcodebuild", "xcrun", "npx", "npm", "adb"):
+                    executable = blocked / name
+                    executable.write_text(f'#!/bin/sh\nprintf called > "{calls}"\nexit 99\n')
+                    executable.chmod(0o700)
+                environment = {**os.environ, "PACKAGED_SMOKE_CELL_ID": cell, "PACKAGED_SMOKE_CELL_RESULT": str(arguments[2]),
+                               "PACKAGED_SMOKE_LOCAL_INPUTS": str(inputs), "PACKAGED_SMOKE_RELEASE_MANIFEST": "",
+                               "PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS": " ".join(map(str, arguments[6])),
+                               "PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES": " ".join(arguments[7]),
+                               "IOS_SIMULATOR_UDID": "must-not-reach-device", "SYNCHRO_CONSUMER_RESOLUTION": "prepublication",
+                               "SYNCHRO_PREPUBLICATION_GIT_URL": "", "PATH": str(blocked) + os.pathsep + os.environ["PATH"]}
+                result = subprocess.run(command, env=environment, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("selected consumer files", result.stderr)
+                self.assertFalse(calls.exists())
+                self.assertFalse(arguments[2].exists())
+                options = self.local_completion_options(arguments)
+                options["artifact_dir"] = other
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "selected consumer files"):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **options)
+                self.assertFalse(arguments[2].exists())
+                packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.verify_local_cell(REPO_ROOT, cell, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=other)
+                if "ANDROID" in cell:
+                    aar = next(path for path in other_files if path.suffix == ".aar")
+                    aar.write_bytes(b"different consumed SDK")
+                    with self.assertRaisesRegex(packaged_smoke.EvidenceError, "prepared inputs"):
+                        packaged_smoke.validate_local_consumer_inputs(REPO_ROOT, cell, other_files, other, inputs=inputs)
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.prepare_local_cell(REPO_ROOT, cell, root / "expected-environments.json", arguments[6], root / "bad-inputs.json")
+
+    def test_consumed_maven_metadata_changes_fail_before_execution_and_completion(self) -> None:
+        for suffix in (".pom", ".module"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, "SUP-ANDROID-MIN-001")
+                inputs = self.local_inputs(root, arguments)
+                metadata = next(path for path in arguments[6] if path.suffix == suffix)
+                if suffix == ".pom":
+                    metadata.write_text(metadata.read_text().replace("</project>", "<description>changed metadata</description></project>"))
+                else:
+                    value = packaged_smoke.load_json(metadata, "module")
+                    value["variants"][0]["dependencies"] = [{"group": "example.foreign", "module": "changed", "version": {"requires": "1.0"}}]
+                    packaged_smoke.write_json(metadata, value)
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "prepared inputs"):
+                    packaged_smoke.validate_local_consumer_inputs(REPO_ROOT, arguments[1], arguments[6], root / "consumer", inputs=inputs)
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                self.assertFalse(arguments[2].exists())
+
+    def test_version_specific_manifest_rejects_unchanged_archive_before_native_completion_and_verification(self) -> None:
+        cells = ("SUP-IOS-CURRENT-001", "SUP-RN-IOS-CURRENT-001")
+        manifests = ("Package@swift-6.0.swift", "package@swift-6.swift", "PACKAGE@SWIFT-6.SWIFT")
+        for cell, manifest in itertools.product(cells, manifests):
+            with self.subTest(cell=cell, manifest=manifest), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, cell)
+                inputs = self.local_inputs(root, arguments)
+                original_inputs = inputs.read_bytes()
+                self.assertEqual(len(arguments[6]), 2 if cell.startswith("SUP-RN-") else 1)
+                options = self.local_completion_options(arguments)
+                packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **options)
+                retained = root / "retained-cell.json"
+                retained.write_bytes(arguments[2].read_bytes())
+                arguments[2].unlink()
+                packaged_smoke.verify_local_cell(REPO_ROOT, cell, inputs, retained, arguments[6], arguments[7], artifact_dir=root / "consumer")
+
+                package = root / "consumer/apple/Synchro"
+                (package / manifest).write_text(
+                    '// swift-tools-version: 6.0\n'
+                    'import PackageDescription\n'
+                    'let package = Package(name: "Synchro", products: [.library(name: "Synchro", targets: ["Synchro"])], '
+                    'targets: [.target(name: "Synchro", path: "AlternateSources")])\n'
+                )
+                alternate = package / "AlternateSources"
+                alternate.mkdir()
+                (alternate / "Foreign.swift").write_text('public enum ForeignImplementation {}\n')
+                self.assertEqual(inputs.read_bytes(), original_inputs)
+                self.assertEqual(packaged_smoke.hash_files(arguments[6]), arguments[7])
+                rejected_preparation = root / "rejected-inputs.json"
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "version-specific Swift manifest"):
+                    packaged_smoke.prepare_local_cell(REPO_ROOT, cell, root / "expected-environments.json",
+                                                      arguments[6], rejected_preparation, artifact_dir=root / "consumer")
+                self.assertFalse(rejected_preparation.exists())
+
+                blocked = root / "blocked-commands"
+                blocked.mkdir()
+                calls = root / "native-command-called"
+                for name in ("xcodebuild", "xcrun", "npx", "npm", "adb"):
+                    executable = blocked / name
+                    executable.write_text(f'#!/bin/sh\nprintf called > "{calls}"\nexit 99\n')
+                    executable.chmod(0o700)
+                environment = {**os.environ, "PACKAGED_SMOKE_CELL_ID": cell, "PACKAGED_SMOKE_CELL_RESULT": str(arguments[2]),
+                               "PACKAGED_SMOKE_LOCAL_INPUTS": str(inputs), "PACKAGED_SMOKE_RELEASE_MANIFEST": "",
+                               "PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS": " ".join(map(str, arguments[6])),
+                               "PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES": " ".join(arguments[7]),
+                               "IOS_SIMULATOR_UDID": "must-not-reach-device", "SYNCHRO_CONSUMER_RESOLUTION": "prepublication",
+                               "SYNCHRO_PREPUBLICATION_GIT_URL": "", "PATH": str(blocked) + os.pathsep + os.environ["PATH"]}
+                if cell.startswith("SUP-RN-"):
+                    command = ["sh", str(REPO_ROOT / "verification/consumers/react-native/test-consumer.sh"), "ios", str(root / "consumer"), (REPO_ROOT / "VERSION").read_text().strip()]
+                else:
+                    command = ["sh", str(REPO_ROOT / "verification/consumers/swift-ios/test-consumer.sh"), str(root / "consumer")]
+                result = subprocess.run(command, env=environment, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("version-specific Swift manifest", result.stderr)
+                self.assertFalse(calls.exists())
+                self.assertFalse(arguments[2].exists())
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "version-specific Swift manifest"):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **options)
+                self.assertFalse(arguments[2].exists())
+                with self.assertRaisesRegex(packaged_smoke.EvidenceError, "version-specific Swift manifest"):
+                    packaged_smoke.verify_local_cell(REPO_ROOT, cell, inputs, retained, arguments[6], arguments[7], artifact_dir=root / "consumer")
+
+    def test_expanded_apple_changes_and_wrong_rn_git_resolution_fail_closed(self) -> None:
+        for mutation in ("expanded", "extra-source", "archive", "public", "external-git", "wrong-tag", "foreign-origin"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, "SUP-RN-IOS-CURRENT-001")
+                inputs = self.local_inputs(root, arguments)
+                if mutation == "expanded":
+                    (root / "consumer/apple/Synchro/Package.swift").write_text("foreign package sources")
+                elif mutation == "extra-source":
+                    (root / "consumer/apple/Synchro/clients/swift/Sources/Foreign.swift").write_text("foreign source")
+                elif mutation == "archive":
+                    next(path for path in arguments[6] if path.name.endswith(".tar.gz")).write_bytes(b"foreign archive")
+                elif mutation == "wrong-tag":
+                    subprocess.run(["git", "--git-dir", str(root / "source.git"), "tag", "-f", "v" + (REPO_ROOT / "VERSION").read_text().strip(), "HEAD~1"], check=True, capture_output=True)
+                elif mutation == "foreign-origin":
+                    subprocess.run(["git", "--git-dir", str(root / "source.git"), "config", "remote.origin.url", str(root / "foreign.git")], check=True)
+                inherited = {"SYNCHRO_CONSUMER_RESOLUTION": "public"} if mutation == "public" else {"SYNCHRO_PREPUBLICATION_GIT_URL": "file:///foreign.git"} if mutation == "external-git" else {}
+                with mock.patch.dict(os.environ, inherited), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                self.assertFalse(arguments[2].exists())
+
+    def test_local_client_and_server_complete_same_lifecycle_but_not_sealed_receipts(self) -> None:
+        for cell_id in ("SUP-PG-LINUX-X64-001", "SUP-RN-IOS-CURRENT-001"):
+            with self.subTest(cell=cell_id), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, cell_id)
+                inputs = self.local_inputs(root, arguments)
+                complete = packaged_smoke.complete_server_cell if cell_id == "SUP-PG-LINUX-X64-001" else packaged_smoke.complete_cell
+                complete(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                cell = packaged_smoke.load_json(arguments[2], "local cell")
+                self.assertEqual(cell["evidence_kind"], "local-source-artifacts")
+                self.assertEqual(cell["environment"], measured_environment(cell_id))
+                self.assertEqual(cell["process_lifecycle"]["kill_signal"], 9)
+                self.assertEqual(len(cell["operations"]), 5)
+                packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=root / "consumer")
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.validate_cell(cell, cell_id, packaged_smoke.source_commit(REPO_ROOT))
+                cells = root / "cells"
+                packaged_smoke.write_json(cells / f"{cell_id}.json", cell)
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.collect_summary(REPO_ROOT, cells, root / "sealed-summary.json")
+
+    def test_local_input_closed_schema_source_cell_environments_and_hashes_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = self.completion_arguments(root, "SUP-IOS-CURRENT-001")
+            inputs = self.local_inputs(root, arguments)
+            original = packaged_smoke.load_json(inputs, "local inputs")
+            self.assertEqual(set(original), {"schema_version", "kind", "source_commit", "cell_id",
+                                             "resolved_support_cells", "artifact_hashes"})
+            for mutation in ("extra", "missing", "schema", "boolean-schema", "kind", "source", "malformed-source",
+                             "cell", "missing-cell", "duplicate-cell", "unknown-environment-field",
+                             "empty-hashes", "duplicate-hashes", "zero-hash", "malformed-hash"):
+                bad = copy.deepcopy(original)
+                if mutation == "extra":
+                    bad["candidate_ci_run"] = 1
+                elif mutation == "missing":
+                    del bad["kind"]
+                elif mutation in {"schema", "boolean-schema"}:
+                    bad["schema_version"] = 2 if mutation == "schema" else True
+                elif mutation == "kind":
+                    bad["kind"] = "release-manifest"
+                elif mutation in {"source", "malformed-source"}:
+                    bad["source_commit"] = "a" * 40 if mutation == "source" else "HEAD"
+                elif mutation == "cell":
+                    bad["cell_id"] = "SUP-IOS-MIN-001"
+                elif mutation == "missing-cell":
+                    bad["resolved_support_cells"].pop()
+                elif mutation == "duplicate-cell":
+                    bad["resolved_support_cells"].append(copy.deepcopy(bad["resolved_support_cells"][0]))
+                elif mutation == "unknown-environment-field":
+                    bad["resolved_support_cells"][0]["environment"]["unknown"] = "1"
+                elif mutation == "empty-hashes":
+                    bad["artifact_hashes"] = []
+                elif mutation == "duplicate-hashes":
+                    bad["artifact_hashes"] *= 2
+                else:
+                    bad["artifact_hashes"] = ["0" * 64 if mutation == "zero-hash" else "not-a-hash"]
+                packaged_smoke.write_json(inputs, bad)
+                with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                self.assertFalse(arguments[2].exists())
+            with mock.patch.object(packaged_smoke.subprocess, "check_output", side_effect=[
+                packaged_smoke.source_commit(REPO_ROOT) + "\n", " M source.py\n",
+            ]), self.assertRaises(packaged_smoke.EvidenceError):
+                packaged_smoke.clean_source_commit(REPO_ROOT)
+
+    def test_local_preparation_requires_complete_resolution_and_actual_nonempty_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environments = root / "support.json"
+            packaged_smoke.write_json(environments, selected_environments())
+            artifact = root / "artifact"
+            artifact.write_bytes(b"actual source-built fixture bytes")
+            output = root / "local.json"
+            packaged_smoke.prepare_local_cell(REPO_ROOT, "SUP-PG-LINUX-X64-001", environments, [artifact], output)
+            value = packaged_smoke.load_json(output, "local inputs")
+            self.assertEqual(value["artifact_hashes"], [hashlib.sha256(artifact.read_bytes()).hexdigest()])
+            output.unlink()
+            for files in ([], [root / "missing"], [root]):
+                with self.subTest(files=files), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.prepare_local_cell(REPO_ROOT, "SUP-PG-LINUX-X64-001", environments, files, output)
+            artifact.write_bytes(b"")
+            with self.assertRaises(packaged_smoke.EvidenceError):
+                packaged_smoke.prepare_local_cell(REPO_ROOT, "SUP-PG-LINUX-X64-001", environments, [artifact], output)
+            packaged_smoke.write_json(environments, selected_environments()[:-1])
+            with self.assertRaises(packaged_smoke.EvidenceError):
+                packaged_smoke.prepare_local_cell(REPO_ROOT, "SUP-PG-LINUX-X64-001", environments, [artifact], output)
+            self.assertFalse(output.exists())
+
+    def test_local_completion_and_verification_reject_environment_hash_and_lifecycle_changes(self) -> None:
+        for cell_id in ("SUP-PG-LINUX-X64-001", "SUP-IOS-CURRENT-001"):
+            with self.subTest(cell=cell_id), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, cell_id)
+                inputs = self.local_inputs(root, arguments)
+                complete = packaged_smoke.complete_server_cell if cell_id == "SUP-PG-LINUX-X64-001" else packaged_smoke.complete_cell
+                complete(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                original = packaged_smoke.load_json(arguments[2], "local cell")
+                for mutation in ("environment", "hash", "zero-operation", "source", "cell", "kind", "failure"):
+                    bad = copy.deepcopy(original)
+                    if mutation == "environment":
+                        field = "postgresql" if cell_id == "SUP-PG-LINUX-X64-001" else "ios"
+                        bad["environment"][field] = "18.4" if field == "postgresql" else "27.0.1"
+                    elif mutation == "hash":
+                        bad["artifact_hashes"] = ["f" * 64]
+                    elif mutation == "zero-operation":
+                        bad["operations"][0]["test_count"] = 0
+                    elif mutation == "source":
+                        bad["source_commit"] = "a" * 40
+                    elif mutation == "cell":
+                        bad["cell_id"] = "SUP-IOS-MIN-001"
+                    elif mutation == "kind":
+                        bad["evidence_kind"] = "sealed"
+                    else:
+                        bad["status"] = "failed"
+                        bad["failure"] = "consumer failed"
+                        del bad["process_lifecycle"]
+                        bad["operations"] = packaged_smoke.operation_entries("failed", 0)
+                    packaged_smoke.write_json(arguments[2], bad)
+                    with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                        packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=root / "consumer")
+                packaged_smoke.write_json(arguments[2], original)
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], ["f" * 64], artifact_dir=root / "consumer")
+                arguments[6][0].write_bytes(b"changed artifact bytes after preparation")
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=root / "consumer")
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    complete(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+
+    def test_local_completion_rejects_changed_independent_measurements_and_input_hash(self) -> None:
+        for change in ("initial", "both", "input-hash"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                arguments = self.completion_arguments(root, "SUP-IOS-CURRENT-001")
+                inputs = self.local_inputs(root, arguments)
+                if change == "input-hash":
+                    value = packaged_smoke.load_json(inputs, "inputs")
+                    value["artifact_hashes"] = ["f" * 64]
+                    packaged_smoke.write_json(inputs, value)
+                else:
+                    for path in arguments[10:12] if change == "both" else arguments[10:11]:
+                        value = packaged_smoke.load_json(path, "measurement")
+                        value["environment"]["ios"] = "27.0.1"
+                        packaged_smoke.write_json(path, value)
+                with self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.complete_cell(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
+                self.assertFalse(arguments[2].exists())
+
+    def test_cli_and_consumer_boundaries_reject_missing_or_both_explicit_inputs_before_execution(self) -> None:
+        scripts = REPO_ROOT / "verification/consumers"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = root / "input.json"
+            record.write_text("{}")
+            commands = [
+                ["sh", str(scripts / "swift-ios/test-consumer.sh"), str(root)],
+                ["sh", str(scripts / "kotlin/test-consumer-device.sh"), str(REPO_ROOT), str(root), "SUP-ANDROID-MIN-001", str(root / "cell.json"), "0.4.0-rc.2"],
+                ["sh", str(scripts / "react-native/test-consumer.sh"), "ios", str(root), "0.4.0-rc.2"],
+                ["sh", str(scripts / "server/test-consumer.sh"), *([str(root)] * 10)],
+            ]
+            for both in (False, True):
+                environment = {**os.environ, "PACKAGED_SMOKE_CELL_ID": "SUP-IOS-MIN-001",
+                               "PACKAGED_SMOKE_CELL_RESULT": str(root / "cell.json"),
+                               "PACKAGED_SMOKE_RELEASE_MANIFEST": str(record) if both else "",
+                               "PACKAGED_SMOKE_LOCAL_INPUTS": str(record) if both else ""}
+                for command in commands:
+                    with self.subTest(command=command[1], both=both):
+                        result = subprocess.run(command, env=environment, capture_output=True, text=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("exactly one", result.stderr)
+                for command in ("complete-cell", "complete-server-cell"):
+                    args = [sys.executable, str(REPO_ROOT / "verification/packaged_smoke.py"), command,
+                            "--cell", "SUP-IOS-MIN-001", "--killed-pid", "101"]
+                    for flag in ("--repo-root", "--output", "--initial", "--resume", "--remote", "--server-verification",
+                                 "--initial-environment", "--resume-environment"):
+                        args.extend([flag, str(root)])
+                    if both:
+                        args.extend(["--release-manifest", str(record), "--local-inputs", str(record)])
+                    result = subprocess.run(args, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
 
     def test_all_completed_profiles_retain_independent_measurements(self) -> None:
         for cell_id in packaged_smoke.required_cells(REPO_ROOT):
