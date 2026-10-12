@@ -420,9 +420,10 @@ require(${JSON.stringify(clean)}).commands.clean.func([], {}, {include: 'metro',
       cwd: project, env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 10000,
     });
     assert.ifError(result.error);
-    assert.notEqual(result.status, 0);
+    assert.equal(fs.existsSync(marker), true, 'Bob removed protected project data');
     assert.equal(fs.readFileSync(marker, 'utf8'), 'protected project data');
     assert.equal(fs.readFileSync(path.join(project, 'src/index.ts'), 'utf8'), 'export const proof: number = 7;\n');
+    assert.notEqual(result.status, 0);
     cases++;
   }
   const project = path.join(work, 'owner-parent/inner/project');

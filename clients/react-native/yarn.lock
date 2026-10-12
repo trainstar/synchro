@@ -8050,7 +8050,7 @@ __metadata:
 
 "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::locator=%40trainstar%2Fsynchro-react-native%40workspace%3A.":
   version: 0.40.18
-  resolution: "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::version=0.40.18&hash=0fa2ba&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
+  resolution: "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::version=0.40.18&hash=61d340&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
   dependencies:
     "@babel/core": "npm:^7.25.2"
     "@babel/plugin-transform-flow-strip-types": "npm:^7.26.5"
@@ -8076,7 +8076,7 @@ __metadata:
     yargs: "npm:^17.5.1"
   bin:
     bob: bin/bob
-  checksum: 10c0/5d0fde468d87bd3916120b5c7516f08884584a06f96bae8b9e96b98eca7b5b65335951357bab8f25e44fe525c035442ffc2aff6f3ac2af88c1803d601d06c1a1
+  checksum: 10c0/bf5746cdab0c38825ed900d8097c6e4c32a3684921aee7e3904b1085e43e3c9f59d281e48723c940c5fa28ffe6848706024e1f5a25d7f56b2819e0b22cdbc586
   languageName: node
   linkType: hard
 
