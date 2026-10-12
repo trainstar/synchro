@@ -42,13 +42,18 @@ The example and consumer hosts use this lifecycle.
 ## React Native Tooling Corrections
 
 The supported CLI toolchain uses CLI 20.2.0 and its Android and iOS platform packages at the same version.
-The package delivers a version-bound correction for CLI Android configuration 20.2.0.
-It escapes the documented Codegen source directory before constructing the fixed source-extension pattern.
-This preserves directory names with literal braces or brackets.
+The package delivers version-bound corrections for CLI Android configuration and
+CLI clean 20.2.0. The Codegen correction escapes the documented source directory
+before it constructs the fixed source-extension pattern. The clean correction
+escapes the host temporary-directory prefix before it adds its authored cache
+suffix patterns. These corrections preserve literal directory names with braces
+or brackets without changing authored glob suffixes.
 
 Follow the [npm setup steps](/synchro/clients/consumption/#react-native) after each fresh installation.
 Yarn applications must preserve the same correction through Yarn's patch protocol.
-The published package exports its canonical patch at `@trainstar/synchro-react-native/tooling-patches/cli-config-android-20.2.0.patch`.
+The published package exports canonical patches at
+`@trainstar/synchro-react-native/tooling-patches/cli-config-android-20.2.0.patch`
+and `@trainstar/synchro-react-native/tooling-patches/cli-clean-20.2.0.patch`.
 
 The package also exports the stream-json 1.9.1 Assembler correction for bunyamin 1.6.3 trace tooling.
 It backports [upstream property handling](https://github.com/uhop/stream-json/commit/2f2d35bbb547306991ded6487a279154d865a358) without changing the dependency major.
@@ -61,6 +66,18 @@ node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs stre
 The setup command verifies exact package identities and source hashes.
 It rejects an unexpected installation and accepts repeated execution only for the exact verified postimage.
 These corrections do not change the upstream package versions.
+
+Library projects that run `bob build` must apply the delivered
+react-native-builder-bob 0.40.18 correction after each fresh installation:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
+```
+
+The correction replaces glob removal of Bob's resolved output directories with
+the installed `fs-extra` literal directory operation. It preserves compilation
+and TypeScript generation. The package exports its canonical patch at
+`@trainstar/synchro-react-native/tooling-patches/react-native-builder-bob-0.40.18.patch`.
 
 ## React Native 0.82.1 fmt Backport
 

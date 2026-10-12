@@ -272,8 +272,19 @@ node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs cli
 ```
 
 Run this command before Codegen, bundle, or native build commands.
-The correction preserves literal source-directory names and verifies the installed source identity.
+The correction preserves literal source-directory names and temporary-directory
+prefixes while retaining the CLI's authored cache suffix patterns. It verifies
+the installed source identities.
 See [tooling correction requirements](/synchro/reference/support-policy/#react-native-tooling-corrections) for provenance and trace-tooling setup.
+
+Library projects that run `bob build` must also run this command after each
+fresh installation and before they build:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
+```
+
+This uses Bob's installed literal directory removal for its resolved outputs.
 
 ### React Native iOS Podfile requirements
 

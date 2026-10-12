@@ -8,26 +8,57 @@ const {spawnSync} = require('child_process');
 const appRoot = fs.realpathSync(process.cwd());
 
 const repairs = {
-  cli: {
+  cli: [{
     caller: '@react-native-community/cli-platform-android',
     callerVersion: '20.2.0',
     packageName: '@react-native-community/cli-config-android',
     version: '20.2.0',
-    source: 'build/config/findComponentDescriptors.js',
     patch: 'cli-config-android-20.2.0.patch',
-    preimage: '2cfe70a25818c4cd61fc8c122602f5363b8d57ffc1cf8c153f26fe68f1b8f047',
-    postimage: '75ace921b876fb1164e2b80dda9045bfebf2972b9465da992bba5758452add94'
-  },
-  'stream-json': {
+    sources: [{
+      path: 'build/config/findComponentDescriptors.js',
+      preimage: '2cfe70a25818c4cd61fc8c122602f5363b8d57ffc1cf8c153f26fe68f1b8f047',
+      postimage: '75ace921b876fb1164e2b80dda9045bfebf2972b9465da992bba5758452add94'
+    }]
+  }, {
+    caller: '@react-native-community/cli',
+    callerVersion: '20.2.0',
+    packageName: '@react-native-community/cli-clean',
+    version: '20.2.0',
+    patch: 'cli-clean-20.2.0.patch',
+    sources: [{
+      path: 'build/clean.js',
+      preimage: 'f46f188859df1d616676d5cb246ed0b96b8f5e71868c5df914d31830acdde4be',
+      postimage: '9aea3a5112e0432ec78f5716d91ceac56d35e2b24eb5c45f4f28d254b9eaf9c2'
+    }]
+  }],
+  'stream-json': [{
     caller: 'bunyamin',
     callerVersion: '1.6.3',
     packageName: 'stream-json',
     version: '1.9.1',
-    source: 'Assembler.js',
     patch: 'stream-json-1.9.1.patch',
-    preimage: 'a341b21d86a9c005e5433eadb6c33d4708d611c8bc624ee383463c0fb6d2e32b',
-    postimage: '51bf2168f777c8c7285dd521c32f0de636f363efc9baa80dbfb140fa55372203'
-  }
+    sources: [{
+      path: 'Assembler.js',
+      preimage: 'a341b21d86a9c005e5433eadb6c33d4708d611c8bc624ee383463c0fb6d2e32b',
+      postimage: '51bf2168f777c8c7285dd521c32f0de636f363efc9baa80dbfb140fa55372203'
+    }]
+  }],
+  bob: [{
+    caller: 'react-native-builder-bob',
+    callerVersion: '0.40.18',
+    packageName: 'react-native-builder-bob',
+    version: '0.40.18',
+    patch: 'react-native-builder-bob-0.40.18.patch',
+    sources: [{
+      path: 'lib/targets/module.js',
+      preimage: '1ef8ee20f2767347348e86de7f421358b7705623ae04a9b952fabc61f365ede6',
+      postimage: 'd1236a54d5fb13aeb3bdab4b6a5b398e2bd6da7862ef4bed3899751fd1104e05'
+    }, {
+      path: 'lib/targets/typescript.js',
+      preimage: '451fe8050e20bc1c4724564b2c33fb819f815848f5ad2eb529be5915bf62f2bb',
+      postimage: 'c0985d3627eb44d5c09e6b7711de0f6679ca73289588a7012c15c10a335b7000'
+    }]
+  }]
 };
 
 function fail(message) {
@@ -87,27 +118,25 @@ function targetRoot(repair, caller) {
   return resolvedPackageRoot(repair.packageName, [caller]);
 }
 
-function applyRepair(name) {
-  const repair = repairs[name];
-  if (!repair) {
-    fail(`unsupported repair ${name}`);
-  }
+function applyRepair(repair) {
   const caller = callerRoot(repair);
   assertInsideInstall(caller);
   packageIdentity(caller, repair.caller, repair.callerVersion);
   const target = targetRoot(repair, caller);
   assertInsideInstall(target);
   packageIdentity(target, repair.packageName, repair.version);
-  const source = path.join(target, repair.source);
-  if (!fs.existsSync(source) || fs.realpathSync(source) !== source) {
-    fail('unexpected or missing source target');
-  }
-  const actual = hashFile(source);
-  if (actual === repair.postimage) {
+  const sources = repair.sources.map(source => {
+    const file = path.join(target, source.path);
+    if (!fs.existsSync(file) || fs.realpathSync(file) !== file) {
+      fail('unexpected or missing source target');
+    }
+    return {file, source};
+  });
+  if (sources.every(({file, source}) => hashFile(file) === source.postimage)) {
     process.stdout.write(`${repair.packageName} ${repair.version} already has the verified patch\n`);
     return;
   }
-  if (actual !== repair.preimage) {
+  if (!sources.every(({file, source}) => hashFile(file) === source.preimage)) {
     fail('unexpected source hash');
   }
   const patchFile = path.join(__dirname, repair.patch);
@@ -119,8 +148,7 @@ function applyRepair(name) {
   if (result.error || result.status !== 0) {
     fail('patch command failed');
   }
-  const postimage = hashFile(source);
-  if (postimage !== repair.postimage) {
+  if (!sources.every(({file, source}) => hashFile(file) === source.postimage)) {
     fail('postimage verification failed');
   }
   process.stdout.write(`applied verified ${repair.packageName} ${repair.version} patch\n`);
@@ -130,4 +158,6 @@ const name = process.argv[2] || 'cli';
 if (!Object.prototype.hasOwnProperty.call(repairs, name)) {
   fail('unsupported repair');
 }
-applyRepair(name);
+for (const repair of repairs[name]) {
+  applyRepair(repair);
+}
