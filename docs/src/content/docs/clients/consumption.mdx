@@ -285,7 +285,8 @@ node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
 ```
 
 This uses Bob's installed literal removal for its resolved outputs and
-TypeScript build-info paths.
+TypeScript build-info paths. It rejects the project directory and paths outside
+the project before removal.
 
 ### React Native iOS Podfile requirements
 

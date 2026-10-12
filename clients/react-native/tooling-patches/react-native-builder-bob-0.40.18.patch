@@ -1,7 +1,7 @@
 diff --git a/lib/targets/module.js b/lib/targets/module.js
 --- a/lib/targets/module.js
 +++ b/lib/targets/module.js
-@@ -6,7 +6,7 @@
+@@ -6,7 +6,7 @@ Object.defineProperty(exports, "__esModule", {
  exports.default = build;
  var _path = _interopRequireDefault(require("path"));
  var _kleur = _interopRequireDefault(require("kleur"));
@@ -10,11 +10,18 @@ diff --git a/lib/targets/module.js b/lib/targets/module.js
  var _compile = _interopRequireDefault(require("../utils/compile"));
  function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }
  async function build({
-@@ -19,7 +19,7 @@
+@@ -19,7 +19,14 @@ async function build({
    report
  }) {
    report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
 -  await (0, _del.default)([output]);
++  const outputIsOwned = (() => {
++    const relative = _path.default.relative(process.cwd(), output);
++    return relative !== '' && relative !== '..' && !relative.startsWith(`..${_path.default.sep}`) && !_path.default.isAbsolute(relative);
++  })();
++  if (!outputIsOwned) {
++    throw new Error('Refusing to remove build output outside the current working directory.');
++  }
 +  await _fsExtra.default.remove(output);
    await (0, _compile.default)({
      ...options,
@@ -22,7 +29,7 @@ diff --git a/lib/targets/module.js b/lib/targets/module.js
 diff --git a/lib/targets/typescript.js b/lib/targets/typescript.js
 --- a/lib/targets/typescript.js
 +++ b/lib/targets/typescript.js
-@@ -4,7 +4,6 @@
+@@ -4,7 +4,6 @@ Object.defineProperty(exports, "__esModule", {
    value: true
  });
  exports.default = build;
@@ -30,30 +37,46 @@ diff --git a/lib/targets/typescript.js b/lib/targets/typescript.js
  var _fsExtra = _interopRequireDefault(require("fs-extra"));
  var _json = _interopRequireDefault(require("json5"));
  var _kleur = _interopRequireDefault(require("kleur"));
-@@ -23,7 +22,7 @@
+@@ -23,7 +22,14 @@ async function build({
    esm
  }) {
    report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
 -  await (0, _del.default)([output]);
++  const outputIsOwned = (() => {
++    const relative = _path.default.relative(process.cwd(), output);
++    return relative !== '' && relative !== '..' && !relative.startsWith(`..${_path.default.sep}`) && !_path.default.isAbsolute(relative);
++  })();
++  if (!outputIsOwned) {
++    throw new Error('Refusing to remove build output outside the current working directory.');
++  }
 +  await _fsExtra.default.remove(output);
    report.info(`Generating type definitions with ${_kleur.default.blue('tsc')}`);
    const project = options?.project ? options.project : 'tsconfig.json';
    const tsconfig = _path.default.join(root, project);
-@@ -102,7 +101,7 @@
+@@ -101,8 +107,14 @@ async function build({
+       throw new Error('Neither commonjs nor module output is enabled.');
      }
      const tsbuildinfo = _path.default.join(outDir, project.replace(/\.json$/, '.tsbuildinfo'));
++    const tsbuildinfoIsOwned = (() => {
++      const relative = _path.default.relative(process.cwd(), tsbuildinfo);
++      return relative !== '' && relative !== '..' && !relative.startsWith(`..${_path.default.sep}`) && !_path.default.isAbsolute(relative);
++    })();
      try {
 -      await (0, _del.default)([tsbuildinfo]);
-+      await _fsExtra.default.remove(tsbuildinfo);
++      if (tsbuildinfoIsOwned) {
++        await _fsExtra.default.remove(tsbuildinfo);
++      }
      } catch (e) {
        // Ignore
      }
-@@ -110,7 +109,7 @@
+@@ -110,7 +122,9 @@ async function build({
        cwd: root
      });
      try {
 -      await (0, _del.default)([tsbuildinfo]);
-+      await _fsExtra.default.remove(tsbuildinfo);
++      if (tsbuildinfoIsOwned) {
++        await _fsExtra.default.remove(tsbuildinfo);
++      }
      } catch (e) {
        // Ignore
      }

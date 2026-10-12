@@ -76,7 +76,8 @@ node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs bob
 
 The correction replaces glob removal of Bob's resolved output and TypeScript
 build-info paths with the installed `fs-extra` literal operation. It preserves
-compilation and TypeScript generation. The package exports its canonical patch at
+the prior current-working-directory ownership boundary, compilation, and
+TypeScript generation. The package exports its canonical patch at
 `@trainstar/synchro-react-native/tooling-patches/react-native-builder-bob-0.40.18.patch`.
 
 ## React Native 0.82.1 fmt Backport

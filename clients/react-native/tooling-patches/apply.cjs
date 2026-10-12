@@ -52,11 +52,11 @@ const repairs = {
     sources: [{
       path: 'lib/targets/module.js',
       preimage: '1ef8ee20f2767347348e86de7f421358b7705623ae04a9b952fabc61f365ede6',
-      postimage: 'd1236a54d5fb13aeb3bdab4b6a5b398e2bd6da7862ef4bed3899751fd1104e05'
+      postimage: '44ec0535fbd549452ff3898438ebd3dc47bd2fba9bf165559d4498746b5dd0da'
     }, {
       path: 'lib/targets/typescript.js',
       preimage: '451fe8050e20bc1c4724564b2c33fb819f815848f5ad2eb529be5915bf62f2bb',
-      postimage: 'acf316d47964c16b47c9e1fcd7af59438fb51237cb4fb5446f3f1c15d33b681a'
+      postimage: 'e066aa5ac22924d9c805c8befe85298c364d764d26b02435bd2dc97cc7829c12'
     }]
   }]
 };
