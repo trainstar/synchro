@@ -400,5 +400,57 @@ require(${JSON.stringify(clean)}).commands.clean.func([], {}, {include: 'metro',
     for (const marker of decoys) assert.equal(fs.readFileSync(marker, 'utf8'), 'old build');
     cases++;
   }
+  for (const [name, output, target] of [
+    ['protected-module', '../outside-module', 'module'],
+    ['module', '..', 'module'],
+    ['protected-typescript', '../outside-typescript', 'typescript'],
+  ]) {
+    const project = path.join(work, name);
+    fs.mkdirSync(path.join(project, 'src'), { recursive: true });
+    fs.symlinkSync(modules, path.join(project, 'node_modules'), 'dir');
+    fs.writeFileSync(path.join(project, 'src/index.ts'), 'export const proof: number = 7;\n');
+    fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({
+      name: 'protected-directory-proof', version: '1.0.0', source: 'src/index.ts',
+      'react-native-builder-bob': { source: 'src', output, targets: [target] },
+    }));
+    const marker = path.join(path.resolve(project, output, target), 'protected-marker');
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, 'protected project data');
+    const result = spawnSync(process.execPath, [bob, 'build'], {
+      cwd: project, env: { ...process.env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'protected project data');
+    assert.equal(fs.readFileSync(path.join(project, 'src/index.ts'), 'utf8'), 'export const proof: number = 7;\n');
+    cases++;
+  }
+  const project = path.join(work, 'owner-parent/inner/project');
+  const projectConfig = '../../../outside-info/probe.json';
+  fs.mkdirSync(path.join(project, 'src'), { recursive: true });
+  fs.symlinkSync(modules, path.join(project, 'node_modules'), 'dir');
+  fs.writeFileSync(path.join(project, 'src/index.ts'), 'export const proof: number = 7;\n');
+  fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({
+    name: 'protected-build-info-proof', version: '1.0.0', source: 'src/index.ts', types: 'lib/typescript/index.d.ts',
+    'react-native-builder-bob': { source: 'src', output: 'lib', targets: [['typescript', { project: projectConfig }]] },
+  }));
+  const config = path.join(project, projectConfig);
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  fs.writeFileSync(config, JSON.stringify({
+    compilerOptions: { declaration: true, emitDeclarationOnly: true, types: [], skipLibCheck: true },
+    include: ['../owner-parent/inner/project/src'],
+  }));
+  const buildInfo = path.join(project, 'lib/typescript', projectConfig.replace(/\.json$/, '.tsbuildinfo'));
+  fs.mkdirSync(path.dirname(buildInfo), { recursive: true });
+  fs.writeFileSync(buildInfo, 'protected build-info data');
+  const result = spawnSync(process.execPath, [bob, 'build'], {
+    cwd: project, env: { ...process.env, PATH: path.join(modules, '.bin') + path.delimiter + process.env.PATH, NO_COLOR: '1' },
+    encoding: 'utf8', timeout: 25000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(buildInfo, 'utf8'), 'protected build-info data');
+  assert.match(fs.readFileSync(path.join(project, 'lib/typescript/index.d.ts'), 'utf8'), /proof/);
+  cases++;
   return cases;
 }
