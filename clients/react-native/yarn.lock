@@ -8050,7 +8050,7 @@ __metadata:
 
 "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::locator=%40trainstar%2Fsynchro-react-native%40workspace%3A.":
   version: 0.40.18
-  resolution: "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::version=0.40.18&hash=680e8b&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
+  resolution: "react-native-builder-bob@patch:react-native-builder-bob@npm%3A0.40.18#./tooling-patches/react-native-builder-bob-0.40.18.patch::version=0.40.18&hash=1b756a&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
   dependencies:
     "@babel/core": "npm:^7.25.2"
     "@babel/plugin-transform-flow-strip-types": "npm:^7.26.5"

@@ -1,9 +1,7 @@
 diff --git a/lib/targets/module.js b/lib/targets/module.js
-index 76592dd..656a8d4 100644
 --- a/lib/targets/module.js
 +++ b/lib/targets/module.js
-@@ -6,8 +6,8 @@ Object.defineProperty(exports, "__esModule", {
- });
+@@ -6,7 +6,7 @@
  exports.default = build;
  var _path = _interopRequireDefault(require("path"));
  var _kleur = _interopRequireDefault(require("kleur"));
@@ -12,7 +10,7 @@ index 76592dd..656a8d4 100644
  var _compile = _interopRequireDefault(require("../utils/compile"));
  function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }
  async function build({
-@@ -19,7 +19,7 @@ async function build({
+@@ -19,7 +19,7 @@
    report
  }) {
    report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
@@ -22,10 +20,9 @@ index 76592dd..656a8d4 100644
      ...options,
      variants,
 diff --git a/lib/targets/typescript.js b/lib/targets/typescript.js
-index 49e37ba..5b7a423 100644
 --- a/lib/targets/typescript.js
 +++ b/lib/targets/typescript.js
-@@ -4,11 +4,10 @@ Object.defineProperty(exports, "__esModule", {
+@@ -4,7 +4,6 @@
    value: true
  });
  exports.default = build;
@@ -33,11 +30,7 @@ index 49e37ba..5b7a423 100644
  var _fsExtra = _interopRequireDefault(require("fs-extra"));
  var _json = _interopRequireDefault(require("json5"));
  var _kleur = _interopRequireDefault(require("kleur"));
- var _os = require("os");
- var _path = _interopRequireDefault(require("path"));
- var _which = _interopRequireDefault(require("which"));
- var _spawn = require("../utils/spawn");
-@@ -23,7 +23,7 @@ async function build({
+@@ -23,7 +22,7 @@
    esm
  }) {
    report.info(`Cleaning up previous build at ${_kleur.default.blue(_path.default.relative(root, output))}`);
@@ -46,8 +39,7 @@ index 49e37ba..5b7a423 100644
    report.info(`Generating type definitions with ${_kleur.default.blue('tsc')}`);
    const project = options?.project ? options.project : 'tsconfig.json';
    const tsconfig = _path.default.join(root, project);
-@@ -101,8 +100,8 @@ async function build({
-       throw new Error('Neither commonjs nor module output is enabled.');
+@@ -102,7 +101,7 @@
      }
      const tsbuildinfo = _path.default.join(outDir, project.replace(/\.json$/, '.tsbuildinfo'));
      try {
@@ -56,8 +48,7 @@ index 49e37ba..5b7a423 100644
      } catch (e) {
        // Ignore
      }
-@@ -109,8 +108,8 @@ async function build({
-     await (0, _spawn.spawn)(tsc, ['--pretty', '--declaration', '--declarationMap', '--noEmit', 'false', '--emitDeclarationOnly', '--project', project, '--outDir', outDir], {
+@@ -110,7 +109,7 @@
        cwd: root
      });
      try {
