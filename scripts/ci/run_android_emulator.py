@@ -81,7 +81,7 @@ def check_active_emulator(directory: Path, command) -> None:
             continue
         try:
             prefix, closing, suffix = (process / "stat").read_text().rpartition(")")
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         fields = suffix.split()
         if (
@@ -95,7 +95,7 @@ def check_active_emulator(directory: Path, command) -> None:
             continue
         try:
             executable = (process / "exe").readlink()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
             try:
@@ -118,7 +118,7 @@ def group_alive(process: subprocess.Popen) -> bool:
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         if int(fields[2]) == process.pid and fields[0] != "Z":
             return True

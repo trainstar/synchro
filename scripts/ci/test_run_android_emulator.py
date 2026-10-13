@@ -1348,11 +1348,26 @@ class EmulatorRunnerTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_process_exit_during_stat_read_is_an_ordinary_race(self):
-        command = mock.Mock()
-        with mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=FileNotFoundError()), mock.patch.object(Path, "readlink") as readlink:
-            runner.check_active_emulator(self.sdk / "emulator", command)
-        readlink.assert_not_called()
-        command.assert_not_called()
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            command = mock.Mock()
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=error), mock.patch.object(Path, "readlink") as readlink:
+                runner.check_active_emulator(self.sdk / "emulator", command)
+            readlink.assert_not_called()
+            command.assert_not_called()
+
+    def test_process_exit_during_executable_read_is_an_ordinary_race(self):
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            command = mock.Mock()
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", return_value=USER_PROCESS_STAT), mock.patch.object(Path, "readlink", side_effect=error):
+                runner.check_active_emulator(self.sdk / "emulator", command)
+            command.assert_not_called()
+
+    def test_group_scan_retains_live_members_after_another_process_exits(self):
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234"), Path("/proc/5678")])), mock.patch.object(Path, "read_text", side_effect=[error, "5678 (fixture) S 1 321 321 0 -1 0\n"]):
+                self.assertTrue(runner.group_alive(Process(321)))
+            with self.subTest(error=type(error).__name__, live=False), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=error):
+                self.assertFalse(runner.group_alive(Process(321)))
 
     def test_prepare_denied_user_process_uses_initialized_retained_log(self):
         inspect = runner.check_active_emulator
