@@ -3,6 +3,7 @@ package integration
 import (
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"maps"
@@ -42,6 +43,7 @@ var allowedCoreSQLSelectors = map[string]bool{
 	"ErrConnDone": true,
 	"ErrNoRows":   true,
 	"ErrTxDone":   true,
+	"Tx":          true,
 }
 
 var outboundMethodNames = map[string]bool{
@@ -72,26 +74,28 @@ func TestCoreSyncBoundaryAudit(t *testing.T) {
 		t.Fatalf("core sync dependency audit: %v", err)
 	}
 
-	t.Run("rejects outbound HTTP", func(t *testing.T) {
-		mutated := maps.Clone(sources)
-		const signature = "func (h *Handler) serveConnect(w http.ResponseWriter, r *http.Request) {\n"
-		const injected = signature + "\tcoreSyncBoundaryOutboundHTTP()\n"
-		handlers := mutated["api/go/handlers.go"]
-		if strings.Count(string(handlers), signature) != 1 {
-			t.Fatal("serveConnect source signature changed")
-		}
-		handlers = []byte(strings.Replace(string(handlers), signature, injected, 1))
-		handlers = append(handlers, []byte(`
+	for _, entrypoint := range []string{"serveConnect", "servePush"} {
+		t.Run("rejects outbound HTTP in "+entrypoint, func(t *testing.T) {
+			mutated := maps.Clone(sources)
+			signature := "func (h *Handler) " + entrypoint + "(w http.ResponseWriter, r *http.Request) {\n"
+			injected := signature + "\tcoreSyncBoundaryOutboundHTTP()\n"
+			handlers := mutated["api/go/handlers.go"]
+			if strings.Count(string(handlers), signature) != 1 {
+				t.Fatal("core entrypoint source signature changed")
+			}
+			handlers = []byte(strings.Replace(string(handlers), signature, injected, 1))
+			handlers = append(handlers, []byte(`
 func coreSyncBoundaryOutboundHTTP() {
 	_, _ = http.Get("http://127.0.0.1")
 }
 `)...)
-		mutated["api/go/handlers.go"] = handlers
-		err := auditCoreSyncBoundary(mutated)
-		if err == nil || !strings.Contains(err.Error(), "net/http.Get") {
-			t.Fatalf("outbound HTTP negative control passed: %v", err)
-		}
-	})
+			mutated["api/go/handlers.go"] = handlers
+			err := auditCoreSyncBoundary(mutated)
+			if err == nil || !strings.Contains(err.Error(), "net/http.Get") {
+				t.Fatalf("outbound HTTP negative control passed: %v", err)
+			}
+		})
+	}
 
 	t.Run("rejects outbound HTTP in an adapter internal package", func(t *testing.T) {
 		mutated := maps.Clone(sources)
@@ -109,6 +113,28 @@ func coreSyncBoundaryOutboundHTTP() {
 			t.Fatalf("internal package outbound HTTP negative control passed: %v", err)
 		}
 	})
+
+	for _, control := range []struct {
+		name  string
+		field string
+	}{
+		{"unapproved callback", "otherCallback func(context.Context, *sql.Tx) error"},
+		{"changed preparation signature", "preparePush func(context.Context, *sql.DB) error"},
+	} {
+		t.Run("rejects "+control.name, func(t *testing.T) {
+			mutated := maps.Clone(sources)
+			const field = "preparePush  func(context.Context, *sql.Tx) error"
+			source := string(mutated["api/go/synchro.go"])
+			if strings.Count(source, field) != 1 {
+				t.Fatal("Handler preparation field changed")
+			}
+			mutated["api/go/synchro.go"] = []byte(strings.Replace(source, field, control.field, 1))
+			err := auditCoreSyncBoundary(mutated)
+			if err == nil || !strings.Contains(err.Error(), "function-typed dependency") {
+				t.Fatalf("callback negative control passed: %v", err)
+			}
+		})
+	}
 }
 
 func assertCoreSyncBoundary(t *testing.T) {
@@ -283,6 +309,16 @@ func auditCoreSyncDeclaration(
 	var violation error
 	if typeSpec, ok := declaration.node.(*ast.TypeSpec); ok {
 		ast.Inspect(typeSpec.Type, func(node ast.Node) bool {
+			// The approved host policy prepares transaction-local context before canonical SQL execution.
+			if field, ok := node.(*ast.Field); ok && declaration.sourceName == "api/go/synchro.go" &&
+				typeSpec.Name.Name == "Handler" && len(field.Names) == 1 && field.Names[0].Name == "preparePush" &&
+				declaration.imports["context"] == "context" && declaration.imports["sql"] == "database/sql" {
+				var signature strings.Builder
+				if err := format.Node(&signature, fileSet, field.Type); err == nil &&
+					signature.String() == "func(context.Context, *sql.Tx) error" {
+					return false
+				}
+			}
 			if _, ok := node.(*ast.FuncType); ok {
 				violation = coreSyncViolation(
 					fileSet, declaration, node.Pos(),
