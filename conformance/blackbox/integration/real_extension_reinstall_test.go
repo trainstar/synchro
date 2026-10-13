@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/trainstar/synchro/conformance/blackbox"
 )
 
@@ -694,6 +698,178 @@ func TestRealWorkerStartupRetainsUnownedConfiguredSlot(t *testing.T) {
 	recovered := waitForReinstalledWorker(t, ctx, harness, blackbox.ExtensionReinstallResult{PriorWorkerPID: priorPID, ReinstallLSN: advancedLSN}, 1)
 	if recovered.PendingRegistryGenerationCount != 0 {
 		t.Fatalf("worker did not activate registrations after operator recovery: %#v", recovered)
+	}
+}
+
+// TestRealScenarioResetRegistrationRLSPrecedesSourceCatalogMutations executes
+// the registration fixture with a real VACUUM between its projection setup and
+// RLS block. Moving the RLS block back behind source grants makes the observed
+// transaction-id back-edge reach the block and fail with 40P01.
+func TestRealScenarioResetRegistrationRLSPrecedesSourceCatalogMutations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	harness, _ := provisionRealProofHarness(t, ctx)
+	admin := openIssue49Admin(t, ctx, harness)
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	registrationSQL, err := os.ReadFile(filepath.Join(repoRoot, "conformance", "blackbox", "testdata", "register-diagnostic.sql"))
+	if err != nil {
+		t.Fatalf("read diagnostic registration fixture: %v", err)
+	}
+	const rlsStart = "DO $rls$\n"
+	const rlsEnd = "$rls$;"
+	prefix, afterRLSStart, found := strings.Cut(string(registrationSQL), rlsStart)
+	if !found {
+		t.Fatal("diagnostic registration fixture has no RLS block")
+	}
+	rlsEndOffset := strings.Index(afterRLSStart, rlsEnd)
+	if rlsEndOffset < 0 {
+		t.Fatal("diagnostic registration fixture has an incomplete RLS block")
+	}
+	rls := rlsStart + afterRLSStart[:rlsEndOffset+len(rlsEnd)]
+	remainder := afterRLSStart[rlsEndOffset+len(rlsEnd):]
+
+	if _, err := harness.ReinstallExtension(ctx); err != nil {
+		t.Fatalf("reinstall extension before registration ordering proof: %v", err)
+	}
+	// Reinstall retains source-table policies while the registration fixture
+	// recreates them. This is the same pre-registration cleanup the reset path
+	// performs before it replays the fixture.
+	if _, err := admin.ExecContext(ctx, `
+		DO $cleanup$
+		DECLARE
+			relation_name text;
+		BEGIN
+			FOREACH relation_name IN ARRAY ARRAY[
+				'cf_global_items', 'cf_items', 'cf_documents', 'cf_document_members',
+				'cf_document_access', 'cf_document_notes', 'cf_schema_queue',
+				'cf_decode_trap', 'cf_late_registration', 'cf_generated_items',
+				'cf_source_filled_items', 'cf_item_impacts'
+			]
+			LOOP
+				EXECUTE pg_catalog.format('DROP POLICY IF EXISTS synchro_owner_all ON public.%I', relation_name);
+			END LOOP;
+		END
+		$cleanup$;`); err != nil {
+		t.Fatalf("clear diagnostic RLS policies before fixture replay: %v", err)
+	}
+	// This source relation is deliberately large enough to make ANALYZE perform
+	// the pg_class statistics update that autovacuum performs in the reported
+	// cycle. It is inserted after reinstall, before registrations recreate
+	// capture triggers.
+	if _, err := admin.ExecContext(ctx, `
+		INSERT INTO public.cf_global_items (id, value)
+		SELECT ('00000000-0000-4000-8c09-' || pg_catalog.lpad(series::text, 12, '0'))::uuid,
+		       'registration-ordering-seed'
+		FROM pg_catalog.generate_series(1, 1000) AS series`); err != nil {
+		t.Fatalf("seed source relation for registration vacuum: %v", err)
+	}
+
+	registration, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin diagnostic registration: %v", err)
+	}
+	var registrationPID int
+	if err := registration.QueryRowContext(ctx, "SELECT pg_catalog.pg_backend_pid()").Scan(&registrationPID); err != nil {
+		_ = registration.Rollback()
+		t.Fatalf("observe diagnostic registration backend: %v", err)
+	}
+	defer registration.Rollback()
+	// An old-order mutation has the vacuum wait first. This makes the
+	// registration backend, rather than VACUUM, report the demonstrated error.
+	if _, err := registration.ExecContext(ctx, "SET LOCAL deadlock_timeout = '100 milliseconds'"); err != nil {
+		t.Fatalf("set registration deadlock detector timing: %v", err)
+	}
+	if _, err := registration.ExecContext(ctx, prefix); err != nil {
+		_ = registration.Rollback()
+		t.Fatalf("apply diagnostic registration fixture prefix: %v", err)
+	}
+
+	vacuum, err := admin.Conn(ctx)
+	if err != nil {
+		_ = registration.Rollback()
+		t.Fatalf("open vacuum session: %v", err)
+	}
+	defer vacuum.Close()
+	var vacuumPID int
+	if err := vacuum.QueryRowContext(ctx, "SELECT pg_catalog.pg_backend_pid()").Scan(&vacuumPID); err != nil {
+		_ = registration.Rollback()
+		t.Fatalf("observe vacuum backend: %v", err)
+	}
+	vacuumCtx, cancelVacuum := context.WithCancel(ctx)
+	defer cancelVacuum()
+	vacuumDone := make(chan error, 1)
+	go func() {
+		_, vacuumErr := vacuum.ExecContext(vacuumCtx, "VACUUM (ANALYZE) public.cf_global_items")
+		vacuumDone <- vacuumErr
+	}()
+	vacuumFinished := false
+	defer func() {
+		if !vacuumFinished {
+			_ = registration.Rollback()
+			cancelVacuum()
+			<-vacuumDone
+		}
+	}()
+
+	observationCtx, cancelObservation := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelObservation()
+	observedBackEdge := false
+	for !vacuumFinished && !observedBackEdge {
+		if err := admin.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_locks AS relation_lock
+				JOIN pg_catalog.pg_locks AS transaction_wait
+				  ON transaction_wait.pid = relation_lock.pid
+				WHERE relation_lock.pid = $1
+				  AND relation_lock.locktype = 'relation'
+				  AND relation_lock.relation = 'public.cf_global_items'::pg_catalog.regclass
+				  AND relation_lock.mode = 'ShareUpdateExclusiveLock'
+				  AND relation_lock.granted
+				  AND transaction_wait.locktype = 'transactionid'
+				  AND NOT transaction_wait.granted
+				  AND $2 = ANY(pg_catalog.pg_blocking_pids(transaction_wait.pid))
+			)`, vacuumPID, registrationPID).Scan(&observedBackEdge); err != nil {
+			t.Fatalf("observe vacuum source lock and registration wait: %v", err)
+		}
+		if observedBackEdge {
+			break
+		}
+		select {
+		case vacuumErr := <-vacuumDone:
+			vacuumFinished = true
+			if vacuumErr != nil {
+				t.Fatalf("vacuum after diagnostic registration fixture prefix: %v", vacuumErr)
+			}
+		case <-observationCtx.Done():
+			t.Fatalf("wait for diagnostic registration vacuum outcome: %v", observationCtx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	_, registrationErr := registration.ExecContext(ctx, rls+remainder)
+	if observedBackEdge {
+		var postgresError *pgconn.PgError
+		if !errors.As(registrationErr, &postgresError) || postgresError.Code != "40P01" {
+			t.Fatalf("fixture RLS block after the observed catalog back-edge = %v, want PostgreSQL deadlock_detected (40P01)", registrationErr)
+		}
+		if !vacuumFinished {
+			if err := <-vacuumDone; err != nil {
+				t.Fatalf("vacuum after fixture deadlock: %v", err)
+			}
+			vacuumFinished = true
+		}
+		t.Fatal("diagnostic registration fixture recreated the source-catalog VACUUM deadlock")
+	}
+	if registrationErr != nil {
+		t.Fatalf("apply diagnostic registration fixture RLS block and remainder: %v", registrationErr)
+	}
+	if err := registration.Commit(); err != nil {
+		t.Fatalf("commit diagnostic registration fixture: %v", err)
 	}
 }
 
