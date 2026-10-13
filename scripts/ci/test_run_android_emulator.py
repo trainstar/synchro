@@ -200,7 +200,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual(launch, [
             str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", "Synchro_Kotlin_API_34",
             "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
-            "-no-boot-anim", "-camera-back", "none",
+            "-no-boot-anim", "-camera-back", "none", "-feature", "-WiFiPacketStream",
         ])
         test, options = self.commands("make")[0]
         self.assertEqual(test, ["make", "ci-candidate-kotlin"])
@@ -397,7 +397,7 @@ class EmulatorRunnerTests(unittest.TestCase):
                 self.assertEqual(self.commands("emulator")[1][0], [
                     str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", selected.avd_name,
                     "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
-                    "-no-boot-anim", "-camera-back", "none",
+                    "-no-boot-anim", "-camera-back", "none", "-feature", "-WiFiPacketStream",
                     *(["-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"] if api == "37" else []),
                 ])
                 self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])

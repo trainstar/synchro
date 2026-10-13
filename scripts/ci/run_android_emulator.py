@@ -428,6 +428,9 @@ class Runner:
         if self.selected.memory:
             options.extend(("-memory", self.selected.memory))
         options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        # Netsim WiFi can destroy a joinable thread during exit.
+        # Select the supported Virtio/SLiRP backend for these TCP tests.
+        options.extend(("-feature", "-WiFiPacketStream"))
         if self.selected.api == "37":
             # The API 37 GoldfishMapper DMA path requires both SDK capabilities.
             options.extend(("-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"))
