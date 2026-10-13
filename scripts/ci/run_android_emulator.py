@@ -81,7 +81,7 @@ def check_active_emulator(directory: Path, command) -> None:
             continue
         try:
             prefix, closing, suffix = (process / "stat").read_text().rpartition(")")
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         fields = suffix.split()
         if (
@@ -95,7 +95,7 @@ def check_active_emulator(directory: Path, command) -> None:
             continue
         try:
             executable = (process / "exe").readlink()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
             try:
@@ -118,7 +118,7 @@ def group_alive(process: subprocess.Popen) -> bool:
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
         if int(fields[2]) == process.pid and fields[0] != "Z":
             return True
@@ -425,9 +425,14 @@ class Runner:
         check_ports()
         self.start_adb_server()
         options = ["-no-snapshot-save", "-no-window"]
-        if self.selected.memory:
-            options.extend(("-memory", self.selected.memory))
+        # Android 17 phone images require at least 4 GiB of guest RAM.
+        memory = self.selected.memory or ("4096" if self.selected.api == "37" else None)
+        if memory:
+            options.extend(("-memory", memory))
         options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
+        # Netsim WiFi can destroy a joinable thread during exit.
+        # Select the supported Virtio/SLiRP backend for these TCP tests.
+        options.extend(("-feature", "-WiFiPacketStream"))
         if self.selected.api == "37":
             # The API 37 GoldfishMapper DMA path requires both SDK capabilities.
             options.extend(("-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"))
