@@ -21,6 +21,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
+      - name: Install the declared Android build components
+        run: |
+          task_sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
+          test -x "$task_sdkmanager"
+          yes | "$task_sdkmanager" --licenses > /dev/null
+          "$task_sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
       - name: Inspect exact public metadata
         shell: bash
         run: |
