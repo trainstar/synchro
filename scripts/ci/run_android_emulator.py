@@ -449,7 +449,12 @@ class Runner:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RunnerError("The emulator boot deadline expired")
-                if self.adb(["shell", "getprop", "sys.boot_completed"], min(180, remaining)).strip() == "1":
+                try:
+                    boot_completed = self.adb(["shell", "getprop", "sys.boot_completed"], min(5, remaining)).strip()
+                except subprocess.TimeoutExpired:
+                    self.log.write("Android boot property request timed out before boot completed\n")
+                    boot_completed = ""
+                if boot_completed == "1":
                     break
                 time.sleep(min(2, max(0, deadline - time.monotonic())))
             self.adb(["shell", "input", "keyevent", "82"])
