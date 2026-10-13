@@ -425,8 +425,10 @@ class Runner:
         check_ports()
         self.start_adb_server()
         options = ["-no-snapshot-save", "-no-window"]
-        if self.selected.memory:
-            options.extend(("-memory", self.selected.memory))
+        # Android 17 phone images require at least 4 GiB of guest RAM.
+        memory = self.selected.memory or ("4096" if self.selected.api == "37" else None)
+        if memory:
+            options.extend(("-memory", memory))
         options.extend(("-gpu", "software", "-noaudio", "-no-boot-anim", "-camera-back", "none"))
         # Netsim WiFi can destroy a joinable thread during exit.
         # Select the supported Virtio/SLiRP backend for these TCP tests.

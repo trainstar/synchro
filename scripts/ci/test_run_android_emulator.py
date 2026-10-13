@@ -238,10 +238,16 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual(list(self.sdk.glob(".synchro-emulator-*")), [])
 
     def test_memory_option_retains_react_native_position(self):
-        self.argv[-3:-3] = ["--memory", "6144"]
-        self.assertEqual(self.run_fixture(), 0)
-        command = self.commands("emulator")[1][0]
-        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
+        for api, image in (("34", "34"), ("37", "37.0")):
+            with self.subTest(api=api):
+                argv = list(self.argv)
+                argv[5], argv[7] = api, image
+                argv[-3:-3] = ["--memory", "6144"]
+                self.calls.clear()
+                with self.boundaries():
+                    self.assertEqual(runner.Runner(runner.arguments(argv)).run(), 0)
+                command = self.commands("emulator")[1][0]
+                self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
 
     def test_server_is_ready_before_emulator_starts(self):
         with self.boundaries(), mock.patch.object(runner.socket, "create_connection") as connect:
@@ -396,7 +402,9 @@ class EmulatorRunnerTests(unittest.TestCase):
                 ]])
                 self.assertEqual(self.commands("emulator")[1][0], [
                     str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", selected.avd_name,
-                    "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
+                    "-no-snapshot-save", "-no-window",
+                    *(["-memory", "4096"] if api == "37" else []),
+                    "-gpu", "software", "-noaudio",
                     "-no-boot-anim", "-camera-back", "none", "-feature", "-WiFiPacketStream",
                     *(["-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"] if api == "37" else []),
                 ])
