@@ -17,6 +17,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 ### Added
 
 - Operators can register an assignment function with a SQL NULL bound to return all distinct assigned scopes. ([#300](https://github.com/trainstar/synchro/issues/300))
+- Embedded Go hosts can set transaction-local context before canonical push with `Config.PreparePush`. ([#343](https://github.com/trainstar/synchro/issues/343))
 
 ### Changed
 
@@ -34,6 +35,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 - React Native tooling preserves literal Codegen, cache, and build-directory names. Apply the [delivered tooling corrections](https://trainstar.github.io/synchro/reference/support-policy/#react-native-tooling-corrections) after dependency installation. ([#312](https://github.com/trainstar/synchro/issues/312))
 - Trace tooling retains prototype-named JSON data without changing object prototypes or thread remapping. The package delivers the stream-json 1.9.1 upstream backport. ([#330](https://github.com/trainstar/synchro/issues/330))
+- Go modules use the corrected `golang.org/x/text` dependency for `GO-2026-6629`. ([#344](https://github.com/trainstar/synchro/issues/344))
 
 ## [0.4.0-rc.1] - 2026-10-01
 

@@ -17,8 +17,17 @@ cell_id=$8
 cell_result=$9
 sealed_hashes=${10}
 tool=$repo_root/verification/packaged_smoke.py
-release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
-test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:-}
+local_inputs=${PACKAGED_SMOKE_LOCAL_INPUTS:-}
+case "${release_manifest:+release}${local_inputs:+local}" in
+  release|local) ;;
+  *) printf '%s\n' "exactly one of PACKAGED_SMOKE_RELEASE_MANIFEST or PACKAGED_SMOKE_LOCAL_INPUTS is required" >&2; exit 1 ;;
+esac
+if [ -n "$local_inputs" ]; then input_flag=--local-inputs; input_path=$local_inputs;
+else input_flag=--release-manifest; input_path=$release_manifest; fi
+test -f "$input_path" && test -r "$input_path" || { printf '%s\n' "lifecycle input must be a readable file" >&2; exit 1; }
+: "${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES is required}"
+test "$sealed_hashes" = "$PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES" || { printf '%s\n' "expected artifact hash inputs differ" >&2; exit 1; }
 environment_dir=$cell_result.environments
 initial_environment=$environment_dir/initial.json
 resume_environment=$environment_dir/resume.json
@@ -270,7 +279,7 @@ fi
 DATABASE_URL="$admin_url" "$seed" --output "$work_dir/seed.sqlite"
 test -s "$work_dir/seed.sqlite"
 set -- python3 "$tool" complete-server-cell --repo-root "$repo_root" --cell "$cell_id" --output "$cell_result" --initial "$work_dir/initial.json" --resume "$work_dir/resume.json" --killed-pid "$killed_pid" --remote "$work_dir/remote.json" --server-verification "$work_dir/server.json" --artifact "$extension_archive" --artifact "$adapter" --artifact "$seed"
-set -- "$@" --initial-environment "$initial_environment" --resume-environment "$resume_environment" --release-manifest "$release_manifest"
+set -- "$@" --initial-environment "$initial_environment" --resume-environment "$resume_environment" "$input_flag" "$input_path"
 for hash in $sealed_hashes; do set -- "$@" --expected-artifact-hash "$hash"; done
 "$@"
 "$provisioner" lifecycle --state-dir "$work_dir/state" destroy "$attach_run_id" >/dev/null

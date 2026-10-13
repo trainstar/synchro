@@ -33,8 +33,8 @@ import (
 const (
 	maxReadinessResultBytes = 64
 
-	// DefaultDatabaseQueryTimeout bounds one canonical extension call. It remains
-	// below the standalone server write timeout.
+	// DefaultDatabaseQueryTimeout bounds preparation and the canonical extension call.
+	// It remains below the standalone server write timeout.
 	DefaultDatabaseQueryTimeout = 25 * time.Second
 )
 
@@ -70,15 +70,22 @@ type Config struct {
 	// Leave empty to skip version checking.
 	MinClientVersion string
 
-	// DatabaseQueryTimeout bounds one canonical extension call. A zero value uses
-	// DefaultDatabaseQueryTimeout. A negative value is invalid.
+	// DatabaseQueryTimeout bounds preparation and the canonical extension call.
+	// A zero value uses DefaultDatabaseQueryTimeout. A negative value is invalid.
 	DatabaseQueryTimeout time.Duration
+
+	// PreparePush sets transaction-local host context before canonical push.
+	// It must honor ctx and must not perform application DML, commit, rollback,
+	// or change transaction isolation. Synchro does not interpret its settings.
+	// A nil callback preserves the direct query path. Other routes do not call it.
+	PreparePush func(ctx context.Context, tx *sql.Tx) error
 }
 
 // Handler holds the database connection and serves sync endpoints.
 type Handler struct {
 	db           *sql.DB
 	queryTimeout time.Duration
+	preparePush  func(context.Context, *sql.Tx) error
 }
 
 // Routes returns an http.Handler with all sync endpoints mounted.
@@ -111,7 +118,7 @@ func Routes(cfg Config) http.Handler {
 		panic("synchroapi: effective database query timeout must be positive")
 	}
 
-	h := &Handler{db: cfg.DB, queryTimeout: queryTimeout}
+	h := &Handler{db: cfg.DB, queryTimeout: queryTimeout, preparePush: cfg.PreparePush}
 
 	mux := http.NewServeMux()
 

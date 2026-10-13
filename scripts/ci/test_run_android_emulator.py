@@ -200,7 +200,7 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual(launch, [
             str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", "Synchro_Kotlin_API_34",
             "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
-            "-no-boot-anim", "-camera-back", "none",
+            "-no-boot-anim", "-camera-back", "none", "-feature", "-WiFiPacketStream",
         ])
         test, options = self.commands("make")[0]
         self.assertEqual(test, ["make", "ci-candidate-kotlin"])
@@ -238,10 +238,16 @@ class EmulatorRunnerTests(unittest.TestCase):
         self.assertEqual(list(self.sdk.glob(".synchro-emulator-*")), [])
 
     def test_memory_option_retains_react_native_position(self):
-        self.argv[-3:-3] = ["--memory", "6144"]
-        self.assertEqual(self.run_fixture(), 0)
-        command = self.commands("emulator")[1][0]
-        self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
+        for api, image in (("34", "34"), ("37", "37.0")):
+            with self.subTest(api=api):
+                argv = list(self.argv)
+                argv[5], argv[7] = api, image
+                argv[-3:-3] = ["--memory", "6144"]
+                self.calls.clear()
+                with self.boundaries():
+                    self.assertEqual(runner.Runner(runner.arguments(argv)).run(), 0)
+                command = self.commands("emulator")[1][0]
+                self.assertEqual(command[7:11], ["-memory", "6144", "-gpu", "software"])
 
     def test_server_is_ready_before_emulator_starts(self):
         with self.boundaries(), mock.patch.object(runner.socket, "create_connection") as connect:
@@ -396,8 +402,10 @@ class EmulatorRunnerTests(unittest.TestCase):
                 ]])
                 self.assertEqual(self.commands("emulator")[1][0], [
                     str(self.sdk / "emulator/emulator"), "-port", "5554", "-avd", selected.avd_name,
-                    "-no-snapshot-save", "-no-window", "-gpu", "software", "-noaudio",
-                    "-no-boot-anim", "-camera-back", "none",
+                    "-no-snapshot-save", "-no-window",
+                    *(["-memory", "4096"] if api == "37" else []),
+                    "-gpu", "software", "-noaudio",
+                    "-no-boot-anim", "-camera-back", "none", "-feature", "-WiFiPacketStream",
                     *(["-feature", "GLDirectMem,HasSharedSlotsHostMemoryAllocator"] if api == "37" else []),
                 ])
                 self.assertEqual([call.kwargs for call in command_boundary.call_args_list if Path(call.args[1][0]).name == "sdkmanager"], [{"timeout": 900}])
@@ -613,6 +621,43 @@ class EmulatorRunnerTests(unittest.TestCase):
                     execution.execute()
             self.assertEqual(execution.adb.call_args_list, [mock.call(["wait-for-device"], 2), mock.call(["shell", "getprop", "sys.boot_completed"], 1)])
             self.assertIsNone(execution.test)
+            execution.log.close()
+
+    def test_boot_property_timeout_requires_later_completion_before_test_start(self):
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.prepare()
+            probes = 0
+
+            def adb(command, timeout=180):
+                nonlocal probes
+                if command == ["shell", "getprop", "sys.boot_completed"]:
+                    self.assertEqual(self.commands("make"), [])
+                    self.assertEqual(timeout, 5)
+                    probes += 1
+                    if probes == 1:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    return "1\n"
+                return ""
+
+            execution.adb = mock.Mock(side_effect=adb)
+            with mock.patch.object(execution, "start_adb_server"):
+                self.assertEqual(execution.execute(), 0)
+            self.assertEqual(probes, 2)
+            self.assertEqual(len(self.commands("make")), 1)
+            execution.log.close()
+
+    def test_boot_property_timeout_cannot_extend_deadline_or_start_test(self):
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.prepare()
+            execution.adb = mock.Mock(side_effect=["", subprocess.TimeoutExpired("getprop", 1)])
+            with mock.patch.object(execution, "start_adb_server"), mock.patch.object(runner.time, "monotonic", side_effect=[0, 898, 899, 900, 900]):
+                with self.assertRaises(runner.RunnerError):
+                    execution.execute()
+            self.assertEqual(execution.adb.call_args_list, [mock.call(["wait-for-device"], 2), mock.call(["shell", "getprop", "sys.boot_completed"], 1)])
+            self.assertIsNone(execution.test)
+            self.assertEqual(self.commands("make"), [])
             execution.log.close()
 
     def test_boot_early_exit_prevents_test_start(self):
@@ -1311,11 +1356,26 @@ class EmulatorRunnerTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_process_exit_during_stat_read_is_an_ordinary_race(self):
-        command = mock.Mock()
-        with mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=FileNotFoundError()), mock.patch.object(Path, "readlink") as readlink:
-            runner.check_active_emulator(self.sdk / "emulator", command)
-        readlink.assert_not_called()
-        command.assert_not_called()
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            command = mock.Mock()
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=error), mock.patch.object(Path, "readlink") as readlink:
+                runner.check_active_emulator(self.sdk / "emulator", command)
+            readlink.assert_not_called()
+            command.assert_not_called()
+
+    def test_process_exit_during_executable_read_is_an_ordinary_race(self):
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            command = mock.Mock()
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", return_value=USER_PROCESS_STAT), mock.patch.object(Path, "readlink", side_effect=error):
+                runner.check_active_emulator(self.sdk / "emulator", command)
+            command.assert_not_called()
+
+    def test_group_scan_retains_live_members_after_another_process_exits(self):
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            with self.subTest(error=type(error).__name__), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234"), Path("/proc/5678")])), mock.patch.object(Path, "read_text", side_effect=[error, "5678 (fixture) S 1 321 321 0 -1 0\n"]):
+                self.assertTrue(runner.group_alive(Process(321)))
+            with self.subTest(error=type(error).__name__, live=False), mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/1234")])), mock.patch.object(Path, "read_text", side_effect=error):
+                self.assertFalse(runner.group_alive(Process(321)))
 
     def test_prepare_denied_user_process_uses_initialized_retained_log(self):
         inspect = runner.check_active_emulator

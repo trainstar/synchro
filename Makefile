@@ -561,7 +561,7 @@ test-docs-contract:
 	cd docs && npm run verify:contract
 
 conformance-mod-download:
-	cd conformance && GOFLAGS= GOWORK=off go mod download all
+	cd conformance && GOFLAGS= GOWORK=off go mod download
 
 build-conformance: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go build ./...
@@ -1040,6 +1040,7 @@ release-run-support-cell:
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--role pg-extension --role adapter --role seed-tool)"; \
 			PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
+			PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
 			python3 scripts/release-artifacts.py run-verified --release-dir "$$release" --version "$(VERSION)" \
 				--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 				--source-commit "$$(git rev-parse --verify HEAD)" -- \
@@ -1089,24 +1090,34 @@ test-android-emulator-prepare: test-python-runner
 test-server-consumer-helper:
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult suite -dir ../verification/consumers/server -- env GO111MODULE=off go test -json -count=1
 
-# The same server lifecycle as release-run-support-cell SUP-PG-LINUX-X64-001, with
-# locally built adapter, seed, and provisioner and the conformance extension artifact.
+# Local inputs must retain the artifact files identified before lifecycle execution.
 test-consumer-server: build-local-postgres
-	@test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }
-	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
+	@set -eu; release="$(PACKAGED_SMOKE_RELEASE_MANIFEST)"; local_inputs="$(PACKAGED_SMOKE_LOCAL_INPUTS)"; \
+		case "$${release:+release}$${local_inputs:+local}" in release|local) ;; *) echo "exactly one lifecycle input is required" >&2; exit 1 ;; esac; \
+		input="$$release$$local_inputs"; test -f "$$input" && test -r "$$input" || { echo "lifecycle input must be readable" >&2; exit 1; }
+	@if [ -z "$(PACKAGED_SMOKE_LOCAL_INPUTS)" ]; then test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact; fi
 	@test -x "$(PGRX_PG_BIN_DIR)"/initdb || { echo "PostgreSQL 18 binaries are required in PGRX_PG_BIN_DIR" >&2; exit 1; }
 	@set -eu; \
 		mkdir -p "$(PACKAGED_SMOKE_TMP_ROOT)" "$(PACKAGED_SMOKE_CELL_DIR)"; \
 		work="$$(mktemp -d "$(PACKAGED_SMOKE_TMP_ROOT)/synchro-server-artifacts.XXXXXX")"; \
 		trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
-		python3 scripts/release-artifacts.py archive-extension --source "$(CONFORMANCE_EXTENSION_ARTIFACT)" --output "$$work/extension.tar.gz"; \
-		$(MAKE) --no-print-directory build BINARY="$$work/synchrod-pg" build-seed SEED_BINARY="$$work/synchro-seed"; \
+		if [ -n "$(PACKAGED_SMOKE_LOCAL_INPUTS)" ]; then \
+			test -n "$(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS)" && test -n "$(PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES)" || { echo "local server artifact files and expected hashes are required" >&2; exit 1; }; \
+			set -- $(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS); \
+			test "$$#" -eq 3 || { echo "local server artifacts must be extension archive, adapter, and seed" >&2; exit 1; }; \
+			extension="$$1"; adapter="$$2"; seed="$$3"; hashes="$(PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES)"; \
+		else \
+			python3 scripts/release-artifacts.py archive-extension --source "$(CONFORMANCE_EXTENSION_ARTIFACT)" --output "$$work/extension.tar.gz"; \
+			$(MAKE) --no-print-directory build BINARY="$$work/synchrod-pg" build-seed SEED_BINARY="$$work/synchro-seed"; \
+			extension="$$work/extension.tar.gz"; adapter="$$work/synchrod-pg"; seed="$$work/synchro-seed"; \
+			hashes="$$(shasum -a 256 "$$extension" "$$adapter" "$$seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
+		fi; \
 		result="$(PACKAGED_SMOKE_CELL_DIR)/SUP-PG-LINUX-X64-001.json"; \
 		python3 verification/packaged_smoke.py begin-cell --repo-root "$(CURDIR)" --cell SUP-PG-LINUX-X64-001 --output "$$result"; \
-		hashes="$$(shasum -a 256 "$$work/extension.tar.gz" "$$work/synchrod-pg" "$$work/synchro-seed" | cut -d ' ' -f 1 | tr '\n' ' ')"; \
 		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
-		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$work/extension.tar.gz" \
-			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$work/synchrod-pg" "$$work/synchro-seed" \
+		PACKAGED_SMOKE_LOCAL_INPUTS="$(PACKAGED_SMOKE_LOCAL_INPUTS)" PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
+		sh verification/consumers/server/test-consumer.sh "$(PGRX_PG_BIN_DIR)" "$$extension" \
+			"$(abspath $(LOCAL_POSTGRES_BINARY))" "$$adapter" "$$seed" \
 			"$(RELEASE_SERVER_LISTEN_URL)" "$(CURDIR)" SUP-PG-LINUX-X64-001 "$$result" "$$hashes"
 
 .PHONY: server-consumer-smoke-phase
@@ -1567,7 +1578,7 @@ test-rn-unit:
 test-rn-android-parity: rn-seed-asset release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
 
 test-rn-ios-parity: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/parity ONLY_ACTIVE_ARCH=YES clean build
@@ -1602,7 +1613,7 @@ test-rn-bridge-transactions-android: release-kotlin-local
 	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/react-native/android/build/outputs/androidTest-results/connected
 	@status=0; \
-		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
+		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/react-native/android/build/outputs/androidTest-results/connected) || status=$$?; \
 		exit "$$status"
 
@@ -1611,7 +1622,7 @@ build-rn-bridge-transactions-android: release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	@test -d clients/react-native/example/node_modules/@react-native/gradle-plugin || (echo "React Native dependencies are missing. Run yarn install --immutable in clients/react-native."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:assembleDebugAndroidTest
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:assembleDebugAndroidTest
 
 test-rn-warm-connect-control: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
@@ -2228,6 +2239,7 @@ test-consumer-swift: client-consumer-apple-artifact
 test-consumer-swift-ios: client-consumer-apple-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		PACKAGED_SMOKE_LOCAL_INPUTS="$(PACKAGED_SMOKE_LOCAL_INPUTS)" \
 		sh verification/consumers/swift-ios/test-consumer.sh "$(abspath $(CLIENT_ARTIFACT_DIR))"
 
 test-consumer-kotlin: client-consumer-kotlin-artifact
@@ -2277,12 +2289,23 @@ test-consumer-kotlin-device: client-consumer-kotlin-artifact
 
 test-consumer-kotlin-device-smoke:
 	@set -eu; \
-		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		release="$(PACKAGED_SMOKE_RELEASE_MANIFEST)"; local_inputs="$(PACKAGED_SMOKE_LOCAL_INPUTS)"; \
+		case "$${release:+release}$${local_inputs:+local}" in release|local) ;; *) echo "exactly one lifecycle input is required" >&2; exit 1 ;; esac; \
+		input="$$release$$local_inputs"; test -f "$$input" && test -r "$$input" || { echo "lifecycle input must be readable" >&2; exit 1; }; \
+		if [ -n "$$local_inputs" ]; then \
+			test "$(CLIENT_ARTIFACTS_PREPARED)" = 1 || { echo "local client artifacts must be prepared before execution" >&2; exit 1; }; \
+			set -- python3 verification/packaged_smoke.py validate-local-consumer-inputs --repo-root "$(CURDIR)" \
+				--cell "$(PACKAGED_SMOKE_CELL_ID)" --local-inputs "$$local_inputs" --artifact-dir "$(abspath $(CLIENT_ARTIFACT_DIR))" --version "$(CURRENT_VERSION)"; \
+			for artifact in $(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS); do set -- "$$@" --artifact "$$artifact"; done; \
+			for hash in $(PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES); do set -- "$$@" --expected-artifact-hash "$$hash"; done; \
+			"$$@"; \
+		fi; \
 		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
 		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 		$(MAKE) test-consumer-kotlin ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		PACKAGED_SMOKE_LOCAL_INPUTS="$(PACKAGED_SMOKE_LOCAL_INPUTS)" \
 		ANDROID_HOME="$(ANDROID_HOME)" \
 		sh verification/consumers/kotlin/test-consumer-device.sh \
 			"$(CURDIR)" "$(abspath $(CLIENT_ARTIFACT_DIR))" \
@@ -2301,6 +2324,7 @@ test-consumer-rn-android: client-consumer-kotlin-artifact client-consumer-rn-art
 test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-artifact
 	SUPPORT_PLATFORM_VERSION="$(SUPPORT_PLATFORM_VERSION)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		PACKAGED_SMOKE_LOCAL_INPUTS="$(PACKAGED_SMOKE_LOCAL_INPUTS)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
@@ -2308,7 +2332,17 @@ test-consumer-rn-ios-smoke: client-consumer-apple-artifact client-consumer-rn-ar
 
 test-consumer-rn-android-smoke:
 	@set -eu; \
-		test -n "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -f "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" && test -r "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "PACKAGED_SMOKE_RELEASE_MANIFEST must be an explicit readable file" >&2; exit 1; }; \
+		release="$(PACKAGED_SMOKE_RELEASE_MANIFEST)"; local_inputs="$(PACKAGED_SMOKE_LOCAL_INPUTS)"; \
+		case "$${release:+release}$${local_inputs:+local}" in release|local) ;; *) echo "exactly one lifecycle input is required" >&2; exit 1 ;; esac; \
+		input="$$release$$local_inputs"; test -f "$$input" && test -r "$$input" || { echo "lifecycle input must be readable" >&2; exit 1; }; \
+		if [ -n "$$local_inputs" ]; then \
+			test "$(CLIENT_ARTIFACTS_PREPARED)" = 1 || { echo "local client artifacts must be prepared before execution" >&2; exit 1; }; \
+			set -- python3 verification/packaged_smoke.py validate-local-consumer-inputs --repo-root "$(CURDIR)" \
+				--cell "$(PACKAGED_SMOKE_CELL_ID)" --local-inputs "$$local_inputs" --artifact-dir "$(abspath $(CLIENT_ARTIFACT_DIR))" --version "$(CURRENT_VERSION)"; \
+			for artifact in $(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS); do set -- "$$@" --artifact "$$artifact"; done; \
+			for hash in $(PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES); do set -- "$$@" --expected-artifact-hash "$$hash"; done; \
+			"$$@"; \
+		fi; \
 		serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")"; \
 		export ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 		$(MAKE) android-emulator-prepare ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
@@ -2316,6 +2350,7 @@ test-consumer-rn-android-smoke:
 		$(MAKE) client-consumer-rn-artifact ANDROID_SERIAL="$$serial" KOTLIN_ANDROID_SERIAL="$$serial"; \
 		ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" PACKAGED_SMOKE_PSQL="$(PACKAGED_SMOKE_PSQL)" \
 		PACKAGED_SMOKE_RELEASE_MANIFEST="$(PACKAGED_SMOKE_RELEASE_MANIFEST)" \
+		PACKAGED_SMOKE_LOCAL_INPUTS="$(PACKAGED_SMOKE_LOCAL_INPUTS)" \
 		PACKAGED_SMOKE_TMP_ROOT="$(PACKAGED_SMOKE_TMP_ROOT)" \
 		PACKAGED_SMOKE_CELL_ID="$(PACKAGED_SMOKE_CELL_ID)" \
 		PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_RESULT)" \
@@ -2335,6 +2370,14 @@ test-client-platforms:
 		export SYNCHRO_TEST_JWT_SECRET="$(SYNCHRO_TEST_JWT_SECRET)"; \
 		export PACKAGED_SMOKE_CELL_ID="$(SUPPORT_CELL_ID)"; \
 		export PACKAGED_SMOKE_CELL_RESULT="$(PACKAGED_SMOKE_CELL_DIR)/$(SUPPORT_CELL_ID).json"; \
+		if [ -n "$(PACKAGED_SMOKE_LOCAL_INPUTS)" ]; then \
+			test -z "$(PACKAGED_SMOKE_RELEASE_MANIFEST)" || { echo "exactly one lifecycle input is required" >&2; exit 1; }; \
+			set -- python3 verification/packaged_smoke.py validate-local-consumer-inputs --repo-root "$(CURDIR)" \
+				--cell "$(SUPPORT_CELL_ID)" --local-inputs "$(PACKAGED_SMOKE_LOCAL_INPUTS)" --artifact-dir "$(abspath $(CLIENT_ARTIFACT_DIR))" --version "$(CURRENT_VERSION)"; \
+			for artifact in $(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS); do set -- "$$@" --artifact "$$artifact"; done; \
+			for hash in $(PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES); do set -- "$$@" --expected-artifact-hash "$$hash"; done; \
+			"$$@"; \
+		fi; \
 		case "$(SUPPORT_CELL_ID)" in \
 		SUP-IOS-MIN-001) \
 			test "$(SUPPORT_PLATFORM_VERSION)" = "17" || { echo "SUPPORT_PLATFORM_VERSION must be 17" >&2; exit 1; }; \
@@ -2359,6 +2402,16 @@ test-client-platforms:
 			$(MAKE) test-consumer-rn-ios-smoke ;; \
 		*) echo "unknown client support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
 	esac
+
+.PHONY: prepare-local-smoke-cell
+prepare-local-smoke-cell:
+	@set -eu; \
+		test -n "$(SUPPORT_CELL_ID)" && test -n "$(PACKAGED_SMOKE_LOCAL_INPUTS)" && test -n "$(PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS)" && test -n "$(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS)" || { echo "local cell, input output, support environments, and artifact files are required" >&2; exit 1; }; \
+		set -- python3 verification/packaged_smoke.py prepare-local-cell --repo-root "$(CURDIR)" \
+			--cell "$(SUPPORT_CELL_ID)" --support-environments "$(PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS)" --output "$(PACKAGED_SMOKE_LOCAL_INPUTS)"; \
+		case "$(SUPPORT_CELL_ID)" in SUP-PG-*) ;; *) set -- "$$@" --artifact-dir "$(abspath $(CLIENT_ARTIFACT_DIR))" ;; esac; \
+		for artifact in $(PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS); do set -- "$$@" --artifact "$$artifact"; done; \
+		"$$@"
 
 test-packaged-smoke:
 	@python3 verification/packaged_smoke.py collect \

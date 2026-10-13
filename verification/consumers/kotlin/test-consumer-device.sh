@@ -9,8 +9,26 @@ version=${5:?version is required}
 tool="$repo_root/verification/packaged_smoke.py"
 probe="$repo_root/verification/probe_support_environment.py"
 environment_dir="$cell_result.environments"
-release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
-test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:-}
+local_inputs=${PACKAGED_SMOKE_LOCAL_INPUTS:-}
+case "${release_manifest:+release}${local_inputs:+local}" in
+  release|local) ;;
+  *) printf '%s\n' "exactly one of PACKAGED_SMOKE_RELEASE_MANIFEST or PACKAGED_SMOKE_LOCAL_INPUTS is required" >&2; exit 1 ;;
+esac
+if [ -n "$local_inputs" ]; then input_flag=--local-inputs; input_path=$local_inputs;
+else input_flag=--release-manifest; input_path=$release_manifest; fi
+test -f "$input_path" && test -r "$input_path" || { printf '%s\n' "lifecycle input must be a readable file" >&2; exit 1; }
+if [ -n "$local_inputs" ]; then
+  set -- python3 "$tool" validate-local-consumer-inputs --repo-root "$repo_root" \
+    --cell "$cell_id" --local-inputs "$local_inputs" --artifact-dir "$artifact_dir" --version "$version"
+  for artifact in ${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:?local consumer artifact files are required}; do
+    set -- "$@" --artifact "$artifact"
+  done
+  for hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?expected artifact hashes are required}; do
+    set -- "$@" --expected-artifact-hash "$hash"
+  done
+  "$@"
+fi
 tmp_root=${PACKAGED_SMOKE_TMP_ROOT:?PACKAGED_SMOKE_TMP_ROOT is required}
 adb=${ANDROID_HOME:?ANDROID_HOME is required}/platform-tools/adb
 package=com.trainstar.synchro.consumer
@@ -259,7 +277,8 @@ set -- python3 "$tool" complete-cell \
   --server-verification "$work_dir/server.json" \
   --initial-environment "$environment_dir/initial.json" \
   --resume-environment "$environment_dir/resume.json" \
-  --release-manifest "$release_manifest"
+  "$input_flag" "$input_path"
+if [ -n "$local_inputs" ]; then set -- "$@" --artifact-dir "$artifact_dir" --version "$version"; fi
 distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$aar}
 for artifact in $distribution_artifacts; do
   set -- "$@" --artifact "$artifact"
