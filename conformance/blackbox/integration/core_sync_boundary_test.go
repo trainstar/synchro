@@ -146,19 +146,25 @@ func coreSyncBoundaryOutboundHTTP() {
 	})
 
 	for _, entrypoint := range []string{"serveConnect", "servePull", "serveRebuild"} {
-		t.Run("rejects preparation in "+entrypoint, func(t *testing.T) {
-			mutated := maps.Clone(sources)
-			signature := "func (h *Handler) " + entrypoint + "(w http.ResponseWriter, r *http.Request) {\n"
-			source := string(mutated["api/go/handlers.go"])
-			if strings.Count(source, signature) != 1 {
-				t.Fatal("core entrypoint source signature changed")
-			}
-			mutated["api/go/handlers.go"] = []byte(strings.Replace(source, signature, signature+"_ = h.preparePush(r.Context(), nil)\n", 1))
-			err := auditCoreSyncBoundary(mutated)
-			if err == nil || !strings.Contains(err.Error(), "push preparation outside servePush") {
-				t.Fatalf("preparation entrypoint negative control passed: %v", err)
-			}
-		})
+		for _, call := range []string{
+			"_ = h.preparePush(r.Context(), nil)",
+			"prepare := h.preparePush; _ = prepare(r.Context(), nil)",
+			"_ = (h.preparePush)(r.Context(), nil)",
+		} {
+			t.Run("rejects preparation in "+entrypoint, func(t *testing.T) {
+				mutated := maps.Clone(sources)
+				signature := "func (h *Handler) " + entrypoint + "(w http.ResponseWriter, r *http.Request) {\n"
+				source := string(mutated["api/go/handlers.go"])
+				if strings.Count(source, signature) != 1 {
+					t.Fatal("core entrypoint source signature changed")
+				}
+				mutated["api/go/handlers.go"] = []byte(strings.Replace(source, signature, signature+call+"\n", 1))
+				err := auditCoreSyncBoundary(mutated)
+				if err == nil || !strings.Contains(err.Error(), "push preparation outside servePush") {
+					t.Fatalf("preparation entrypoint negative control passed: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -367,11 +373,6 @@ func auditCoreSyncDeclaration(
 			*queue = append(*queue, declarations[identifier.Name]...)
 		}
 		if call, ok := node.(*ast.CallExpr); ok {
-			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "preparePush" &&
-				(declaration.sourceName != "api/go/handlers.go" || declaration.name != "servePush") {
-				violation = coreSyncViolation(fileSet, declaration, selector.Pos(), "push preparation outside servePush")
-				return false
-			}
 			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && outboundMethodNames[selector.Sel.Name] {
 				packageName, packageSelector := selector.X.(*ast.Ident)
 				if !packageSelector || packageName.Obj != nil || declaration.imports[packageName.Name] == "" {
@@ -383,6 +384,11 @@ func auditCoreSyncDeclaration(
 		selector, ok := node.(*ast.SelectorExpr)
 		if !ok {
 			return true
+		}
+		if selector.Sel.Name == "preparePush" &&
+			(declaration.sourceName != "api/go/handlers.go" || declaration.name != "servePush") {
+			violation = coreSyncViolation(fileSet, declaration, selector.Pos(), "push preparation outside servePush")
+			return false
 		}
 		*queue = append(*queue, declarations[selector.Sel.Name]...)
 		packageName, ok := selector.X.(*ast.Ident)
