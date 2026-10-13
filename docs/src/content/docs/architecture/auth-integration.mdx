@@ -30,6 +30,40 @@ query parameter, or client header into that context.
 `synchrod-pg` configures only direct JWT validation from environment variables.
 Embed `Routes` in the trusted upstream server when you need `UserIDResolver`.
 
+## Transaction-local push context
+
+An embedded host can configure `PreparePush` to supply trusted context to application triggers during canonical push.
+The callback receives the bounded request context and the push transaction.
+Use transaction-local settings only.
+The callback must honor its context.
+It must not perform application DML, commit, rollback, or change isolation.
+Synchro does not interpret host setting names or values.
+
+```go
+handler := synchroapi.Routes(synchroapi.Config{
+    DB: db,
+    UserIDResolver: synchroapi.RequestContextUserIDResolver,
+    PreparePush: func(ctx context.Context, tx *sql.Tx) error {
+        _, err := tx.ExecContext(ctx,
+            "SELECT pg_catalog.set_config('host.request_id', $1, true)",
+            trustedRequestID(ctx),
+        )
+        return err
+    },
+})
+```
+
+The host defines `trustedRequestID` and supplies its value through the trusted request context.
+Do not add host context values to the sync request body or an authentication mode.
+The adapter begins, prepares, and queries with one context bounded by `DatabaseQueryTimeout`.
+It commits before it maps or writes the extension response.
+Begin, preparation, query, and commit failures return no successful push response.
+Unfinished transactions roll back.
+Transaction-local settings end at commit or rollback.
+Exact response replay remains unchanged.
+Other routes do not invoke the callback.
+An unset callback preserves the direct query path.
+
 ## Adapter JWT authentication
 
 Use one of these modes when the adapter validates bearer tokens:
