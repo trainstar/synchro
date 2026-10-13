@@ -780,7 +780,7 @@ func TestRealScenarioResetRegistrationRLSPrecedesSourceCatalogMutations(t *testi
 	defer registration.Rollback()
 	// An old-order mutation has the vacuum wait first. This makes the
 	// registration backend, rather than VACUUM, report the demonstrated error.
-	if _, err := registration.ExecContext(ctx, "SET LOCAL deadlock_timeout = '100 milliseconds'"); err != nil {
+	if _, err := registration.ExecContext(ctx, "SET LOCAL deadlock_timeout = '100ms'"); err != nil {
 		t.Fatalf("set registration deadlock detector timing: %v", err)
 	}
 	if _, err := registration.ExecContext(ctx, prefix); err != nil {
