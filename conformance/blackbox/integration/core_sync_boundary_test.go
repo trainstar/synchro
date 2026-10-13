@@ -43,7 +43,6 @@ var allowedCoreSQLSelectors = map[string]bool{
 	"ErrConnDone": true,
 	"ErrNoRows":   true,
 	"ErrTxDone":   true,
-	"Tx":          true,
 }
 
 var outboundMethodNames = map[string]bool{
@@ -132,6 +131,32 @@ func coreSyncBoundaryOutboundHTTP() {
 			err := auditCoreSyncBoundary(mutated)
 			if err == nil || !strings.Contains(err.Error(), "function-typed dependency") {
 				t.Fatalf("callback negative control passed: %v", err)
+			}
+		})
+	}
+
+	t.Run("rejects an additional transaction dependency", func(t *testing.T) {
+		mutated := maps.Clone(sources)
+		source := string(mutated["api/go/synchro.go"])
+		mutated["api/go/synchro.go"] = []byte(strings.Replace(source, "type Handler struct {", "type Handler struct {\nadditionalTx *sql.Tx", 1))
+		err := auditCoreSyncBoundary(mutated)
+		if err == nil || !strings.Contains(err.Error(), "database/sql.Tx") {
+			t.Fatalf("additional transaction negative control passed: %v", err)
+		}
+	})
+
+	for _, entrypoint := range []string{"serveConnect", "servePull", "serveRebuild"} {
+		t.Run("rejects preparation in "+entrypoint, func(t *testing.T) {
+			mutated := maps.Clone(sources)
+			signature := "func (h *Handler) " + entrypoint + "(w http.ResponseWriter, r *http.Request) {\n"
+			source := string(mutated["api/go/handlers.go"])
+			if strings.Count(source, signature) != 1 {
+				t.Fatal("core entrypoint source signature changed")
+			}
+			mutated["api/go/handlers.go"] = []byte(strings.Replace(source, signature, signature+"_ = h.preparePush(r.Context(), nil)\n", 1))
+			err := auditCoreSyncBoundary(mutated)
+			if err == nil || !strings.Contains(err.Error(), "push preparation outside servePush") {
+				t.Fatalf("preparation entrypoint negative control passed: %v", err)
 			}
 		})
 	}
@@ -307,6 +332,7 @@ func auditCoreSyncDeclaration(
 	queue *[]*coreSyncDeclaration,
 ) error {
 	var violation error
+	var preparationField *ast.Field
 	if typeSpec, ok := declaration.node.(*ast.TypeSpec); ok {
 		ast.Inspect(typeSpec.Type, func(node ast.Node) bool {
 			// The approved host policy prepares transaction-local context before canonical SQL execution.
@@ -316,6 +342,7 @@ func auditCoreSyncDeclaration(
 				var signature strings.Builder
 				if err := format.Node(&signature, fileSet, field.Type); err == nil &&
 					signature.String() == "func(context.Context, *sql.Tx) error" {
+					preparationField = field
 					return false
 				}
 			}
@@ -333,10 +360,18 @@ func auditCoreSyncDeclaration(
 		if node == nil || violation != nil {
 			return false
 		}
+		if node == preparationField {
+			return false
+		}
 		if identifier, ok := node.(*ast.Ident); ok {
 			*queue = append(*queue, declarations[identifier.Name]...)
 		}
 		if call, ok := node.(*ast.CallExpr); ok {
+			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "preparePush" &&
+				(declaration.sourceName != "api/go/handlers.go" || declaration.name != "servePush") {
+				violation = coreSyncViolation(fileSet, declaration, selector.Pos(), "push preparation outside servePush")
+				return false
+			}
 			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && outboundMethodNames[selector.Sel.Name] {
 				packageName, packageSelector := selector.X.(*ast.Ident)
 				if !packageSelector || packageName.Obj != nil || declaration.imports[packageName.Name] == "" {
