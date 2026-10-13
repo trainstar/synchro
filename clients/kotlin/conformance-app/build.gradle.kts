@@ -26,11 +26,11 @@ android {
 }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     implementation(project(":synchro"))
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test:core-ktx:1.5.0")
-    androidTestImplementation("androidx.test:runner:1.5.2")
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:core-ktx:1.7.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
 }
