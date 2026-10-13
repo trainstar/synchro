@@ -30,7 +30,7 @@ module.exports = {
       testBinaryPath:
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        `cd android && ./gradlew ${gradleMavenRepo} assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true`,
+        `cd android && ./gradlew -Pkotlin.compiler.execution.strategy=in-process ${gradleMavenRepo} assembleDebug assembleAndroidTest -DtestBuildType=debug -PdetoxBundleDebug=true`,
       reversePorts: [8081],
     },
     'android.release': {
@@ -39,7 +39,7 @@ module.exports = {
       testBinaryPath:
         'android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk',
       build:
-        `cd android && ./gradlew ${gradleMavenRepo} assembleRelease assembleDebugAndroidTest`,
+        `cd android && ./gradlew -Pkotlin.compiler.execution.strategy=in-process ${gradleMavenRepo} assembleRelease assembleDebugAndroidTest`,
       reversePorts: [8081],
     },
   },

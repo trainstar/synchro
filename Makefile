@@ -1578,7 +1578,7 @@ test-rn-unit:
 test-rn-android-parity: rn-seed-asset release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:clean :trainstar_synchro-react-native:generateCodegenArtifactsFromSchema :trainstar_synchro-react-native:compileDebugKotlin --rerun-tasks
 
 test-rn-ios-parity: rn-seed-asset rn-watchman-reset rn-ios-pods
 	cd clients/react-native/example && xcodebuild -quiet -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/parity ONLY_ACTIVE_ARCH=YES clean build
@@ -1613,7 +1613,7 @@ test-rn-bridge-transactions-android: release-kotlin-local
 	@$(REQUIRE_ONE_ANDROID_SERIAL)
 	rm -rf clients/react-native/android/build/outputs/androidTest-results/connected
 	@status=0; \
-		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
+		(cd clients/react-native/example/android && ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" $(GRADLE_TEST_ARGS) :trainstar_synchro-react-native:connectedDebugAndroidTest) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult junit -path ../clients/react-native/android/build/outputs/androidTest-results/connected) || status=$$?; \
 		exit "$$status"
 
@@ -1622,7 +1622,7 @@ build-rn-bridge-transactions-android: release-kotlin-local
 	@test -n "$(ANDROID_JAVA_HOME)" || (echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install."; exit 1)
 	@test -d "$(ANDROID_HOME)" || (echo "Android SDK not found at $(ANDROID_HOME). Set ANDROID_HOME to a valid SDK install."; exit 1)
 	@test -d clients/react-native/example/node_modules/@react-native/gradle-plugin || (echo "React Native dependencies are missing. Run yarn install --immutable in clients/react-native."; exit 1)
-	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:assembleDebugAndroidTest
+	cd clients/react-native/example/android && ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SDK_ROOT="$(ANDROID_HOME)" JAVA_HOME="$(ANDROID_JAVA_HOME)" PATH="$(ANDROID_JAVA_HOME)/bin:$$PATH" ./gradlew -Pkotlin.compiler.execution.strategy=in-process -Dmaven.repo.local="$(SYNCHRO_MAVEN_REPO)" :trainstar_synchro-react-native:assembleDebugAndroidTest
 
 test-rn-warm-connect-control: conformance-mod-download
 	cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
