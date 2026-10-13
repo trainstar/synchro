@@ -2864,7 +2864,7 @@ SPEC CHECKSUMS:
   fast_float: b32c788ed9c6a8c584d114d0047beda9664e7cc6
   FBLazyVector: 07433c4ab85da44d0b5ceac374ff4e1d57c7aa23
   fmt: 530618a01105dae0fa3a2f27c81ae11fa8f67eac
-  glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
+  glog: 0456694f3aaf09460b660ea327cfc11defbeea4c
   GRDB.swift: 682e07f771a9100f0bdf40fd0bed57b83ca08e29
   hermes-engine: f37e1d6f1eb198649a60b3f17b6f685a6ac12470
   RCT-Folly: 121436bcc4611f6bde5c09bf35f0a7a82cef1969
