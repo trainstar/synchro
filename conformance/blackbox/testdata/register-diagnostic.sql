@@ -15,6 +15,26 @@ SELECT synchro.synchro_prepare_projection_view('public.cf_late_registration', 'c
 SELECT synchro.synchro_prepare_projection_view('public.cf_generated_items', 'cf_generated_items', ARRAY['owner_id']);
 SELECT synchro.synchro_prepare_projection_view('public.cf_source_filled_items', 'cf_source_filled_items', ARRAY['owner_id']);
 
+DO $rls$
+DECLARE
+    relation_name text;
+BEGIN
+    FOREACH relation_name IN ARRAY ARRAY[
+        'cf_global_items', 'cf_items', 'cf_documents', 'cf_document_members',
+        'cf_document_access', 'cf_document_notes', 'cf_schema_queue',
+        'cf_decode_trap', 'cf_late_registration', 'cf_generated_items',
+        'cf_source_filled_items', 'cf_item_impacts'
+    ]
+    LOOP
+        EXECUTE pg_catalog.format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);
+        EXECUTE pg_catalog.format(
+            'CREATE POLICY synchro_owner_all ON public.%I AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)',
+            relation_name
+        );
+    END LOOP;
+END
+$rls$;
+
 CREATE OR REPLACE FUNCTION public.cf_global_items_membership(p_id uuid)
 RETURNS SETOF text
 LANGUAGE SQL STABLE SECURITY INVOKER SET search_path = pg_catalog, synchro
@@ -117,26 +137,6 @@ GRANT SELECT ON TABLE public.cf_document_access TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_item_impacts TO synchro_owner;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_generated_items, public.cf_source_filled_items TO synchro_owner;
 GRANT SELECT ON TABLE public.cf_global_items, public.cf_items, public.cf_documents, public.cf_document_members, public.cf_document_access, public.cf_document_notes, public.cf_schema_queue, public.cf_decode_trap, public.cf_late_registration, public.cf_generated_items, public.cf_source_filled_items, public.cf_item_impacts TO synchro_worker;
-
-DO $rls$
-DECLARE
-    relation_name text;
-BEGIN
-    FOREACH relation_name IN ARRAY ARRAY[
-        'cf_global_items', 'cf_items', 'cf_documents', 'cf_document_members',
-        'cf_document_access', 'cf_document_notes', 'cf_schema_queue',
-        'cf_decode_trap', 'cf_late_registration', 'cf_generated_items',
-        'cf_source_filled_items', 'cf_item_impacts'
-    ]
-    LOOP
-        EXECUTE pg_catalog.format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', relation_name);
-        EXECUTE pg_catalog.format(
-            'CREATE POLICY synchro_owner_all ON public.%I AS PERMISSIVE FOR ALL TO synchro_owner USING (true) WITH CHECK (true)',
-            relation_name
-        );
-    END LOOP;
-END
-$rls$;
 
 SELECT synchro.synchro_register_table(
     'public.cf_global_items',
