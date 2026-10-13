@@ -314,6 +314,96 @@ The Package gate owns the full five-operation lifecycle.
 The consumer's terminal result owns phase completion. An empty queue alone cannot certify success.
 Native and React Native consumers report resume success only after stop and close finish.
 
+### Local source-artifact lifecycle before CI
+
+Required local validation uses the same connect, push, pull, kill, and resume implementation.
+It does not require or create CI identities or a partial sealed release manifest.
+First build the actual consumer artifacts through the supported source-artifact Make targets.
+Resolve all nine expected support environments independently before consumer execution.
+Store that complete resolution in `PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS`.
+Use a clean exact source commit for preparation, completion, and verification.
+
+Prepare one explicit local record per required cell:
+
+```sh
+VERSION=$(git -C "$SOURCE" show HEAD:VERSION)
+APPLE_ARCHIVE="$CONSUMER_ARTIFACT_DIR/apple/synchro-spm-$VERSION.tar.gz"
+MAVEN_BASE="$CONSUMER_ARTIFACT_DIR/maven/fit/trainstar/synchro/$VERSION/synchro-$VERSION"
+MAVEN_FILES="$MAVEN_BASE.aar $MAVEN_BASE.pom"
+if test -f "$MAVEN_BASE.module"; then MAVEN_FILES="$MAVEN_FILES $MAVEN_BASE.module"; fi
+NPM_FILE="$CONSUMER_ARTIFACT_DIR/npm/trainstar-synchro-react-native-$VERSION.tgz"
+case "$CELL" in
+  SUP-IOS-*) ARTIFACT_FILES="$APPLE_ARCHIVE" ;;
+  SUP-RN-IOS-*) ARTIFACT_FILES="$NPM_FILE $APPLE_ARCHIVE" ;;
+  SUP-ANDROID-*) ARTIFACT_FILES="$MAVEN_FILES" ;;
+  SUP-RN-ANDROID-*) ARTIFACT_FILES="$NPM_FILE $MAVEN_FILES" ;;
+  SUP-PG-*) ARTIFACT_FILES="$EXTENSION_ARCHIVE $ADAPTER_BINARY $SEED_BINARY" ;;
+esac
+make prepare-local-smoke-cell SUPPORT_CELL_ID="$CELL" \
+  CLIENT_ARTIFACT_DIR="$CONSUMER_ARTIFACT_DIR" \
+  PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS="$EXPECTED_ENVIRONMENTS" \
+  PACKAGED_SMOKE_LOCAL_INPUTS="$LOCAL_INPUTS" \
+  PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$ARTIFACT_FILES"
+```
+
+Client preparation requires the selected consumer artifact directory.
+The explicit list must identify exactly the selected cell's artifact files.
+Kotlin binds the AAR, POM, and Gradle module metadata when the publication contains that metadata.
+RN Android also binds the installed npm tarball.
+Swift local artifact identity is the selected Apple archive hash.
+RN iOS local artifact identities are the selected archive and npm tarball hashes.
+The authored Apple paths are `Package.swift`, `Synchro.podspec`, `LICENSE`, and `clients/swift/Sources`.
+The archive and expanded files must match the clean source commit.
+Their complete byte equality binds expanded authored sources without separate source-file hashes or caller enumeration.
+The only effective Swift manifest is the exact committed `Package.swift`, which selects `clients/swift/Sources/Synchro`.
+Local binding rejects every additional `Package@swift-*.swift` in the expanded package root, including case variants.
+Local RN iOS requires the default bare clone of that repository and its exact candidate tag.
+Local RN rejects public package resolution.
+Local RN iOS rejects an externally supplied `SYNCHRO_PREPUBLICATION_GIT_URL`.
+Sealed execution retains its separately verified Git resolution.
+
+The closed record contains schema version, local kind, source commit, cell identity, complete expected environments, and actual artifact hashes.
+Keep the record and expected hashes outside tested output and establish them before execution.
+Take `EXPECTED_HASHES` from the prepared record before consumer execution, not from the completed cell result.
+Pass `PACKAGED_SMOKE_LOCAL_INPUTS` instead of `PACKAGED_SMOKE_RELEASE_MANIFEST` to the existing consumer smoke target.
+Providing neither input or both inputs fails.
+Set `CLIENT_ARTIFACTS_PREPARED=1` for client execution to retain the files identified during preparation.
+Keep `PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES` and the same `PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS` explicit.
+The local server target requires three prebuilt files in order: extension archive, adapter, and seed.
+It must not rebuild those files after local identity preparation.
+Keep the selected cell, platform, simulator or device binding, and real service configuration unchanged.
+Consumer binding runs before builds or device actions and repeats before completion.
+
+Run a client cell through its existing supported entry point:
+
+```sh
+make test-client-platforms SUPPORT_CELL_ID="$CELL" SUPPORT_PLATFORM_VERSION="$PLATFORM_VERSION" \
+  CLIENT_ARTIFACT_DIR="$CONSUMER_ARTIFACT_DIR" CLIENT_ARTIFACTS_PREPARED=1 \
+  PACKAGED_SMOKE_LOCAL_INPUTS="$LOCAL_INPUTS" PACKAGED_SMOKE_RELEASE_MANIFEST= \
+  PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$ARTIFACT_FILES" \
+  PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$EXPECTED_HASHES"
+```
+
+For the server cell, use `make test-consumer-server` with the same explicit local input, artifact list, and expected hashes.
+
+Verify each retained local cell with the original source-built files and expected hashes:
+
+```sh
+set -- python3 verification/packaged_smoke.py verify-local-cell --repo-root "$SOURCE" \
+  --cell "$CELL" --local-inputs "$LOCAL_INPUTS" --cell-result "$CELL_RESULT"
+case "$CELL" in SUP-PG-*) ;; *) set -- "$@" --artifact-dir "$CONSUMER_ARTIFACT_DIR" ;; esac
+for file in $ARTIFACT_FILES; do set -- "$@" --artifact "$file"; done
+for hash in $EXPECTED_HASHES; do set -- "$@" --expected-artifact-hash "$hash"; done
+"$@"
+```
+
+Client verification requires the same selected directory and complete artifact list.
+Completion still requires independent initial and resume measurements, real server proof, process replacement, and terminal consumer stop and close.
+Completed local evidence contains `evidence_kind="local-source-artifacts"`.
+Retain each genuine local cell result. No local summary generator is required.
+Sealed Package collection and verification reject local evidence.
+Local lifecycle success does not replace later Package execution against the exact sealed distributions.
+
 The Public gate does not repeat that lifecycle.
 It verifies public GitHub assets, Maven files, and the npm tarball against sealed identities.
 Public Maven observation contains only public file identities.

@@ -12,8 +12,15 @@ apple_package="$artifact_dir/apple/Synchro"
 if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
   cell_result=${PACKAGED_SMOKE_CELL_RESULT:?PACKAGED_SMOKE_CELL_RESULT is required}
   environment_dir="$cell_result.environments"
-  release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:?PACKAGED_SMOKE_RELEASE_MANIFEST is required}
-  test -f "$release_manifest" && test -r "$release_manifest" || { printf '%s\n' "PACKAGED_SMOKE_RELEASE_MANIFEST must be a readable file" >&2; exit 1; }
+  release_manifest=${PACKAGED_SMOKE_RELEASE_MANIFEST:-}
+  local_inputs=${PACKAGED_SMOKE_LOCAL_INPUTS:-}
+  case "${release_manifest:+release}${local_inputs:+local}" in
+    release|local) ;;
+    *) printf '%s\n' "exactly one of PACKAGED_SMOKE_RELEASE_MANIFEST or PACKAGED_SMOKE_LOCAL_INPUTS is required" >&2; exit 1 ;;
+  esac
+  if [ -n "$local_inputs" ]; then input_flag=--local-inputs; input_path=$local_inputs;
+  else input_flag=--release-manifest; input_path=$release_manifest; fi
+  test -f "$input_path" && test -r "$input_path" || { printf '%s\n' "lifecycle input must be a readable file" >&2; exit 1; }
   : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
 fi
 
@@ -26,6 +33,17 @@ artifact_dir=$(cd "$artifact_dir" && pwd -P)
 apple_package="$artifact_dir/apple/Synchro"
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$source_dir/../../.." && pwd -P)
+if [ -n "${local_inputs:-}" ]; then
+  set -- python3 "$repo_root/verification/packaged_smoke.py" validate-local-consumer-inputs \
+    --repo-root "$repo_root" --cell "$PACKAGED_SMOKE_CELL_ID" --local-inputs "$local_inputs" --artifact-dir "$artifact_dir"
+  for artifact in ${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:?local consumer artifact files are required}; do
+    set -- "$@" --artifact "$artifact"
+  done
+  for hash in ${PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES:?expected artifact hashes are required}; do
+    set -- "$@" --expected-artifact-hash "$hash"
+  done
+  "$@"
+fi
 tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
 mkdir -p "$tmp_root"
 work_dir=$(mktemp -d "$tmp_root/synchro-swift-ios-consumer.XXXXXX")
@@ -247,7 +265,8 @@ if [ -n "${PACKAGED_SMOKE_CELL_ID:-}" ]; then
     --server-verification "$work_dir/server.json" \
     --initial-environment "$environment_dir/initial.json" \
     --resume-environment "$environment_dir/resume.json" \
-    --release-manifest "$release_manifest"
+    "$input_flag" "$input_path"
+  if [ -n "$local_inputs" ]; then set -- "$@" --artifact-dir "$artifact_dir"; fi
   distribution_artifacts=${PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS:-$archive}
   for artifact in $distribution_artifacts; do
     set -- "$@" --artifact "$artifact"

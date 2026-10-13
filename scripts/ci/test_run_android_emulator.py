@@ -615,6 +615,43 @@ class EmulatorRunnerTests(unittest.TestCase):
             self.assertIsNone(execution.test)
             execution.log.close()
 
+    def test_boot_property_timeout_requires_later_completion_before_test_start(self):
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.prepare()
+            probes = 0
+
+            def adb(command, timeout=180):
+                nonlocal probes
+                if command == ["shell", "getprop", "sys.boot_completed"]:
+                    self.assertEqual(self.commands("make"), [])
+                    self.assertEqual(timeout, 5)
+                    probes += 1
+                    if probes == 1:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    return "1\n"
+                return ""
+
+            execution.adb = mock.Mock(side_effect=adb)
+            with mock.patch.object(execution, "start_adb_server"):
+                self.assertEqual(execution.execute(), 0)
+            self.assertEqual(probes, 2)
+            self.assertEqual(len(self.commands("make")), 1)
+            execution.log.close()
+
+    def test_boot_property_timeout_cannot_extend_deadline_or_start_test(self):
+        with self.boundaries():
+            execution = runner.Runner(self.selected())
+            execution.prepare()
+            execution.adb = mock.Mock(side_effect=["", subprocess.TimeoutExpired("getprop", 1)])
+            with mock.patch.object(execution, "start_adb_server"), mock.patch.object(runner.time, "monotonic", side_effect=[0, 898, 899, 900, 900]):
+                with self.assertRaises(runner.RunnerError):
+                    execution.execute()
+            self.assertEqual(execution.adb.call_args_list, [mock.call(["wait-for-device"], 2), mock.call(["shell", "getprop", "sys.boot_completed"], 1)])
+            self.assertIsNone(execution.test)
+            self.assertEqual(self.commands("make"), [])
+            execution.log.close()
+
     def test_boot_early_exit_prevents_test_start(self):
         self.emulator_polls = [7]
         self.assertEqual(self.run_fixture(), 1)
