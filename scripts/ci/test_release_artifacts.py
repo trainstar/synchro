@@ -97,6 +97,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
                     **os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                     "GITHUB_WORKSPACE": str(root), "GITHUB_ENV": str(root / "github.env"),
                     "RUNNER_TEMP": str(runner_temp),
+                    "SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH": str(runner_temp / "synchro-dispatch-adapter"),
                 }
                 result = subprocess.run(
                     ["bash", "-c", run], cwd=root, env=environment,
@@ -122,6 +123,93 @@ class ReleaseArtifactsTests(unittest.TestCase):
                     self.assertEqual(result.stderr, "")
                 else:
                     self.assertEqual(result.stderr, "Apple fixture diagnostic unavailable.\n")
+
+    def test_apple_fixture_uses_dispatch_adapter_controller_with_safe_path(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        loader = textwrap.dedent(workflow.split(
+            "      - name: Load immutable dispatch adapter controller\n        run: |\n", 1,
+        )[1].split("\n      - name:", 1)[0])
+        startup = textwrap.dedent(workflow.split(
+            "      - name: Start local Apple fixture\n        run: |\n", 1,
+        )[1].split("\n      - name:", 1)[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "scripts/ci/adapter_process.py"
+            source.parent.mkdir(parents=True)
+            source.write_text((REPO_ROOT / "scripts/ci/adapter_process.py").read_text(encoding="utf-8"), encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True, timeout=10)
+            subprocess.run(["git", "add", "scripts/ci/adapter_process.py"], cwd=root, check=True, timeout=10)
+            subprocess.run(
+                ["git", "-c", "user.name=release-test", "-c", "user.email=release-test@example.invalid", "commit", "--quiet", "-m", "reviewed controller"],
+                cwd=root, check=True, timeout=10,
+            )
+            dispatch_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            attach = root / ".ignore/r2/tmp/local-postgres"
+            attach.mkdir(parents=True)
+            (attach / "attach.env").write_text(
+                "SYNCHRO_CONFORMANCE_JWT_SECRET_FILE=" + shlex.quote(str(attach / "jwt.secret")) + "\n",
+                encoding="utf-8",
+            )
+            (attach / "jwt.secret").write_text("private-jwt\n", encoding="utf-8")
+            (attach / "postgres.url").write_text("postgres://private-url\n", encoding="utf-8")
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            make = bin_dir / "make"
+            make.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, subprocess, sys\n"
+                "from pathlib import Path\n"
+                "if sys.argv[1:] == ['local-postgres-start']:\n    raise SystemExit(0)\n"
+                "if sys.argv[1] != 'synchrod-pg-test-start':\n    raise SystemExit(99)\n"
+                "os.environ['SYNCHROD_ADAPTER_PID_FILE'] = str(Path(os.environ['RUNNER_TEMP']) / 'absent-owner.json')\n"
+                "raise SystemExit(subprocess.run(['python3', '-m', 'scripts.ci.adapter_process', 'stop'], env=os.environ, timeout=10).returncode)\n",
+                encoding="utf-8",
+            )
+            make.chmod(0o700)
+            github_env = root / "github.env"
+            environment = {
+                **os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "GITHUB_WORKSPACE": str(root), "GITHUB_ENV": str(github_env),
+                "RUNNER_TEMP": str(runner_temp), "GITHUB_SHA": dispatch_commit, "PYTHONPATH": str(root),
+            }
+            rejects_snapshot = subprocess.run(
+                ["bash", "-c", loader.replace('PYTHONPATH="$runtime:$GITHUB_WORKSPACE"', 'PYTHONPATH="$GITHUB_WORKSPACE"')],
+                cwd=root, env=environment, capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(rejects_snapshot.returncode, 0)
+            self.assertIn("dispatch adapter controller mismatch", rejects_snapshot.stderr)
+            source.write_text("raise SystemExit('candidate controller selected')\n", encoding="utf-8")
+            loaded = subprocess.run(
+                ["bash", "-c", loader], cwd=root, env=environment, capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertEqual(loaded.returncode, 0, loaded.stderr)
+            runtime = runner_temp / "synchro-dispatch-adapter"
+            self.assertIn(f"SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH={runtime}", github_env.read_text(encoding="utf-8"))
+            environment["SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH"] = str(runtime)
+            selected = subprocess.run(
+                ["bash", "-c", startup], cwd=root, env=environment, capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertEqual(selected.returncode, 0, selected.stderr)
+            without_safe_path = startup.replace("PYTHONSAFEPATH=1 ", "", 1)
+            omitted_safe_path = subprocess.run(
+                ["bash", "-c", without_safe_path], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(omitted_safe_path.returncode, 0)
+            self.assertIn("candidate controller selected", omitted_safe_path.stderr)
+            without_runtime_path = startup.replace(
+                'PYTHONPATH="$SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH:$GITHUB_WORKSPACE"', 'PYTHONPATH="$GITHUB_WORKSPACE"',
+            )
+            omitted_runtime_path = subprocess.run(
+                ["bash", "-c", without_runtime_path], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(omitted_runtime_path.returncode, 0)
+            self.assertIn("candidate controller selected", omitted_runtime_path.stderr)
 
     def test_make_build_targets_preserve_absolute_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
