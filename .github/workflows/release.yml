@@ -736,6 +736,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.candidate.outputs.source_commit }}
+          fetch-depth: 0
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -753,6 +754,27 @@ jobs:
           runtime-source: brew
 
       - uses: ./.github/actions/setup-conformance-pg18
+
+      - name: Load immutable dispatch adapter controller
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/synchro-dispatch-adapter"
+          mkdir -p "$runtime/scripts/ci"
+          git show "$GITHUB_SHA:scripts/ci/adapter_process.py" > "$runtime/scripts/ci/adapter_process.py"
+          printf 'Adapter controller dispatch commit: %s\n' "$GITHUB_SHA"
+          shasum -a 256 "$runtime/scripts/ci/adapter_process.py"
+          PYTHONSAFEPATH=1 PYTHONPATH="$runtime:$GITHUB_WORKSPACE" python3 - "$runtime/scripts/ci/adapter_process.py" <<'PY'
+          from pathlib import Path
+          import sys
+
+          from scripts.ci import adapter_process
+
+          expected = Path(sys.argv[1]).resolve()
+          actual = Path(adapter_process.__file__).resolve()
+          if actual != expected:
+              raise SystemExit("dispatch adapter controller mismatch")
+          PY
+          echo "SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH=$runtime" >> "$GITHUB_ENV"
 
       - name: Download sealed release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -823,7 +845,8 @@ jobs:
           } >> "$GITHUB_ENV"
           SYNCHROD_PG_LOG_FILE="$RUNNER_TEMP/synchrod-pg-apple-startup.log"
           export SYNCHROD_PG_LOG_FILE
-          if make synchrod-pg-test-start CLIENT_DATASET=1 SYNCHROD_PG_LOG_FILE="$SYNCHROD_PG_LOG_FILE"; then
+          if PYTHONSAFEPATH=1 PYTHONPATH="$SYNCHRO_DISPATCH_ADAPTER_PYTHONPATH:$GITHUB_WORKSPACE" \
+            make synchrod-pg-test-start CLIENT_DATASET=1 SYNCHROD_PG_LOG_FILE="$SYNCHROD_PG_LOG_FILE"; then
             :
           else
             startup_status=$?

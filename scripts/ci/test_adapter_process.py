@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import urllib.request
@@ -154,6 +156,176 @@ class AdapterProcessTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {**self.environment, "SYNCHROD_ADAPTER_READY_ATTEMPTS": invalid}):
                 with self.assertRaises(RuntimeError):
                     adapter_process.configuration()
+
+    def delayed_queries(self, delays: dict[int, float]) -> dict:
+        executable = shutil.which("lsof")
+        self.assertIsNotNone(executable)
+        wrapper = self.root / "lsof"
+        marker = self.root / "queried"
+        inspection = self.root / "inspection.pid"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            f"from pathlib import Path\nmarker = Path({str(marker)!r})\n"
+            "count = int(marker.read_text()) + 1 if marker.exists() else 1\n"
+            "marker.write_text(str(count))\n"
+            f"delays = {delays!r}\n"
+            "if count in delays:\n"
+            f"    inspection = Path({str(inspection)!r})\n"
+            "    temporary = inspection.with_suffix('.tmp')\n"
+            "    temporary.write_text(str(os.getpid()))\n"
+            "    os.replace(temporary, inspection)\n"
+            "    time.sleep(delays[count])\n"
+            f"os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n"
+        )
+        wrapper.chmod(0o700)
+        return {**self.environment, "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
+
+    def test_slow_first_query_uses_the_configured_startup_budget(self) -> None:
+        environment = self.delayed_queries({1: 5.2})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "10"
+        started = self.invoke("start", environment)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(self.invoke("status", environment).returncode, 0)
+        self.assertEqual(self.invoke("stop", environment).returncode, 0)
+        self.assert_child_exited()
+
+    def test_first_query_cannot_reset_the_startup_budget(self) -> None:
+        environment = self.delayed_queries({1: 0.5})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "0.2"
+        began = time.monotonic()
+        started = self.invoke("start", environment)
+        self.assertNotEqual(started.returncode, 0)
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / "child.pid").exists())
+
+    def test_preflight_and_readiness_share_one_budget(self) -> None:
+        environment = self.delayed_queries({1: 0.7, 2: 0.7})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "1"
+        started = self.invoke("start", environment)
+        self.assertNotEqual(started.returncode, 0)
+        self.assertFalse(self.state.exists())
+        self.assert_child_exited()
+
+    def test_stop_cancels_and_reaps_a_post_launch_query(self) -> None:
+        environment = self.delayed_queries({2: 12})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "60"
+        started = subprocess.Popen(
+            [sys.executable, "-B", "-m", "scripts.ci.adapter_process", "start"],
+            cwd=REPO_ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            inspection = self.root / "inspection.pid"
+            while not (inspection.exists() and (self.root / "child.pid").exists()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(inspection.exists())
+            query_pid = int(inspection.read_text())
+            began = time.monotonic()
+            stopped = self.invoke("stop", environment)
+            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+            stdout, stderr = started.communicate(timeout=5)
+            self.assertNotEqual(started.returncode, 0, stdout + stderr)
+            self.assertLess(time.monotonic() - began, 5)
+            self.assertFalse(self.state.exists())
+            self.assert_child_exited()
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+        finally:
+            if started.poll() is None:
+                started.terminate()
+                started.wait(timeout=5)
+            if started.stdout is not None:
+                started.stdout.close()
+            if started.stderr is not None:
+                started.stderr.close()
+
+    def test_preflight_cancellation_does_not_launch_an_adapter(self) -> None:
+        environment = self.delayed_queries({1: 12})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "60"
+        owner = subprocess.Popen(
+            [sys.executable, "-B", "-m", "scripts.ci.adapter_process", "serve"],
+            cwd=REPO_ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            inspection = self.root / "inspection.pid"
+            while not inspection.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(inspection.exists())
+            query_pid = int(inspection.read_text())
+            owner.terminate()
+            owner.communicate(timeout=5)
+            self.assertNotEqual(owner.returncode, 0)
+            self.assertFalse(self.state.exists())
+            self.assertFalse((self.root / "child.pid").exists())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(timeout=5)
+            if owner.stdout is not None:
+                owner.stdout.close()
+            if owner.stderr is not None:
+                owner.stderr.close()
+
+    def test_query_cleanup_failure_cannot_acknowledge_successful_stop(self) -> None:
+        environment = self.delayed_queries({2: 12})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "60"
+        environment["FIXTURE_INSPECTION_PID"] = str(self.root / "inspection.pid")
+        driver = """
+import os, sys
+from pathlib import Path
+from scripts.ci import adapter_process
+
+original = adapter_process.subprocess.Popen
+def instrumented(*args, **kwargs):
+    process = original(*args, **kwargs)
+    if args[0][0] == 'lsof':
+        original_wait = process.wait
+        def wait(*arguments, **options):
+            result = original_wait(*arguments, **options)
+            marker = Path(os.environ['FIXTURE_INSPECTION_PID'])
+            if marker.exists() and int(marker.read_text()) == process.pid:
+                raise OSError('controlled inspection cleanup failure')
+            return result
+        process.wait = wait
+    return process
+adapter_process.subprocess.Popen = instrumented
+try:
+    raise SystemExit(adapter_process.serve())
+except OSError:
+    raise SystemExit(1)
+"""
+        owner = subprocess.Popen(
+            [sys.executable, "-B", "-c", driver], cwd=REPO_ROOT, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            inspection = self.root / "inspection.pid"
+            while not (inspection.exists() and (self.root / "child.pid").exists()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(inspection.exists())
+            query_pid = int(inspection.read_text())
+            stopped = self.invoke("stop", environment)
+            self.assertNotEqual(stopped.returncode, 0)
+            owner.communicate(timeout=5)
+            self.assertNotEqual(owner.returncode, 0)
+            self.assertFalse(self.state.exists())
+            self.assert_child_exited()
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+                owner.wait(timeout=5)
+            if owner.stdout is not None:
+                owner.stdout.close()
+            if owner.stderr is not None:
+                owner.stderr.close()
 
 
 if __name__ == "__main__":
