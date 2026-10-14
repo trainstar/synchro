@@ -118,6 +118,47 @@ class AdapterProcessTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(self.invoke("stop").returncode, 0)
 
+    def test_listener_query_preserves_descriptor_scope_and_warnings(self) -> None:
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), mock.patch.object(adapter_process.sys, "platform", platform):
+                with mock.patch.object(adapter_process.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "111\n112\n", "")) as run:
+                    self.assertEqual(adapter_process.listeners(str(self.port)), {111, 112})
+                command = run.call_args.args[0]
+                self.assertEqual("-X" in command, platform == "darwin")
+                self.assertIn(f"-iTCP:{self.port}", command)
+                self.assertIn("-sTCP:LISTEN", command)
+                self.assertGreater(command.index("+w"), command.index("-t"))
+                self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+    def test_listener_query_rejects_incomplete_or_failed_output(self) -> None:
+        for status, error in ((0, "inspection incomplete"), (1, "inspection incomplete"), (2, "")):
+            with self.subTest(status=status, error=error):
+                with mock.patch.object(adapter_process.subprocess, "run", return_value=subprocess.CompletedProcess([], status, "111\n", error)):
+                    with self.assertRaises(RuntimeError):
+                        adapter_process.listeners(str(self.port))
+
+    def test_listener_query_reports_shared_descriptors_in_both_address_families(self) -> None:
+        for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            with self.subTest(family=family), socket.socket(family) as listener:
+                listener.bind((address, 0))
+                listener.listen()
+                port = listener.getsockname()[1]
+                child = subprocess.Popen(
+                    [sys.executable, "-c", "import socket, sys, time; held = socket.socket(fileno=int(sys.argv[1])); print('ready', flush=True); time.sleep(30)", str(listener.fileno())],
+                    pass_fds=(listener.fileno(),), stdout=subprocess.PIPE, text=True,
+                )
+                try:
+                    self.assertIsNotNone(child.stdout)
+                    assert child.stdout is not None
+                    self.assertEqual(child.stdout.readline().strip(), "ready")
+                    owners = adapter_process.listeners(str(port))
+                    self.assertTrue({os.getpid(), child.pid}.issubset(owners))
+                finally:
+                    child.terminate()
+                    child.wait(timeout=5)
+                    if child.stdout is not None:
+                        child.stdout.close()
+
     def test_stale_pid_cannot_signal_an_unrelated_process(self) -> None:
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:

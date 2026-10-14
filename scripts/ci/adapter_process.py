@@ -105,8 +105,11 @@ def request(state: dict, operation: str) -> dict:
 
 
 def listeners(port: str) -> set[int]:
+    command = ["lsof", "-nP", "-t", "+w", f"-iTCP:{port}", "-sTCP:LISTEN"]
+    if sys.platform == "darwin":
+        command.append("-X")
     result = subprocess.run(
-        ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+        command,
         capture_output=True, text=True, timeout=5,
     )
     if result.returncode not in (0, 1) or result.stderr:
