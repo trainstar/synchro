@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: 1f3a530751ae1b011a6d1ff1568f78f8afeab113
+          ref: 8558c86a127a5101ae51936feca3da47716524ce
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
         with:
           go-version: '1.25.0'
@@ -145,6 +145,8 @@ jobs:
               'partial_stdout_bytes', 'partial_stdout_sha256',
               'partial_stderr_bytes', 'partial_stderr_sha256',
               'command_sha256', 'lsof_sha256', 'source_sha256',
+              'ps_status', 'ps_state', 'ps_wait_channel_status',
+              'ps_wait_channel_symbol', 'sample_status', 'sample_symbols',
           }
           measurements = []
           measurement_status = 'absent'
@@ -158,6 +160,26 @@ jobs:
                           raise ValueError('shape')
                       if item['poll_at_timeout'] not in ('running', 'exited') or item['cleanup'] not in ('completed', 'timeout'):
                           raise ValueError('enum')
+                      if item['ps_status'] not in ('completed', 'permission_denied', 'target_exited', 'timeout', 'unavailable'):
+                          raise ValueError('ps-status')
+                      if item['ps_state'] not in ('idle', 'runnable', 'sleeping', 'stopped', 'unavailable', 'uninterruptible_sleep', 'uninterruptible_wait', 'unknown', 'zombie'):
+                          raise ValueError('ps-state')
+                      if item['ps_wait_channel_status'] not in ('symbol', 'unavailable'):
+                          raise ValueError('wait-status')
+                      symbol = item['ps_wait_channel_symbol']
+                      if symbol is not None and (re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.$]*', symbol) is None or re.fullmatch(r'[0-9A-Fa-f]+', symbol)):
+                          raise ValueError('wait-symbol')
+                      if (item['ps_wait_channel_status'] == 'symbol') != (symbol is not None):
+                          raise ValueError('wait-shape')
+                      if item['sample_status'] not in ('completed', 'no_symbols', 'oversized', 'permission_denied', 'target_exited', 'timeout', 'unavailable'):
+                          raise ValueError('sample-status')
+                      symbols = item['sample_symbols']
+                      if not isinstance(symbols, list) or len(symbols) > 32 or len(symbols) != len(set(symbols)):
+                          raise ValueError('sample-symbols')
+                      if any(not isinstance(value, str) or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.$]*', value) is None or re.fullmatch(r'[0-9A-Fa-f]+', value) for value in symbols):
+                          raise ValueError('sample-symbol')
+                      if (item['sample_status'] == 'completed') != bool(symbols):
+                          raise ValueError('sample-shape')
                       for name in ('spawn_ms', 'elapsed_ms', 'partial_stdout_bytes', 'partial_stderr_bytes'):
                           if type(item[name]) is not int or item[name] < 0:
                               raise ValueError('number')
