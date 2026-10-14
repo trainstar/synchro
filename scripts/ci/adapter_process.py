@@ -148,8 +148,20 @@ def listeners(port: str) -> set[int]:
             partial_stdout = partial_stdout.encode()
         if isinstance(partial_stderr, str):
             partial_stderr = partial_stderr.encode()
-        if observed is None:
-            process.kill()
+        completion_status = "completed"
+        completion_stdout = b""
+        completion_stderr = b""
+        try:
+            remaining = max(0.001, 30 - (time.monotonic_ns() - began) / 1_000_000_000)
+            completed_stdout, completed_stderr = process.communicate(timeout=remaining)
+            completion_stdout = completed_stdout.encode()
+            completion_stderr = completed_stderr.encode()
+        except subprocess.TimeoutExpired:
+            completion_status = "timeout"
+        finally:
+            completion_elapsed_ms = (time.monotonic_ns() - began) // 1_000_000
+            if process.poll() is None:
+                process.kill()
         cleanup = "completed"
         try:
             process.wait(timeout=5)
@@ -168,6 +180,12 @@ def listeners(port: str) -> set[int]:
             "partial_stdout_sha256": hashlib.sha256(partial_stdout).hexdigest(),
             "partial_stderr_bytes": len(partial_stderr),
             "partial_stderr_sha256": hashlib.sha256(partial_stderr).hexdigest(),
+            "completion_status": completion_status,
+            "completion_elapsed_ms": completion_elapsed_ms,
+            "completion_stdout_bytes": len(completion_stdout),
+            "completion_stdout_sha256": hashlib.sha256(completion_stdout).hexdigest(),
+            "completion_stderr_bytes": len(completion_stderr),
+            "completion_stderr_sha256": hashlib.sha256(completion_stderr).hexdigest(),
         }
         record_listener_timeout(command, measurement)
         raise RuntimeError("cannot inspect adapter listener ownership") from error
