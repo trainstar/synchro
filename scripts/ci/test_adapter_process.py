@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import urllib.request
@@ -154,6 +156,42 @@ class AdapterProcessTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {**self.environment, "SYNCHROD_ADAPTER_READY_ATTEMPTS": invalid}):
                 with self.assertRaises(RuntimeError):
                     adapter_process.configuration()
+
+    def delayed_first_query(self, delay: float) -> dict:
+        executable = shutil.which("lsof")
+        self.assertIsNotNone(executable)
+        wrapper = self.root / "lsof"
+        marker = self.root / "queried"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, sys, time\n"
+            f"from pathlib import Path\nmarker = Path({str(marker)!r})\n"
+            "if not marker.exists():\n"
+            "    marker.touch()\n"
+            f"    time.sleep({delay!r})\n"
+            f"os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n"
+        )
+        wrapper.chmod(0o700)
+        return {**self.environment, "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
+
+    def test_slow_first_query_uses_the_configured_startup_budget(self) -> None:
+        environment = self.delayed_first_query(5.2)
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "10"
+        started = self.invoke("start", environment)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(self.invoke("status", environment).returncode, 0)
+        self.assertEqual(self.invoke("stop", environment).returncode, 0)
+        self.assert_child_exited()
+
+    def test_first_query_cannot_reset_the_startup_budget(self) -> None:
+        environment = self.delayed_first_query(0.5)
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "0.2"
+        began = time.monotonic()
+        started = self.invoke("start", environment)
+        self.assertNotEqual(started.returncode, 0)
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / "child.pid").exists())
 
 
 if __name__ == "__main__":

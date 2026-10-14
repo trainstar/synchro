@@ -104,10 +104,13 @@ def request(state: dict, operation: str) -> dict:
     return response
 
 
-def listeners(port: str) -> set[int]:
+def listeners(port: str, deadline: float) -> set[int]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("adapter readiness deadline expired")
     result = subprocess.run(
         ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=remaining,
     )
     if result.returncode not in (0, 1) or result.stderr:
         raise RuntimeError("cannot inspect adapter listener ownership")
@@ -127,8 +130,9 @@ def stop_child(child: subprocess.Popen, timeout: float = 5) -> None:
 
 def serve() -> int:
     binary, ready_url, fingerprint, timeout, port = configuration()
+    deadline = time.monotonic() + timeout
     path = state_path()
-    if listeners(port):
+    if listeners(port, deadline):
         raise RuntimeError("adapter port is occupied; no process was signaled")
     path.parent.mkdir(parents=True, exist_ok=True)
     run_id = secrets.token_hex(32)
@@ -163,18 +167,20 @@ def serve() -> int:
             temporary.unlink()
             temporary = None
             child = subprocess.Popen([str(binary)], stdin=subprocess.DEVNULL)
-            deadline = time.monotonic() + timeout
             ready = False
             while not stopping:
                 if child.poll() is not None:
                     raise RuntimeError("adapter exited before shutdown; inspect its log file")
                 if not ready:
-                    owners = listeners(port)
+                    owners = listeners(port, deadline)
                     if owners - {child.pid}:
                         raise RuntimeError("another process owns the adapter port")
                     if owners == {child.pid}:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise RuntimeError("adapter readiness deadline expired")
                         try:
-                            with opener.open(ready_url, timeout=0.5) as response:
+                            with opener.open(ready_url, timeout=min(0.5, remaining)) as response:
                                 ready = response.status == 200
                         except (urllib.error.URLError, TimeoutError):
                             ready = False
