@@ -64,8 +64,6 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-      - name: Verify ownership controls on the matching host
-        run: make test-ci-process-lifecycle
       - name: Run only the fixture start with the corrected query
         run: |
           set -euo pipefail
@@ -165,6 +163,9 @@ jobs:
         run: |
           xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
           xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+      - name: Verify ownership controls after the fixture experiment
+        if: always()
+        run: make test-ci-process-lifecycle
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
         with:
