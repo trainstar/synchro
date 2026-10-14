@@ -1,149 +1,253 @@
-name: CodeQL
+# TEMPORARY DIAGNOSTIC ONLY: DO NOT MERGE.
+name: RC2 iOS minimum fixture diagnostic
 
 on:
-  workflow_call:
-    inputs:
-      include-swift:
-        description: Run Swift analysis for the complete candidate set.
-        required: false
-        default: false
-        type: boolean
-  schedule:
-    - cron: '23 4 * * 1'
   workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
-permissions:
-  contents: read
-  security-events: write
+  GOWORK: 'off'
+  POSTGRESQL_VERSION: '18.3'
+  PGRX_VERSION: '0.17.0'
+  RUST_TOOLCHAIN: '1.92.0'
 
 jobs:
-  analyze-go:
-    name: analyze Go
-    runs-on: ubuntu-24.04
+  fixture:
+    runs-on: xcode-27
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          go-version-file: api/go/go.mod
-          cache-dependency-path: api/go/go.sum
-
-      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+          ref: d0c4b5676e7ed470cd09f15666a3633ae9a40c30
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
         with:
-          languages: go
-
-      - name: Build Go adapter
-        run: make build-check
-
-      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          category: /language:go
-
-  analyze-javascript:
-    name: analyze JavaScript
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+          go-version: '1.25.0'
+          cache: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
         with:
           node-version: '22'
-
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      - uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5
+      - uses: ./.github/actions/setup-pgrx-pg18
         with:
-          path: |
-            clients/react-native/node_modules
-            clients/react-native/example/node_modules
-            clients/react-native/.yarn/install-state.gz
-          key: rn-deps-${{ runner.os }}-${{ hashFiles('clients/react-native/yarn.lock', 'clients/react-native/package.json', 'clients/react-native/example/package.json') }}
-
-      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          languages: javascript-typescript
-
-      - name: Install React Native dependencies
-        working-directory: clients/react-native
+          runtime-source: brew
+      - uses: ./.github/actions/setup-conformance-pg18
+      - name: Select the original Xcode and simulator tuple
+        env:
+          IOS_VERSION: '17.0'
+          XCODE_VERSION: '27.0'
         run: |
-          corepack enable
-          yarn install --immutable
-
-      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          category: /language:javascript-typescript
-
-  analyze-swift:
-    name: analyze Swift
-    if: github.event_name != 'pull_request' || inputs.include-swift
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          languages: swift
-
-      - name: Build Swift package
-        run: make build-swift-native-runner
-
-      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          category: /language:swift
-
-  analyze-kotlin:
-    name: analyze Kotlin
-    runs-on: ubuntu-24.04
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GRADLE_TEST_ARGS: ''
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-
-      - name: Install Android build components
-        run: |
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
-
-      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          languages: java-kotlin
-
-      - name: Build Kotlin package
-        run: make build-kotlin-library
-
-      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
-        with:
-          category: /language:java-kotlin
-
-  result:
-    name: result
-    if: always()
-    needs:
-      - analyze-go
-      - analyze-javascript
-      - analyze-swift
-      - analyze-kotlin
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require every selected CodeQL analysis
-        run: |
-          test "${{ needs.analyze-go.result }}" = success
-          test "${{ needs.analyze-javascript.result }}" = success
-          test "${{ needs.analyze-kotlin.result }}" = success
-          if [ "${{ github.event_name }}" = pull_request ] && [ "${{ inputs.include-swift }}" != true ]; then
-            test "${{ needs.analyze-swift.result }}" = skipped
-          else
-            test "${{ needs.analyze-swift.result }}" = success
+          set -euo pipefail
+          test -d "/Applications/Xcode_$XCODE_VERSION.app"
+          sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "$XCODE_VERSION"
+          swift --version | grep -E 'Swift version 6[.]' >/dev/null
+          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == wanted } ? 0 : 1)' "$IOS_VERSION"; then
+            umask 077
+            runtime_dir="$(mktemp -d)"
+            trap 'rm -rf "$runtime_dir"' EXIT
+            curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --get --data-urlencode 'path=/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg' \
+              --cookie-jar "$runtime_dir/cookies" --output /dev/null \
+              'https://developerservices2.apple.com/services/download'
+            test -s "$runtime_dir/cookies"
+            curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --cookie "$runtime_dir/cookies" --output "$runtime_dir/iOS_17_Simulator_Runtime.dmg" \
+              'https://download.developer.apple.com/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg'
+            sudo xcodebuild -importPlatform "$runtime_dir/iOS_17_Simulator_Runtime.dmg"
           fi
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
+          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'd=JSON.parse(STDIN.read).fetch("devicetypes"); x=d.find { |i| i["name"] == "iPhone 14" } || d.find { |i| i["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless x; puts x.fetch("identifier")')"
+          udid="$(xcrun simctl create Synchro_SUP-IOS-MIN-001 "$device" "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+      - name: Run the instrumented fixture start before any ownership control
+        run: |
+          set -euo pipefail
+          make local-postgres-start
+          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
+          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
+          export SYNCHRO_ATTACH_DIR
+          set -a
+          . "$attach"
+          set +a
+          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
+          SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
+          SYNCHRO_TEST_URL=http://127.0.0.1:8091
+          WARM_CONNECT_ENV_FILE="$attach"
+          export ADAPTER_TEST_URL SYNCHRO_TEST_JWT_SECRET SYNCHRO_TEST_URL WARM_CONNECT_ENV_FILE
+          echo "::add-mask::$ADAPTER_TEST_URL"
+          echo "::add-mask::$SYNCHRO_TEST_JWT_SECRET"
+          {
+            echo "ADAPTER_TEST_URL=$ADAPTER_TEST_URL"
+            echo "SYNCHRO_TEST_JWT_SECRET=$SYNCHRO_TEST_JWT_SECRET"
+            echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
+            echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
+          } >> "$GITHUB_ENV"
+          SYNCHROD_PG_LOG_FILE="$RUNNER_TEMP/synchrod-pg-apple-startup.log"
+          SYNCHROD_ADAPTER_OWNERSHIP_DIAGNOSTIC_FILE="$RUNNER_TEMP/adapter-ownership.jsonl"
+          export SYNCHROD_PG_LOG_FILE SYNCHROD_ADAPTER_OWNERSHIP_DIAGNOSTIC_FILE
+          if make synchrod-pg-test-start CLIENT_DATASET=1 SYNCHROD_PG_LOG_FILE="$SYNCHROD_PG_LOG_FILE"; then
+            printf '%s\n' 0 > "$RUNNER_TEMP/fixture-start-status"
+          else
+            startup_status=$?
+            printf '%s\n' "$startup_status" > "$RUNNER_TEMP/fixture-start-status"
+            if ! python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+          from urllib.parse import quote
+
+          try:
+              diagnostic = Path(os.environ["SYNCHROD_PG_LOG_FILE"]).read_text(encoding="utf-8")
+              secrets = {os.environ["ADAPTER_TEST_URL"], os.environ["SYNCHRO_TEST_JWT_SECRET"]}
+              if "" in secrets:
+                  raise ValueError("A required diagnostic secret is empty.")
+              for role in ("ADMIN", "ADAPTER", "OBSERVER", "WORKER", "OPERATOR"):
+                  secret = Path(os.environ[f"SYNCHRO_CONFORMANCE_{role}_PASSWORD_FILE"]).read_text(encoding="utf-8").strip()
+                  if secret:
+                      secrets.add(secret)
+              redactions = {value for secret in secrets for value in (secret, quote(secret, safe=""))}
+              for value in sorted(redactions, key=len, reverse=True):
+                  diagnostic = diagnostic.replace(value, "[REDACTED]")
+              diagnostic = diagnostic[-16384:]
+          except Exception:
+              diagnostic = "Apple fixture diagnostic unavailable.\n"
+          sys.stderr.write(diagnostic)
+          PY
+            then
+              printf '%s\n' 'Apple fixture diagnostic unavailable.' >&2 || true
+            fi
+            exit "$startup_status"
+          fi
+      - name: Compare direct query before fixture cleanup
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess, time
+
+          command = ['lsof', '-nP', '-t', '-iTCP:8091', '-sTCP:LISTEN']
+          began = time.monotonic_ns()
+          result = {'context': 'direct_parent_before_fixture_cleanup'}
+          try:
+              query = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+              result.update(status='completed', returncode=query.returncode)
+              stdout, stderr = query.stdout, query.stderr
+          except subprocess.TimeoutExpired as error:
+              result.update(status='timeout', returncode=None)
+              stdout, stderr = error.output or b'', error.stderr or b''
+          except OSError:
+              result.update(status='unavailable', returncode=None)
+              stdout, stderr = b'', b''
+          result.update(elapsed_ms=(time.monotonic_ns() - began) // 1_000_000,
+                        stdout_bytes=len(stdout), stderr_bytes=len(stderr),
+                        stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                        stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                        source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+          output = pathlib.Path('dist/fixture-diagnostic')
+          output.mkdir(parents=True, exist_ok=True)
+          (output / 'direct-query.json').write_text(json.dumps(result, sort_keys=True) + '\n')
+          print(json.dumps(result, sort_keys=True))
+          PY
+      - name: Record controlled startup and ownership facts
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, shutil, subprocess
+
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'synchrod-pg-apple-startup.log'
+          text = log.read_text(errors='replace') if log.exists() else ''
+          source_path = pathlib.Path('scripts/ci/adapter_process.py')
+          source = source_path.read_text()
+          known = re.findall(r'raise RuntimeError\("([^"\n]+)"\)', source)
+          classes = sorted({message for message in known if message in text})
+          stages = [stage for stage in ['opening database', 'pinging database', 'verifying synchro_pg compatibility', 'DATABASE_URL is required', 'listening'] if stage in text]
+          status_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-start-status'
+          diagnostic_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'adapter-ownership.jsonl'
+          expected = {
+              'schema', 'event', 'spawn_ms', 'elapsed_ms', 'poll_at_timeout',
+              'returncode_at_timeout', 'cleanup', 'final_returncode',
+              'partial_stdout_bytes', 'partial_stdout_sha256',
+              'partial_stderr_bytes', 'partial_stderr_sha256',
+              'command_sha256', 'lsof_sha256', 'source_sha256',
+              'completion_status', 'completion_elapsed_ms',
+              'completion_stdout_bytes', 'completion_stdout_sha256',
+              'completion_stderr_bytes', 'completion_stderr_sha256',
+          }
+          measurements = []
+          measurement_status = 'absent'
+          try:
+              if diagnostic_path.exists():
+                  if diagnostic_path.stat().st_size > 65536:
+                      raise ValueError('oversized')
+                  for line in diagnostic_path.read_text().splitlines():
+                      item = json.loads(line)
+                      if set(item) != expected or item['schema'] != 1 or item['event'] != 'timeout':
+                          raise ValueError('shape')
+                      if item['poll_at_timeout'] not in ('running', 'exited') or item['cleanup'] not in ('completed', 'timeout'):
+                          raise ValueError('enum')
+                      if item['completion_status'] not in ('completed', 'timeout'):
+                          raise ValueError('completion-status')
+                      for name in ('spawn_ms', 'elapsed_ms', 'partial_stdout_bytes', 'partial_stderr_bytes', 'completion_elapsed_ms', 'completion_stdout_bytes', 'completion_stderr_bytes'):
+                          if type(item[name]) is not int or item[name] < 0:
+                              raise ValueError('number')
+                      for name in ('returncode_at_timeout', 'final_returncode'):
+                          if item[name] is not None and type(item[name]) is not int:
+                              raise ValueError('status')
+                      for name in ('partial_stdout_sha256', 'partial_stderr_sha256', 'command_sha256', 'lsof_sha256', 'source_sha256', 'completion_stdout_sha256', 'completion_stderr_sha256'):
+                          if re.fullmatch(r'[0-9a-f]{64}', item[name]) is None:
+                              raise ValueError('digest')
+                      measurements.append(item)
+                  if len(measurements) > 16:
+                      raise ValueError('count')
+                  measurement_status = 'valid'
+          except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+              measurements = []
+              measurement_status = 'invalid'
+          lsof = shutil.which('lsof')
+          result = {
+              'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'source_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'source_sha256': hashlib.sha256(source_path.read_bytes()).hexdigest(),
+              'lsof_sha256': hashlib.sha256(pathlib.Path(lsof).resolve().read_bytes()).hexdigest() if lsof else None,
+              'fixture_start_exit_code': int(status_path.read_text()) if status_path.exists() else None,
+              'adapter_log_present': log.exists(),
+              'adapter_log_bytes': len(text.encode()),
+              'adapter_log_sha256': hashlib.sha256(text.encode()).hexdigest(),
+              'owner_error_classes': classes,
+              'adapter_stages': stages,
+              'errno_codes': sorted(set(re.findall(r'\[Errno (\d+)\]', text))),
+              'sqlstate_codes': sorted(set(re.findall(r'SQLSTATE ([A-Z0-9]{5})', text))),
+              'exception_types': sorted(set(re.findall(r'^([A-Za-z][A-Za-z0-9_.]*(?:Error|Exception)):', text, re.MULTILINE))),
+              'ownership_measurement_status': measurement_status,
+              'ownership_measurements': measurements,
+          }
+          out = pathlib.Path('dist/fixture-diagnostic')
+          out.mkdir(parents=True, exist_ok=True)
+          (out / 'startup.json').write_text(json.dumps(result, sort_keys=True) + '\n')
+          print(json.dumps(result, sort_keys=True))
+          PY
+      - name: Stop only the owned fixture
+        if: always()
+        run: |
+          status=0
+          make synchrod-pg-test-stop || status=$?
+          make local-postgres-stop || status=$?
+          exit "$status"
+      - name: Delete the diagnostic simulator
+        if: always() && env.IOS_SIMULATOR_UDID != ''
+        run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+          xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: ios-min-owner-lsof-instrumentation
+          path: |
+            dist/fixture-diagnostic/startup.json
+            dist/fixture-diagnostic/direct-query.json
+          if-no-files-found: error
