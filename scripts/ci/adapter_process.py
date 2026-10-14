@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -104,17 +106,40 @@ def request(state: dict, operation: str) -> dict:
     return response
 
 
-def listeners(port: str, deadline: float) -> set[int]:
+def remaining_budget(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise RuntimeError("adapter readiness deadline expired")
-    result = subprocess.run(
+    return remaining
+
+
+def listeners(port: str, deadline: float, stopping: threading.Event) -> set[int]:
+    remaining_budget(deadline)
+    process = subprocess.Popen(
         ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
-        capture_output=True, text=True, timeout=remaining,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    if result.returncode not in (0, 1) or result.stderr:
+    try:
+        while not stopping.is_set():
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining_budget(deadline)))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            raise RuntimeError("adapter shutdown requested")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    if process.returncode not in (0, 1) or stderr:
         raise RuntimeError("cannot inspect adapter listener ownership")
-    return {int(value) for value in result.stdout.split()}
+    remaining_budget(deadline)
+    return {int(value) for value in stdout.split()}
 
 
 def stop_child(child: subprocess.Popen, timeout: float = 5) -> None:
@@ -131,19 +156,18 @@ def stop_child(child: subprocess.Popen, timeout: float = 5) -> None:
 def serve() -> int:
     binary, ready_url, fingerprint, timeout, port = configuration()
     deadline = time.monotonic() + timeout
-    path = state_path()
-    if listeners(port, deadline):
-        raise RuntimeError("adapter port is occupied; no process was signaled")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    run_id = secrets.token_hex(32)
-    stopping = False
+    stopping = threading.Event()
 
     def stop_requested(_signum, _frame):
-        nonlocal stopping
-        stopping = True
+        stopping.set()
 
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop_requested)
+    path = state_path()
+    if listeners(port, deadline, stopping):
+        raise RuntimeError("adapter port is occupied; no process was signaled")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run_id = secrets.token_hex(32)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with socket.socket() as control:
         control.bind(("127.0.0.1", 0))
@@ -155,6 +179,8 @@ def serve() -> int:
         }
         temporary = None
         child = None
+        queries = ThreadPoolExecutor(max_workers=1)
+        inspection = None
         published = False
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
@@ -166,26 +192,28 @@ def serve() -> int:
             published = True
             temporary.unlink()
             temporary = None
+            remaining_budget(deadline)
             child = subprocess.Popen([str(binary)], stdin=subprocess.DEVNULL)
             ready = False
-            while not stopping:
+            while not stopping.is_set():
                 if child.poll() is not None:
                     raise RuntimeError("adapter exited before shutdown; inspect its log file")
                 if not ready:
-                    owners = listeners(port, deadline)
-                    if owners - {child.pid}:
-                        raise RuntimeError("another process owns the adapter port")
-                    if owners == {child.pid}:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise RuntimeError("adapter readiness deadline expired")
-                        try:
-                            with opener.open(ready_url, timeout=min(0.5, remaining)) as response:
-                                ready = response.status == 200
-                        except (urllib.error.URLError, TimeoutError):
-                            ready = False
-                    if not ready and time.monotonic() >= deadline:
-                        raise RuntimeError("adapter readiness deadline expired")
+                    remaining_budget(deadline)
+                    if inspection is None:
+                        inspection = queries.submit(listeners, port, deadline, stopping)
+                    if inspection.done():
+                        owners = inspection.result()
+                        inspection = None
+                        if owners - {child.pid}:
+                            raise RuntimeError("another process owns the adapter port")
+                        if owners == {child.pid}:
+                            try:
+                                with opener.open(ready_url, timeout=min(0.5, remaining_budget(deadline))) as response:
+                                    remaining_budget(deadline)
+                                    ready = response.status == 200
+                            except (urllib.error.URLError, TimeoutError):
+                                ready = False
                 try:
                     connection, _ = control.accept()
                 except socket.timeout:
@@ -209,21 +237,23 @@ def serve() -> int:
                     operation = incoming.get("operation")
                     response = {"run_id": run_id, "ready": ready, "pid": child.pid}
                     if operation == "stop":
+                        stopping.set()
                         stop_child(child)
                         if read_state(path) == state:
                             path.unlink()
                             published = False
                         response["stopped"] = True
-                        stopping = True
                     elif operation != "status":
                         response["error"] = True
                     try:
                         connection.sendall(json.dumps(response).encode() + b"\n")
                     except OSError:
-                        if not stopping:
+                        if not stopping.is_set():
                             raise RuntimeError("adapter owner response could not be delivered")
             return 0
         finally:
+            stopping.set()
+            queries.shutdown(wait=True, cancel_futures=True)
             if child is not None:
                 stop_child(child)
             if temporary is not None:

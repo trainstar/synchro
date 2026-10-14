@@ -157,25 +157,29 @@ class AdapterProcessTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     adapter_process.configuration()
 
-    def delayed_first_query(self, delay: float) -> dict:
+    def delayed_queries(self, delays: dict[int, float]) -> dict:
         executable = shutil.which("lsof")
         self.assertIsNotNone(executable)
         wrapper = self.root / "lsof"
         marker = self.root / "queried"
+        inspection = self.root / "inspection.pid"
         wrapper.write_text(
             f"#!{sys.executable}\n"
             "import os, sys, time\n"
             f"from pathlib import Path\nmarker = Path({str(marker)!r})\n"
-            "if not marker.exists():\n"
-            "    marker.touch()\n"
-            f"    time.sleep({delay!r})\n"
+            "count = int(marker.read_text()) + 1 if marker.exists() else 1\n"
+            "marker.write_text(str(count))\n"
+            f"delays = {delays!r}\n"
+            "if count in delays:\n"
+            f"    Path({str(inspection)!r}).write_text(str(os.getpid()))\n"
+            "    time.sleep(delays[count])\n"
             f"os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n"
         )
         wrapper.chmod(0o700)
         return {**self.environment, "PATH": str(self.root) + os.pathsep + os.environ["PATH"]}
 
     def test_slow_first_query_uses_the_configured_startup_budget(self) -> None:
-        environment = self.delayed_first_query(5.2)
+        environment = self.delayed_queries({1: 5.2})
         environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "10"
         started = self.invoke("start", environment)
         self.assertEqual(started.returncode, 0, started.stderr)
@@ -184,7 +188,7 @@ class AdapterProcessTests(unittest.TestCase):
         self.assert_child_exited()
 
     def test_first_query_cannot_reset_the_startup_budget(self) -> None:
-        environment = self.delayed_first_query(0.5)
+        environment = self.delayed_queries({1: 0.5})
         environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "0.2"
         began = time.monotonic()
         started = self.invoke("start", environment)
@@ -192,6 +196,47 @@ class AdapterProcessTests(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 5)
         self.assertFalse(self.state.exists())
         self.assertFalse((self.root / "child.pid").exists())
+
+    def test_preflight_and_readiness_share_one_budget(self) -> None:
+        environment = self.delayed_queries({1: 0.7, 2: 0.7})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "1"
+        started = self.invoke("start", environment)
+        self.assertNotEqual(started.returncode, 0)
+        self.assertFalse(self.state.exists())
+        self.assert_child_exited()
+
+    def test_stop_cancels_and_reaps_a_post_launch_query(self) -> None:
+        environment = self.delayed_queries({2: 12})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "60"
+        started = subprocess.Popen(
+            [sys.executable, "-B", "-m", "scripts.ci.adapter_process", "start"],
+            cwd=REPO_ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            inspection = self.root / "inspection.pid"
+            while not inspection.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(inspection.exists())
+            query_pid = int(inspection.read_text())
+            began = time.monotonic()
+            stopped = self.invoke("stop", environment)
+            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+            stdout, stderr = started.communicate(timeout=5)
+            self.assertNotEqual(started.returncode, 0, stdout + stderr)
+            self.assertLess(time.monotonic() - began, 5)
+            self.assertFalse(self.state.exists())
+            self.assert_child_exited()
+            with self.assertRaises(ProcessLookupError):
+                os.kill(query_pid, 0)
+        finally:
+            if started.poll() is None:
+                started.terminate()
+                started.wait(timeout=5)
+            if started.stdout is not None:
+                started.stdout.close()
+            if started.stderr is not None:
+                started.stderr.close()
 
 
 if __name__ == "__main__":
