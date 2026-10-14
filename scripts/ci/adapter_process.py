@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 import hashlib
 import hmac
 import json
@@ -106,7 +106,9 @@ def request(state: dict, operation: str) -> dict:
     return response
 
 
-def remaining_budget(deadline: float) -> float:
+def remaining_budget(deadline: float, stopping: threading.Event) -> float:
+    if stopping.is_set():
+        raise CancelledError("adapter shutdown requested")
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise RuntimeError("adapter readiness deadline expired")
@@ -114,7 +116,7 @@ def remaining_budget(deadline: float) -> float:
 
 
 def listeners(port: str, deadline: float, stopping: threading.Event) -> set[int]:
-    remaining_budget(deadline)
+    remaining_budget(deadline, stopping)
     process = subprocess.Popen(
         ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -122,24 +124,34 @@ def listeners(port: str, deadline: float, stopping: threading.Event) -> set[int]
     try:
         while not stopping.is_set():
             try:
-                stdout, stderr = process.communicate(timeout=min(0.1, remaining_budget(deadline)))
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining_budget(deadline, stopping)))
                 break
             except subprocess.TimeoutExpired:
                 continue
         else:
-            raise RuntimeError("adapter shutdown requested")
+            raise CancelledError("adapter shutdown requested")
     finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=5)
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
     if process.returncode not in (0, 1) or stderr:
         raise RuntimeError("cannot inspect adapter listener ownership")
-    remaining_budget(deadline)
+    remaining_budget(deadline, stopping)
     return {int(value) for value in stdout.split()}
+
+
+def complete_inspection(inspection: Future | None) -> None:
+    if inspection is not None:
+        try:
+            inspection.result()
+        except CancelledError:
+            pass
 
 
 def stop_child(child: subprocess.Popen, timeout: float = 5) -> None:
@@ -192,14 +204,14 @@ def serve() -> int:
             published = True
             temporary.unlink()
             temporary = None
-            remaining_budget(deadline)
+            remaining_budget(deadline, stopping)
             child = subprocess.Popen([str(binary)], stdin=subprocess.DEVNULL)
             ready = False
             while not stopping.is_set():
                 if child.poll() is not None:
                     raise RuntimeError("adapter exited before shutdown; inspect its log file")
                 if not ready:
-                    remaining_budget(deadline)
+                    remaining_budget(deadline, stopping)
                     if inspection is None:
                         inspection = queries.submit(listeners, port, deadline, stopping)
                     if inspection.done():
@@ -209,8 +221,8 @@ def serve() -> int:
                             raise RuntimeError("another process owns the adapter port")
                         if owners == {child.pid}:
                             try:
-                                with opener.open(ready_url, timeout=min(0.5, remaining_budget(deadline))) as response:
-                                    remaining_budget(deadline)
+                                with opener.open(ready_url, timeout=min(0.5, remaining_budget(deadline, stopping))) as response:
+                                    remaining_budget(deadline, stopping)
                                     ready = response.status == 200
                             except (urllib.error.URLError, TimeoutError):
                                 ready = False
@@ -239,6 +251,7 @@ def serve() -> int:
                     if operation == "stop":
                         stopping.set()
                         stop_child(child)
+                        complete_inspection(inspection)
                         if read_state(path) == state:
                             path.unlink()
                             published = False
@@ -253,13 +266,16 @@ def serve() -> int:
             return 0
         finally:
             stopping.set()
-            queries.shutdown(wait=True, cancel_futures=True)
-            if child is not None:
-                stop_child(child)
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-            if published and read_state(path) == state:
-                path.unlink()
+            try:
+                queries.shutdown(wait=True, cancel_futures=True)
+                complete_inspection(inspection)
+            finally:
+                if child is not None:
+                    stop_child(child)
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+                if published and read_state(path) == state:
+                    path.unlink()
 
 
 def start() -> int:
@@ -323,6 +339,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (RuntimeError, OSError, ValueError) as error:
+    except (CancelledError, RuntimeError, OSError, ValueError) as error:
         print(f"adapter lifecycle: {error}", file=sys.stderr)
         raise SystemExit(1)
