@@ -171,7 +171,10 @@ class AdapterProcessTests(unittest.TestCase):
             "marker.write_text(str(count))\n"
             f"delays = {delays!r}\n"
             "if count in delays:\n"
-            f"    Path({str(inspection)!r}).write_text(str(os.getpid()))\n"
+            f"    inspection = Path({str(inspection)!r})\n"
+            "    temporary = inspection.with_suffix('.tmp')\n"
+            "    temporary.write_text(str(os.getpid()))\n"
+            "    os.replace(temporary, inspection)\n"
             "    time.sleep(delays[count])\n"
             f"os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n"
         )
@@ -215,7 +218,7 @@ class AdapterProcessTests(unittest.TestCase):
         try:
             deadline = time.monotonic() + 5
             inspection = self.root / "inspection.pid"
-            while not inspection.exists() and time.monotonic() < deadline:
+            while not (inspection.exists() and (self.root / "child.pid").exists()) and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(inspection.exists())
             query_pid = int(inspection.read_text())
