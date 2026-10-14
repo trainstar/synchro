@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: d0c4b5676e7ed470cd09f15666a3633ae9a40c30
+          ref: 70b905631a8d11783427f6d5a92ff4f5d30e8b1d
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
         with:
           go-version: '1.25.0'
