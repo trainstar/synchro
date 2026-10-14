@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: 8558c86a127a5101ae51936feca3da47716524ce
+          ref: a1c4ebfb91307e65904f2be8f314ac4ada70ba64
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
         with:
           go-version: '1.25.0'
@@ -124,6 +124,35 @@ jobs:
             fi
             exit "$startup_status"
           fi
+      - name: Compare direct query before fixture cleanup
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess, time
+
+          command = ['lsof', '-nP', '-t', '-iTCP:8091', '-sTCP:LISTEN']
+          began = time.monotonic_ns()
+          result = {'context': 'direct_parent_before_fixture_cleanup'}
+          try:
+              query = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+              result.update(status='completed', returncode=query.returncode)
+              stdout, stderr = query.stdout, query.stderr
+          except subprocess.TimeoutExpired as error:
+              result.update(status='timeout', returncode=None)
+              stdout, stderr = error.output or b'', error.stderr or b''
+          except OSError:
+              result.update(status='unavailable', returncode=None)
+              stdout, stderr = b'', b''
+          result.update(elapsed_ms=(time.monotonic_ns() - began) // 1_000_000,
+                        stdout_bytes=len(stdout), stderr_bytes=len(stderr),
+                        stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                        stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                        source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+          output = pathlib.Path('dist/fixture-diagnostic')
+          output.mkdir(parents=True, exist_ok=True)
+          (output / 'direct-query.json').write_text(json.dumps(result, sort_keys=True) + '\n')
+          print(json.dumps(result, sort_keys=True))
+          PY
       - name: Record controlled startup and ownership facts
         if: always()
         run: |
@@ -147,6 +176,7 @@ jobs:
               'command_sha256', 'lsof_sha256', 'source_sha256',
               'ps_status', 'ps_state', 'ps_wait_channel_status',
               'ps_wait_channel_symbol', 'sample_status', 'sample_symbols',
+              'sample_profile_bytes', 'sample_profile_sha256',
           }
           measurements = []
           measurement_status = 'absent'
@@ -178,15 +208,17 @@ jobs:
                           raise ValueError('sample-symbols')
                       if any(not isinstance(value, str) or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.$]*', value) is None or re.fullmatch(r'[0-9A-Fa-f]+', value) for value in symbols):
                           raise ValueError('sample-symbol')
-                      if (item['sample_status'] == 'completed') != bool(symbols):
+                      if item['sample_status'] == 'completed' and not symbols:
                           raise ValueError('sample-shape')
-                      for name in ('spawn_ms', 'elapsed_ms', 'partial_stdout_bytes', 'partial_stderr_bytes'):
+                      if symbols and item['sample_status'] not in ('completed', 'timeout', 'permission_denied'):
+                          raise ValueError('sample-shape')
+                      for name in ('spawn_ms', 'elapsed_ms', 'partial_stdout_bytes', 'partial_stderr_bytes', 'sample_profile_bytes'):
                           if type(item[name]) is not int or item[name] < 0:
                               raise ValueError('number')
                       for name in ('returncode_at_timeout', 'final_returncode'):
                           if item[name] is not None and type(item[name]) is not int:
                               raise ValueError('status')
-                      for name in ('partial_stdout_sha256', 'partial_stderr_sha256', 'command_sha256', 'lsof_sha256', 'source_sha256'):
+                      for name in ('partial_stdout_sha256', 'partial_stderr_sha256', 'command_sha256', 'lsof_sha256', 'source_sha256', 'sample_profile_sha256'):
                           if re.fullmatch(r'[0-9a-f]{64}', item[name]) is None:
                               raise ValueError('digest')
                       measurements.append(item)
