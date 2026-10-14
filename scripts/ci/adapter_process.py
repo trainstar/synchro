@@ -147,6 +147,8 @@ def observe_listener_timeout(process: subprocess.Popen) -> dict:
         "ps_wait_channel_symbol": None,
         "sample_status": "target_exited",
         "sample_symbols": [],
+        "sample_profile_bytes": 0,
+        "sample_profile_sha256": hashlib.sha256(b"").hexdigest(),
     }
     if process.poll() is not None:
         return observation
@@ -197,13 +199,18 @@ def observe_listener_timeout(process: subprocess.Popen) -> dict:
                 [str(sample), str(process.pid), "1", "-file", str(sample_path)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=2,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
             observation["sample_status"] = "timeout"
-            return observation
+            result = None
+            if error.stderr and (
+                b"permission denied" in error.stderr.lower()
+                or b"not permitted" in error.stderr.lower()
+            ):
+                observation["sample_status"] = "permission_denied"
         except OSError:
             observation["sample_status"] = "unavailable"
             return observation
-        if result.returncode != 0:
+        if result is not None and result.returncode != 0:
             if process.poll() is not None:
                 observation["sample_status"] = "target_exited"
             elif b"permission denied" in result.stderr.lower() or b"not permitted" in result.stderr.lower():
@@ -215,7 +222,10 @@ def observe_listener_timeout(process: subprocess.Popen) -> dict:
             if sample_path.stat().st_size > 1_048_576:
                 observation["sample_status"] = "oversized"
                 return observation
-            sample_lines = sample_path.read_text(errors="replace").splitlines()
+            profile = sample_path.read_bytes()
+            observation["sample_profile_bytes"] = len(profile)
+            observation["sample_profile_sha256"] = hashlib.sha256(profile).hexdigest()
+            sample_lines = profile.decode(errors="replace").splitlines()
         except OSError:
             observation["sample_status"] = "unavailable"
             return observation
@@ -227,7 +237,8 @@ def observe_listener_timeout(process: subprocess.Popen) -> dict:
                 symbols.append(symbol)
             if len(symbols) == 32:
                 break
-        observation["sample_status"] = "completed" if symbols else "no_symbols"
+        if result is not None:
+            observation["sample_status"] = "completed" if symbols else "no_symbols"
         observation["sample_symbols"] = symbols
         return observation
     finally:
@@ -260,6 +271,8 @@ def listeners(port: str) -> set[int]:
                 "ps_status": "unavailable", "ps_state": "unavailable",
                 "ps_wait_channel_status": "unavailable", "ps_wait_channel_symbol": None,
                 "sample_status": "unavailable", "sample_symbols": [],
+                "sample_profile_bytes": 0,
+                "sample_profile_sha256": hashlib.sha256(b"").hexdigest(),
             }
         finally:
             if process.poll() is None:
