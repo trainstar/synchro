@@ -94,17 +94,47 @@ jobs:
             echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
             echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
           } >> "$GITHUB_ENV"
-          set +e
-          make synchrod-pg-test-start CLIENT_DATASET=1
-          status=$?
-          printf '%s\n' "$status" > "$RUNNER_TEMP/fixture-start-status"
-          exit "$status"
+          SYNCHROD_PG_LOG_FILE="$RUNNER_TEMP/synchrod-pg-apple-startup.log"
+          export SYNCHROD_PG_LOG_FILE
+          if make synchrod-pg-test-start CLIENT_DATASET=1 SYNCHROD_PG_LOG_FILE="$SYNCHROD_PG_LOG_FILE"; then
+            printf '%s\n' 0 > "$RUNNER_TEMP/fixture-start-status"
+          else
+            startup_status=$?
+            printf '%s\n' "$startup_status" > "$RUNNER_TEMP/fixture-start-status"
+            if ! python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+          from urllib.parse import quote
+
+          try:
+              diagnostic = Path(os.environ["SYNCHROD_PG_LOG_FILE"]).read_text(encoding="utf-8")
+              secrets = {os.environ["ADAPTER_TEST_URL"], os.environ["SYNCHRO_TEST_JWT_SECRET"]}
+              if "" in secrets:
+                  raise ValueError("A required diagnostic secret is empty.")
+              for role in ("ADMIN", "ADAPTER", "OBSERVER", "WORKER", "OPERATOR"):
+                  secret = Path(os.environ[f"SYNCHRO_CONFORMANCE_{role}_PASSWORD_FILE"]).read_text(encoding="utf-8").strip()
+                  if secret:
+                      secrets.add(secret)
+              redactions = {value for secret in secrets for value in (secret, quote(secret, safe=""))}
+              for value in sorted(redactions, key=len, reverse=True):
+                  diagnostic = diagnostic.replace(value, "[REDACTED]")
+              diagnostic = diagnostic[-16384:]
+          except Exception:
+              diagnostic = "Apple fixture diagnostic unavailable.\n"
+          sys.stderr.write(diagnostic)
+          PY
+            then
+              printf '%s\n' 'Apple fixture diagnostic unavailable.' >&2 || true
+            fi
+            exit "$startup_status"
+          fi
       - name: Record safe startup error classes
         if: always()
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, re
-          log = pathlib.Path('.synchrod-pg-test.log')
+          import hashlib, json, os, pathlib, re, subprocess
+          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'synchrod-pg-apple-startup.log'
           text = log.read_text(errors='replace') if log.exists() else ''
           source = pathlib.Path('scripts/ci/adapter_process.py').read_text()
           known = re.findall(r'raise RuntimeError\("([^"\n]+)"\)', source)
@@ -112,7 +142,7 @@ jobs:
           stages = [stage for stage in ['opening database', 'pinging database', 'verifying synchro_pg compatibility', 'DATABASE_URL is required', 'listening'] if stage in text]
           status_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-start-status'
           result = {
-              'source_commit': 'a0903e2be1a3f6bf38ae31c59b82ba0b9f336142',
+              'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
               'fixture_start_exit_code': int(status_path.read_text()) if status_path.exists() else None,
               'adapter_log_present': log.exists(),
               'adapter_log_bytes': len(text.encode()),
@@ -121,6 +151,7 @@ jobs:
               'adapter_stages': stages,
               'errno_codes': sorted(set(re.findall(r'\[Errno (\d+)\]', text))),
               'sqlstate_codes': sorted(set(re.findall(r'SQLSTATE ([A-Z0-9]{5})', text))),
+              'exception_types': sorted(set(re.findall(r'^([A-Za-z][A-Za-z0-9_.]*(?:Error|Exception)):', text, re.MULTILINE))),
           }
           out = pathlib.Path('dist/fixture-diagnostic')
           out.mkdir(parents=True, exist_ok=True)
