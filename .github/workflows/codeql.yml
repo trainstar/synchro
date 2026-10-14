@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: a0903e2be1a3f6bf38ae31c59b82ba0b9f336142
+          ref: 464ee2d5238a1da74f7dad5d3250f6b40586d30a
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
         with:
           go-version: '1.25.0'
@@ -34,12 +34,6 @@ jobs:
         with:
           runtime-source: brew
       - uses: ./.github/actions/setup-conformance-pg18
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          artifact-ids: 11866531421
-          run-id: 38501396912
-          github-token: ${{ github.token }}
-          path: dist/releases/release-0.4.0-rc.2-a0903e2be1a3f6bf38ae31c59b82ba0b9f336142
       - name: Select the original Xcode and simulator tuple
         env:
           IOS_VERSION: '17.0'
@@ -70,10 +64,11 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-      - name: Run only the original fixture start
+      - name: Verify ownership controls on the matching host
+        run: make test-ci-process-lifecycle
+      - name: Run only the fixture start with the corrected query
         run: |
           set -euo pipefail
-          make release-verify VERSION=0.4.0-rc.2 RELEASE_DIR=dist/releases/release-0.4.0-rc.2-a0903e2be1a3f6bf38ae31c59b82ba0b9f336142
           make local-postgres-start
           attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
           SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
