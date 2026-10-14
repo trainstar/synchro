@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -104,14 +105,80 @@ def request(state: dict, operation: str) -> dict:
     return response
 
 
+def record_listener_timeout(command: list[str], measurement: dict) -> None:
+    # Temporary hosted-run instrumentation; this diagnostic branch must not merge.
+    value = os.environ.get("SYNCHROD_ADAPTER_OWNERSHIP_DIAGNOSTIC_FILE")
+    if not value:
+        return
+    executable = shutil.which(command[0])
+    if executable is None:
+        raise RuntimeError("cannot identify adapter listener inspection binary")
+    with Path(executable).resolve().open("rb") as stream:
+        measurement["lsof_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    with Path(__file__).resolve().open("rb") as stream:
+        measurement["source_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    measurement["command_sha256"] = hashlib.sha256(
+        json.dumps(command, separators=(",", ":")).encode()
+    ).hexdigest()
+    path = Path(value).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "ab") as stream:
+        stream.write(json.dumps(measurement, sort_keys=True).encode() + b"\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def listeners(port: str) -> set[int]:
-    result = subprocess.run(
-        ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
-        capture_output=True, text=True, timeout=5,
+    command = ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"]
+    began = time.monotonic_ns()
+    spawn_began = time.monotonic_ns()
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    if result.returncode not in (0, 1) or result.stderr:
+    spawn_ms = (time.monotonic_ns() - spawn_began) // 1_000_000
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        elapsed_ms = (time.monotonic_ns() - began) // 1_000_000
+        observed = process.poll()
+        partial_stdout = error.output or b""
+        partial_stderr = error.stderr or b""
+        if isinstance(partial_stdout, str):
+            partial_stdout = partial_stdout.encode()
+        if isinstance(partial_stderr, str):
+            partial_stderr = partial_stderr.encode()
+        if observed is None:
+            process.kill()
+        cleanup = "completed"
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cleanup = "timeout"
+        measurement = {
+            "schema": 1,
+            "event": "timeout",
+            "spawn_ms": spawn_ms,
+            "elapsed_ms": elapsed_ms,
+            "poll_at_timeout": "running" if observed is None else "exited",
+            "returncode_at_timeout": observed,
+            "cleanup": cleanup,
+            "final_returncode": process.poll(),
+            "partial_stdout_bytes": len(partial_stdout),
+            "partial_stdout_sha256": hashlib.sha256(partial_stdout).hexdigest(),
+            "partial_stderr_bytes": len(partial_stderr),
+            "partial_stderr_sha256": hashlib.sha256(partial_stderr).hexdigest(),
+        }
+        record_listener_timeout(command, measurement)
+        raise RuntimeError("cannot inspect adapter listener ownership") from error
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    if process.returncode not in (0, 1) or stderr:
         raise RuntimeError("cannot inspect adapter listener ownership")
-    return {int(value) for value in result.stdout.split()}
+    return {int(value) for value in stdout.split()}
 
 
 def stop_child(child: subprocess.Popen, timeout: float = 5) -> None:
