@@ -64,111 +64,225 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-      - name: Run only the fixture start with the corrected query
+      - name: Compare ownership-query launch and capture contexts
         run: |
           set -euo pipefail
-          make local-postgres-start
-          attach="$GITHUB_WORKSPACE/.ignore/r2/tmp/local-postgres/attach.env"
-          SYNCHRO_ATTACH_DIR="$(dirname "$attach")"
-          export SYNCHRO_ATTACH_DIR
-          set -a
-          . "$attach"
-          set +a
-          ADAPTER_TEST_URL="$(cat .ignore/r2/tmp/local-postgres/postgres.url)"
-          SYNCHRO_TEST_JWT_SECRET="$(cat "$SYNCHRO_CONFORMANCE_JWT_SECRET_FILE")"
-          SYNCHRO_TEST_URL=http://127.0.0.1:8091
-          WARM_CONNECT_ENV_FILE="$attach"
-          export ADAPTER_TEST_URL SYNCHRO_TEST_JWT_SECRET SYNCHRO_TEST_URL WARM_CONNECT_ENV_FILE
-          echo "::add-mask::$ADAPTER_TEST_URL"
-          echo "::add-mask::$SYNCHRO_TEST_JWT_SECRET"
-          {
-            echo "ADAPTER_TEST_URL=$ADAPTER_TEST_URL"
-            echo "SYNCHRO_TEST_JWT_SECRET=$SYNCHRO_TEST_JWT_SECRET"
-            echo "SYNCHRO_TEST_URL=$SYNCHRO_TEST_URL"
-            echo "WARM_CONNECT_ENV_FILE=$WARM_CONNECT_ENV_FILE"
-          } >> "$GITHUB_ENV"
-          SYNCHROD_PG_LOG_FILE="$RUNNER_TEMP/synchrod-pg-apple-startup.log"
-          export SYNCHROD_PG_LOG_FILE
-          if make synchrod-pg-test-start CLIENT_DATASET=1 SYNCHROD_PG_LOG_FILE="$SYNCHROD_PG_LOG_FILE"; then
-            printf '%s\n' 0 > "$RUNNER_TEMP/fixture-start-status"
-          else
-            startup_status=$?
-            printf '%s\n' "$startup_status" > "$RUNNER_TEMP/fixture-start-status"
-            if ! python3 - <<'PY'
+          umask 077
+          python3 - <<'PY'
+          import hashlib
+          import importlib.util
+          import json
           import os
           from pathlib import Path
+          import subprocess
           import sys
-          from urllib.parse import quote
+          import shutil
+          import time
 
-          try:
-              diagnostic = Path(os.environ["SYNCHROD_PG_LOG_FILE"]).read_text(encoding="utf-8")
-              secrets = {os.environ["ADAPTER_TEST_URL"], os.environ["SYNCHRO_TEST_JWT_SECRET"]}
-              if "" in secrets:
-                  raise ValueError("A required diagnostic secret is empty.")
-              for role in ("ADMIN", "ADAPTER", "OBSERVER", "WORKER", "OPERATOR"):
-                  secret = Path(os.environ[f"SYNCHRO_CONFORMANCE_{role}_PASSWORD_FILE"]).read_text(encoding="utf-8").strip()
-                  if secret:
-                      secrets.add(secret)
-              redactions = {value for secret in secrets for value in (secret, quote(secret, safe=""))}
-              for value in sorted(redactions, key=len, reverse=True):
-                  diagnostic = diagnostic.replace(value, "[REDACTED]")
-              diagnostic = diagnostic[-16384:]
-          except Exception:
-              diagnostic = "Apple fixture diagnostic unavailable.\n"
-          sys.stderr.write(diagnostic)
-          PY
-            then
-              printf '%s\n' 'Apple fixture diagnostic unavailable.' >&2 || true
-            fi
-            exit "$startup_status"
-          fi
-      - name: Record safe startup error classes
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, re, subprocess
-          log = pathlib.Path(os.environ['RUNNER_TEMP']) / 'synchrod-pg-apple-startup.log'
-          text = log.read_text(errors='replace') if log.exists() else ''
-          source = pathlib.Path('scripts/ci/adapter_process.py').read_text()
-          known = re.findall(r'raise RuntimeError\("([^"\n]+)"\)', source)
-          classes = sorted({message for message in known if message in text})
-          stages = [stage for stage in ['opening database', 'pinging database', 'verifying synchro_pg compatibility', 'DATABASE_URL is required', 'listening'] if stage in text]
-          status_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-start-status'
-          result = {
-              'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-              'fixture_start_exit_code': int(status_path.read_text()) if status_path.exists() else None,
-              'adapter_log_present': log.exists(),
-              'adapter_log_bytes': len(text.encode()),
-              'adapter_log_sha256': hashlib.sha256(text.encode()).hexdigest(),
-              'owner_error_classes': classes,
-              'adapter_stages': stages,
-              'errno_codes': sorted(set(re.findall(r'\[Errno (\d+)\]', text))),
-              'sqlstate_codes': sorted(set(re.findall(r'SQLSTATE ([A-Z0-9]{5})', text))),
-              'exception_types': sorted(set(re.findall(r'^([A-Za-z][A-Za-z0-9_.]*(?:Error|Exception)):', text, re.MULTILINE))),
+          child_source = r'''
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import time
+
+          LIMIT = 5
+          COMMAND = ["lsof", "-nP", "-t", "+w", "-iTCP:8091", "-sTCP:LISTEN", "-X"]
+
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+
+          def stdout_class(data, complete):
+              if not complete:
+                  return "partial_not_admitted"
+              if not data:
+                  return "empty"
+              lines = data.splitlines()
+              if lines and all(line.isdigit() and int(line) > 0 for line in lines):
+                  return "positive_decimal_lines"
+              return "invalid"
+
+          def facts(data, complete):
+              return {
+                  "bytes": len(data),
+                  "sha256": digest(data),
+                  "format": stdout_class(data, complete),
+              }
+
+          def read_file(stream):
+              stream.flush()
+              size = os.fstat(stream.fileno()).st_size
+              return os.pread(stream.fileno(), size, 0)
+
+          def probe(mode):
+              began = time.monotonic_ns()
+              spawn_began = time.monotonic_ns()
+              if mode == "pipe":
+                  process = subprocess.Popen(COMMAND, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  output_files = None
+              else:
+                  output_files = (tempfile.TemporaryFile("w+b"), tempfile.TemporaryFile("w+b"))
+                  process = subprocess.Popen(COMMAND, stdout=output_files[0], stderr=output_files[1])
+              spawn_ms = (time.monotonic_ns() - spawn_began) // 1_000_000
+              timeout_state = "not_applicable"
+              cleanup = "not_needed"
+              timed_out = False
+              partial_stdout = b""
+              partial_stderr = b""
+              try:
+                  if mode == "pipe":
+                      stdout, stderr = process.communicate(timeout=LIMIT)
+                  else:
+                      process.wait(timeout=LIMIT)
+                      stdout, stderr = (read_file(output_files[0]), read_file(output_files[1]))
+              except subprocess.TimeoutExpired as error:
+                  timed_out = True
+                  timeout_state = "running" if process.poll() is None else "exited"
+                  if mode == "pipe":
+                      partial_stdout = error.output or b""
+                      partial_stderr = error.stderr or b""
+                  else:
+                      partial_stdout = read_file(output_files[0])
+                      partial_stderr = read_file(output_files[1])
+                  if process.poll() is None:
+                      process.kill()
+                  try:
+                      if mode == "pipe":
+                          stdout, stderr = process.communicate(timeout=LIMIT)
+                      else:
+                          process.wait(timeout=LIMIT)
+                          stdout, stderr = (read_file(output_files[0]), read_file(output_files[1]))
+                      cleanup = "completed"
+                  except subprocess.TimeoutExpired as cleanup_error:
+                      cleanup = "timeout"
+                      if mode == "pipe":
+                          stdout = cleanup_error.output or partial_stdout
+                          stderr = cleanup_error.stderr or partial_stderr
+                      else:
+                          stdout, stderr = (read_file(output_files[0]), read_file(output_files[1]))
+              finally:
+                  if output_files is not None:
+                      for stream in output_files:
+                          stream.close()
+              complete = not timed_out
+              returncode = process.poll()
+              return {
+                  "mode": mode,
+                  "spawn_ms": spawn_ms,
+                  "elapsed_ms": (time.monotonic_ns() - began) // 1_000_000,
+                  "timeout": "yes" if timed_out else "no",
+                  "poll_at_timeout": timeout_state,
+                  "returncode": returncode,
+                  "accepted_exit_status": "yes" if returncode in (0, 1) else "no",
+                  "cleanup": cleanup,
+                  "partial_stdout": facts(partial_stdout, False),
+                  "partial_stderr_bytes": len(partial_stderr),
+                  "partial_stderr_sha256": digest(partial_stderr),
+                  "stdout": facts(stdout, complete),
+                  "stderr_bytes": len(stderr),
+                  "stderr_sha256": digest(stderr),
+                  "stderr_empty": "yes" if not stderr else "no",
+              }
+
+          if __name__ == "__main__":
+              result = probe(os.environ["OWNERSHIP_PROBE_MODE"])
+              Path(os.environ["OWNERSHIP_PROBE_RESULT"]).write_text(
+                  json.dumps(result, sort_keys=True) + "\n"
+              )
+          '''
+
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          child_path = temporary / "ownership-probe.py"
+          child_path.write_text(child_source)
+          child_path.chmod(0o700)
+          spec = importlib.util.spec_from_file_location("ownership_probe", child_path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          records = {}
+          orchestration_failure = False
+          for context, mode in (("owner_pipe", "pipe"), ("owner_file", "file")):
+              result_path = temporary / f"{context}.json"
+              log_path = temporary / f"{context}.log"
+              environment = dict(os.environ)
+              environment["OWNERSHIP_PROBE_MODE"] = mode
+              environment["OWNERSHIP_PROBE_RESULT"] = str(result_path)
+              began = time.monotonic_ns()
+              spawn_began = time.monotonic_ns()
+              with log_path.open("w+b") as log:
+                  child = subprocess.Popen(
+                      [sys.executable, str(child_path)],
+                      stdin=subprocess.DEVNULL,
+                      stdout=log,
+                      stderr=log,
+                      env=environment,
+                  )
+                  child_spawn_ms = (time.monotonic_ns() - spawn_began) // 1_000_000
+                  child_timeout_state = "not_applicable"
+                  try:
+                      child.wait(timeout=12)
+                  except subprocess.TimeoutExpired:
+                      child_timeout_state = "running" if child.poll() is None else "exited"
+                      if child.poll() is None:
+                          child.kill()
+                      child.wait(timeout=5)
+                  log.flush()
+                  log.seek(0)
+                  child_log = log.read()
+              if result_path.exists():
+                  record = json.loads(result_path.read_text())
+              else:
+                  record = {"result": "missing"}
+                  orchestration_failure = True
+              record.update({
+                  "context": context,
+                  "owner_child_spawn_ms": child_spawn_ms,
+                  "owner_child_elapsed_ms": (time.monotonic_ns() - began) // 1_000_000,
+                  "owner_child_poll_at_timeout": child_timeout_state,
+                  "owner_child_returncode": child.poll(),
+                  "owner_child_log_bytes": len(child_log),
+                  "owner_child_log_sha256": hashlib.sha256(child_log).hexdigest(),
+              })
+              if child.poll() != 0:
+                  orchestration_failure = True
+              records[context] = record
+              result_path.unlink(missing_ok=True)
+              log_path.unlink(missing_ok=True)
+
+          records["direct_pipe"] = module.probe("pipe")
+          lsof_path = shutil.which("lsof")
+          if lsof_path is None:
+              raise RuntimeError("required diagnostic executable is unavailable")
+          summary = {
+              "schema": 1,
+              "ordering": ["owner_pipe", "owner_file", "direct_pipe"],
+              "ordering_effect": "later_observations_may_be_order_affected",
+              "source_commit": subprocess.check_output(
+                  ["git", "rev-parse", "HEAD"], text=True
+              ).strip(),
+              "source_tree": subprocess.check_output(
+                  ["git", "rev-parse", "HEAD^{tree}"], text=True
+              ).strip(),
+              "lsof_sha256": hashlib.sha256(Path(lsof_path).resolve().read_bytes()).hexdigest(),
+              "records": records,
           }
-          out = pathlib.Path('dist/fixture-diagnostic')
+          child_path.unlink(missing_ok=True)
+          out = Path("dist/fixture-diagnostic")
           out.mkdir(parents=True, exist_ok=True)
-          (out / 'startup.json').write_text(json.dumps(result, sort_keys=True) + '\n')
-          print(json.dumps(result, sort_keys=True))
+          (out / "ownership-query.json").write_text(json.dumps(summary, sort_keys=True) + "\n")
+          print(json.dumps(summary, sort_keys=True))
+          raise SystemExit(1 if orchestration_failure else 0)
           PY
-      - name: Stop only the owned fixture
-        if: always()
-        run: |
-          status=0
-          make synchrod-pg-test-stop || status=$?
-          make local-postgres-stop || status=$?
-          exit "$status"
       - name: Delete the diagnostic simulator
         if: always() && env.IOS_SIMULATOR_UDID != ''
         run: |
           xcrun simctl shutdown "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
           xcrun simctl delete "$IOS_SIMULATOR_UDID" >/dev/null 2>&1 || true
-      - name: Verify ownership controls after the fixture experiment
-        if: always()
-        run: make test-ci-process-lifecycle
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
         with:
-          name: ios-min-fixture-diagnostic
-          path: dist/fixture-diagnostic/startup.json
+          name: ios-min-ownership-query-diagnostic
+          path: dist/fixture-diagnostic/ownership-query.json
           if-no-files-found: error
