@@ -6,10 +6,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from pathlib import Path
@@ -40,6 +42,87 @@ def elf_x64() -> bytes:
 
 
 class ReleaseArtifactsTests(unittest.TestCase):
+    def test_apple_startup_retains_only_sanitized_failure_diagnostic(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        step = workflow.split("      - name: Start local Apple fixture\n        run: |\n", 1)[1]
+        run = textwrap.dedent(step.split("\n      - name:", 1)[0])
+        passwords = {role: f"{role.lower()}-password:/ @?#%+" for role in (
+            "ADMIN", "ADAPTER", "OBSERVER", "WORKER", "OPERATOR",
+        )}
+        encoded = {role: f"{role.lower()}-password%3A%2F%20%40%3F%23%25%2B" for role in passwords}
+        adapter_url = "postgres://fixture:" + encoded["ADAPTER"] + "@127.0.0.1:5432/fixture"
+        encoded_url = (
+            "postgres%3A%2F%2Ffixture%3Aadapter-password%253A%252F%2520%2540%253F%2523%2525%252B"
+            "%40127.0.0.1%3A5432%2Ffixture"
+        )
+        jwt_secret = "jwt-head-" + "j" * 17000 + "-jwt-private-tail:/ @?#%+"
+        encoded_jwt = "jwt-head-" + "j" * 17000 + "-jwt-private-tail%3A%2F%20%40%3F%23%25%2B"
+        sentinels = [adapter_url, encoded_url, jwt_secret, encoded_jwt, *passwords.values(), *encoded.values()]
+        log = "discarded diagnostic prefix\n" + "f" * 17000 + "\n" + "\n".join(sentinels) + "\nADAPTER_ERROR_MARKER\n"
+        for mode, status in (("failure", 47), ("success", 0), ("missing-log", 47), ("missing-secret", 47)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                attach = root / ".ignore/r2/tmp/local-postgres"
+                attach.mkdir(parents=True)
+                assignments = []
+                for role, secret in passwords.items():
+                    path = attach / f"{role.lower()}.password"
+                    path.write_text(secret + "\n", encoding="utf-8")
+                    assignments.append(f"SYNCHRO_CONFORMANCE_{role}_PASSWORD_FILE={shlex.quote(str(path))}")
+                jwt_path = attach / "jwt.secret"
+                jwt_path.write_text(jwt_secret + "\n", encoding="utf-8")
+                assignments.append(f"SYNCHRO_CONFORMANCE_JWT_SECRET_FILE={shlex.quote(str(jwt_path))}")
+                (attach / "attach.env").write_text("\n".join(assignments) + "\n", encoding="utf-8")
+                (attach / "postgres.url").write_text(adapter_url + "\n", encoding="utf-8")
+                runner_temp = root / "runner-temp"
+                runner_temp.mkdir()
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                make = bin_dir / "make"
+                make.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import os, sys\nfrom pathlib import Path\n"
+                    "if sys.argv[1:] == ['local-postgres-start']:\n    raise SystemExit(0)\n"
+                    "if sys.argv[1] != 'synchrod-pg-test-start':\n    raise SystemExit(99)\n"
+                    "arguments = dict(value.split('=', 1) for value in sys.argv[2:])\n"
+                    "if arguments.get('CLIENT_DATASET') != '1':\n    raise SystemExit(99)\n"
+                    "log = Path(arguments.get('SYNCHROD_PG_LOG_FILE', '.synchrod-pg-test.log'))\n"
+                    f"if {mode!r} != 'missing-log':\n    log.write_text({log!r}, encoding='utf-8')\n"
+                    f"if {mode!r} == 'missing-secret':\n    Path(os.environ['SYNCHRO_CONFORMANCE_OBSERVER_PASSWORD_FILE']).unlink()\n"
+                    f"raise SystemExit({status})\n",
+                    encoding="utf-8",
+                )
+                make.chmod(0o700)
+                environment = {
+                    **os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                    "GITHUB_WORKSPACE": str(root), "GITHUB_ENV": str(root / "github.env"),
+                    "RUNNER_TEMP": str(runner_temp),
+                }
+                result = subprocess.run(
+                    ["bash", "-c", run], cwd=root, env=environment,
+                    capture_output=True, text=True, check=False, timeout=10,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                masks = ["::add-mask::" + adapter_url, "::add-mask::" + jwt_secret]
+                mask_commands = [line for line in result.stdout.splitlines() if line.startswith("::add-mask::")]
+                self.assertEqual(mask_commands, masks)
+                other_stdout = "\n".join(line for line in result.stdout.splitlines() if line not in masks)
+                for secret in sentinels:
+                    self.assertNotIn(secret, result.stderr)
+                    self.assertNotIn(secret, other_stdout)
+                self.assertFalse((root / "dist/package-evidence").exists())
+                if mode == "failure":
+                    self.assertIn("ADAPTER_ERROR_MARKER", result.stderr)
+                    self.assertIn("[REDACTED]", result.stderr)
+                    self.assertNotIn("jwt-private-tail", result.stderr)
+                    self.assertNotIn("discarded diagnostic prefix", result.stderr)
+                    self.assertLessEqual(len(result.stderr), 16384)
+                    self.assertTrue((runner_temp / "synchrod-pg-apple-startup.log").is_file())
+                elif mode == "success":
+                    self.assertEqual(result.stderr, "")
+                else:
+                    self.assertEqual(result.stderr, "Apple fixture diagnostic unavailable.\n")
+
     def test_make_build_targets_preserve_absolute_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
