@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import signal
@@ -129,6 +130,110 @@ def record_listener_timeout(command: list[str], measurement: dict) -> None:
         os.fsync(stream.fileno())
 
 
+def native_symbol(value: str) -> str | None:
+    if (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", value)
+        and not re.fullmatch(r"[0-9A-Fa-f]+", value)
+    ):
+        return value
+    return None
+
+
+def observe_listener_timeout(process: subprocess.Popen) -> dict:
+    observation = {
+        "ps_status": "target_exited",
+        "ps_state": "unavailable",
+        "ps_wait_channel_status": "unavailable",
+        "ps_wait_channel_symbol": None,
+        "sample_status": "target_exited",
+        "sample_symbols": [],
+    }
+    if process.poll() is not None:
+        return observation
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(process.pid), "-o", "state=,wchan="],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1,
+        )
+        if result.returncode == 0:
+            fields = result.stdout.decode(errors="replace").strip().split(maxsplit=1)
+            states = {
+                "D": "uninterruptible_sleep", "I": "idle", "R": "runnable",
+                "S": "sleeping", "T": "stopped", "U": "uninterruptible_wait",
+                "Z": "zombie",
+            }
+            observation["ps_status"] = "completed"
+            observation["ps_state"] = states.get(fields[0][:1], "unknown") if fields else "unknown"
+            symbol = native_symbol(fields[1]) if len(fields) == 2 else None
+            if symbol is not None:
+                observation["ps_wait_channel_status"] = "symbol"
+                observation["ps_wait_channel_symbol"] = symbol
+        elif process.poll() is not None:
+            observation["ps_status"] = "target_exited"
+        elif b"permission denied" in result.stderr.lower() or b"not permitted" in result.stderr.lower():
+            observation["ps_status"] = "permission_denied"
+        else:
+            observation["ps_status"] = "unavailable"
+    except subprocess.TimeoutExpired:
+        observation["ps_status"] = "timeout"
+    except OSError:
+        observation["ps_status"] = "unavailable"
+
+    sample = Path("/usr/bin/sample")
+    if process.poll() is not None:
+        return observation
+    if not sample.is_file() or not os.access(sample, os.X_OK):
+        observation["sample_status"] = "unavailable"
+        return observation
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as stream:
+            sample_path = Path(stream.name)
+    except OSError:
+        observation["sample_status"] = "unavailable"
+        return observation
+    try:
+        try:
+            result = subprocess.run(
+                [str(sample), str(process.pid), "1", "-file", str(sample_path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=2,
+            )
+        except subprocess.TimeoutExpired:
+            observation["sample_status"] = "timeout"
+            return observation
+        except OSError:
+            observation["sample_status"] = "unavailable"
+            return observation
+        if result.returncode != 0:
+            if process.poll() is not None:
+                observation["sample_status"] = "target_exited"
+            elif b"permission denied" in result.stderr.lower() or b"not permitted" in result.stderr.lower():
+                observation["sample_status"] = "permission_denied"
+            else:
+                observation["sample_status"] = "unavailable"
+            return observation
+        try:
+            if sample_path.stat().st_size > 1_048_576:
+                observation["sample_status"] = "oversized"
+                return observation
+            sample_lines = sample_path.read_text(errors="replace").splitlines()
+        except OSError:
+            observation["sample_status"] = "unavailable"
+            return observation
+        symbols = []
+        for line in sample_lines:
+            match = re.search(r"([A-Za-z_][A-Za-z0-9_.$]*)\s+\(in\s", line)
+            symbol = native_symbol(match.group(1)) if match else None
+            if symbol is not None and symbol not in symbols:
+                symbols.append(symbol)
+            if len(symbols) == 32:
+                break
+        observation["sample_status"] = "completed" if symbols else "no_symbols"
+        observation["sample_symbols"] = symbols
+        return observation
+    finally:
+        sample_path.unlink(missing_ok=True)
+
+
 def listeners(port: str) -> set[int]:
     command = ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"]
     began = time.monotonic_ns()
@@ -148,8 +253,17 @@ def listeners(port: str) -> set[int]:
             partial_stdout = partial_stdout.encode()
         if isinstance(partial_stderr, str):
             partial_stderr = partial_stderr.encode()
-        if observed is None:
-            process.kill()
+        try:
+            observation = observe_listener_timeout(process)
+        except Exception:
+            observation = {
+                "ps_status": "unavailable", "ps_state": "unavailable",
+                "ps_wait_channel_status": "unavailable", "ps_wait_channel_symbol": None,
+                "sample_status": "unavailable", "sample_symbols": [],
+            }
+        finally:
+            if process.poll() is None:
+                process.kill()
         cleanup = "completed"
         try:
             process.wait(timeout=5)
@@ -168,6 +282,7 @@ def listeners(port: str) -> set[int]:
             "partial_stdout_sha256": hashlib.sha256(partial_stdout).hexdigest(),
             "partial_stderr_bytes": len(partial_stderr),
             "partial_stderr_sha256": hashlib.sha256(partial_stderr).hexdigest(),
+            **observation,
         }
         record_listener_timeout(command, measurement)
         raise RuntimeError("cannot inspect adapter listener ownership") from error
