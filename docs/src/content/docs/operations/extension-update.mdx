@@ -205,11 +205,14 @@ For the server setup cluster, use this command:
 sudo pg_ctlcluster 18 synchro_tutorial restart
 ```
 
-Between the restart and the update, readiness fails closed and the adapter
-refuses to start. The WAL worker waits for the update. It does not read the
-extension objects before the update, and it continues after the update without
-a restart. This occurs because the installed extension objects still
-have the old version and the old build fingerprint.
+Between the restart and the update, readiness fails closed because the installed
+extension version does not match the library. The adapter refuses to start.
+If the SQL fingerprints differ, the WAL worker waits for the update.
+It continues after the update without another restart.
+
+When the install SQL is identical, the fingerprints match and the worker can
+continue before the version update. Run the documented update even when
+`extension_objects_stale` reports `ok`.
 
 ## 3. Update the extension
 
