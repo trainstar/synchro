@@ -109,14 +109,16 @@ GRADLE
     sed 's/withModuleName: "SynchroConsumer"/withModuleName: "SynchroUpgrade"/' \
       "$source_dir/../../react-native/AppDelegate.swift" > ios/SynchroUpgrade/AppDelegate.swift
     plist=ios/SynchroUpgrade/Info.plist
-    if ! /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest" "$plist" >/dev/null 2>&1; then
-      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest dict" "$plist"
-    fi
-    if /usr/libexec/PlistBuddy -c "Print :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes" "$plist" >/dev/null 2>&1; then
-      /usr/libexec/PlistBuddy -c "Set :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes false" "$plist"
-    else
-      /usr/libexec/PlistBuddy -c "Add :UIApplicationSceneManifest:UIApplicationSupportsMultipleScenes bool false" "$plist"
-    fi
+    python3 - "$source_dir/../../../../clients/react-native/example/ios/SynchroReactNativeExample/Info.plist" "$plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], 'rb') as source, open(sys.argv[2], 'rb') as target:
+    manifest = plistlib.load(source)['UIApplicationSceneManifest']
+    app = plistlib.load(target)
+app['UIApplicationSceneManifest'] = manifest
+with open(sys.argv[2], 'wb') as target:
+    plistlib.dump(app, target, sort_keys=False)
+PY
     if [ "$side" = predecessor ]; then
       synchro_pod="pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v$version'"
     else
