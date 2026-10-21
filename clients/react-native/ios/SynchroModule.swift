@@ -221,7 +221,6 @@ public class SynchroModuleImpl: NSObject {
     private(set) var client: SynchroClient?
     private let lifecycleMutex = LifecycleMutex()
     private let databaseBridgeQueue = DispatchQueue(label: "com.trainstar.synchro.react-native.database")
-    private let databaseOperations = DispatchGroup()
     var sessions: [String: TransactionSession] = [:]
     let sessionsLock = NSLock()
     private var acceptingTransactions = false
@@ -938,18 +937,10 @@ public class SynchroModuleImpl: NSObject {
         }
 
         sessionsLock.lock()
-        let previous = (
-            self.statusSubscription,
-            self.syncEventSubscription,
-            self.conflictSubscription
-        )
         self.statusSubscription = statusSubscription
         self.syncEventSubscription = syncEventSubscription
         self.conflictSubscription = conflictSubscription
         sessionsLock.unlock()
-        previous.0?.cancel()
-        previous.1?.cancel()
-        previous.2?.cancel()
     }
 
     private func setClient(_ client: SynchroClient?, acceptingTransactions: Bool) {
@@ -981,9 +972,7 @@ public class SynchroModuleImpl: NSObject {
             reject("NOT_CONNECTED", "Client not initialized", nil)
             return
         }
-        databaseOperations.enter()
         databaseBridgeQueue.async {
-            defer { self.databaseOperations.leave() }
             let result = Result { try operation(client) }
             switch result {
             case .success(let value):
@@ -1046,7 +1035,7 @@ public class SynchroModuleImpl: NSObject {
             await session.waitUntilFinished()
         }
         await withCheckedContinuation { continuation in
-            databaseOperations.notify(queue: .global(qos: .userInitiated)) {
+            databaseBridgeQueue.async {
                 continuation.resume()
             }
         }

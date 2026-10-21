@@ -407,7 +407,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
         }
 
         XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
-        waitForSettlements([ordinary] + commits)
+        waitForSettlements([ordinary] + commits, timeout: promptDispatchTimeout)
         XCTAssertEqual((try resolvedValue(ordinary) as? [[String: Any]])?.count, 1)
         let close = try closeModule()
 
@@ -435,7 +435,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
         }
 
         XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
-        waitForSettlements([ordinary] + rollbacks)
+        waitForSettlements([ordinary] + rollbacks, timeout: promptDispatchTimeout)
         XCTAssertEqual((try resolvedValue(ordinary) as? [String: Any])?.count, 1)
         let close = try closeModule()
 
@@ -509,16 +509,27 @@ final class SynchroModuleTransactionTests: XCTestCase {
     func testCloseDrainsAdmittedQueryAfterAbortingSaturatedReaders() throws {
         try initializeModule()
         let held = try holdReadTransactions(count: 5)
+        let pendingBegin = PromiseRecorder("pending sixth reader")
+        module.beginReadTransaction(pendingBegin.resolve, reject: pendingBegin.reject)
         let query = PromiseRecorder("admitted query")
         module.query("SELECT 1", params: [], resolve: query.resolve, reject: query.reject)
 
         let close = PromiseRecorder("close with admitted query")
-        module.close(close.resolve, reject: close.reject)
-        waitForSettlements([close])
+        let recordClose = close.resolve
+        module.close({ value in
+            XCTAssertEqual(pendingBegin.rejections, ["NOT_CONNECTED"])
+            XCTAssertEqual(pendingBegin.settlementCount, 1)
+            XCTAssertEqual(query.settlementCount, 1)
+            recordClose(value)
+        }, reject: close.reject)
+        waitForSettlements([query, pendingBegin, close], timeout: promptDispatchTimeout)
 
         XCTAssertEqual(query.settlementCount, 1)
         XCTAssertEqual((try resolvedValue(query) as? [[String: Any]])?.count, 1)
         requireSettledOnce(held.recorders + [query, close])
+        XCTAssertEqual(pendingBegin.resolutions.count, 0)
+        XCTAssertEqual(pendingBegin.rejections, ["NOT_CONNECTED"])
+        XCTAssertEqual(pendingBegin.settlementCount, 1)
 
         let afterClose = settle("query after close") {
             module.query("SELECT 1", params: [], resolve: $0.resolve, reject: $0.reject)
@@ -526,6 +537,62 @@ final class SynchroModuleTransactionTests: XCTestCase {
         XCTAssertEqual(afterClose.resolutions.count, 0)
         XCTAssertEqual(afterClose.rejections, ["NOT_CONNECTED"])
         XCTAssertEqual(afterClose.settlementCount, 1)
+        XCTAssertEqual(events.names, [])
+    }
+
+    func testCloseDrainsQueuedOrdinaryCallsBeforeClosingClient() throws {
+        try initializeModule()
+        let external = try openExternalConnection()
+        let client = try XCTUnwrap(module.client)
+        let hold = ChangeHold()
+        let subscription = client.onChange(tables: ["bridge_items"]) { hold.enter() }
+        addTeardownBlock {
+            hold.release()
+            subscription.cancel()
+        }
+        let activeReader = try holdReadTransactions(count: 1)
+        let id = UUID().uuidString
+
+        let write = PromiseRecorder("held ordinary write")
+        module.execute(insertSQL, params: [id, "ordinary-held"], resolve: write.resolve, reject: write.reject)
+        XCTAssertEqual(XCTWaiter().wait(for: [hold.entered], timeout: settlementTimeout), .completed)
+        XCTAssertEqual(try external.names(id: id), ["ordinary-held"])
+        XCTAssertEqual(write.settlementCount, 0)
+
+        let read = PromiseRecorder("queued ordinary read")
+        module.queryOne(selectNameSQL, params: [id], resolve: read.resolve, reject: read.reject)
+        let close = PromiseRecorder("close draining ordinary calls")
+        let recordClose = close.resolve
+        module.close({ value in
+            XCTAssertEqual(write.settlementCount, 1)
+            XCTAssertEqual(read.settlementCount, 1)
+            recordClose(value)
+        }, reject: close.reject)
+
+        XCTAssertTrue(try waitUntilCloseDetachesSessions())
+        XCTAssertEqual(write.settlementCount, 0)
+        XCTAssertEqual(read.settlementCount, 0)
+        XCTAssertEqual(close.settlementCount, 0)
+
+        let rejected = PromiseRecorder("ordinary call after close admission stops")
+        module.query("SELECT 1", params: [], resolve: rejected.resolve, reject: rejected.reject)
+        waitForSettlements([rejected], timeout: promptDispatchTimeout)
+        XCTAssertEqual(rejected.resolutions.count, 0)
+        XCTAssertEqual(rejected.rejections, ["NOT_CONNECTED"])
+        XCTAssertEqual(rejected.settlementCount, 1)
+        XCTAssertEqual(write.settlementCount, 0)
+        XCTAssertEqual(read.settlementCount, 0)
+        XCTAssertEqual(close.settlementCount, 0)
+
+        hold.release()
+        waitForSettlements([write, read, close], timeout: promptDispatchTimeout)
+        XCTAssertTrue(hold.heldUntilRelease)
+        XCTAssertEqual(hold.entryCount, 1)
+        subscription.cancel()
+        let row = try XCTUnwrap(try resolvedValue(read) as? [String: Any])
+        XCTAssertEqual(row["name"] as? String, "ordinary-held")
+        requireSettledOnce(activeReader.recorders + [write, read, close])
+        XCTAssertEqual(try external.names(id: id), ["ordinary-held"])
         XCTAssertEqual(events.names, [])
     }
 
@@ -872,12 +939,13 @@ final class SynchroModuleTransactionTests: XCTestCase {
 
     private func waitForSettlements(
         _ recorders: [PromiseRecorder],
+        timeout: TimeInterval = settlementTimeout,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
         let result = XCTWaiter().wait(
             for: recorders.map(\.firstSettlement),
-            timeout: settlementTimeout
+            timeout: timeout
         )
         XCTAssertEqual(result, .completed, "promises did not settle", file: file, line: line)
     }
