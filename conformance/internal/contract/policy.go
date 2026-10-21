@@ -42,8 +42,8 @@ var lockedSupportCells = map[SupportCellID]supportTuple{
 	"SUP-ANDROID-CURRENT-001":    {component: "kotlin-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, policy: "required"},
 	"SUP-RN-IOS-MIN-001":         {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "minimum", value: "0.82.1"}, policy: "required"},
 	"SUP-RN-ANDROID-MIN-001":     {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "minimum", value: "0.82.1"}, policy: "required"},
-	"SUP-RN-IOS-CURRENT-001":     {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
-	"SUP-RN-ANDROID-CURRENT-001": {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.83.x"}, policy: "required"},
+	"SUP-RN-IOS-CURRENT-001":     {component: "react-native-client", platform: "ios", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.88.x"}, policy: "required"},
+	"SUP-RN-ANDROID-CURRENT-001": {component: "react-native-client", platform: "android", platformVersion: versionTuple{kind: "current-stable"}, runtimeVersion: versionTuple{kind: "series", value: "0.88.x"}, policy: "required"},
 }
 
 var lockedSemanticCorpusCellIDs = []SupportCellID{

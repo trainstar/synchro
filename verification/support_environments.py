@@ -90,11 +90,8 @@ def validate_environment(cell_id: object, value: object) -> dict[str, str]:
         if cell_id in RN_MIN_CELLS:
             if runtime != (0, 82, 1):
                 raise EnvironmentError(f"cell {cell_id} React Native must use 0.82.1")
-        else:
-            if runtime[:2] != (0, 83):
-                raise EnvironmentError(f"cell {cell_id} React Native must use the supported 0.83 series")
-            if "xcode" in value and version_components(value["xcode"]) >= (26, 4) and runtime[2] < 5:
-                raise EnvironmentError(f"cell {cell_id} Xcode 26.4 or later requires React Native 0.83.5 or later")
+        elif runtime[:2] != (0, 88):
+            raise EnvironmentError(f"cell {cell_id} React Native must use the supported 0.88 series")
     return dict(sorted(value.items()))
 
 
