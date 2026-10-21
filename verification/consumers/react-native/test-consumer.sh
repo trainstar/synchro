@@ -36,11 +36,11 @@ if [ "$mode" = "smoke" ]; then
     : "${IOS_SIMULATOR_UDID:?IOS_SIMULATOR_UDID is required for an Apple smoke cell}"
   fi
 fi
-rn_version=${SYNCHRO_RN_VERSION-0.83.10}
+rn_version=${SYNCHRO_RN_VERSION-0.88.0}
 if [ "$mode" = "smoke" ]; then
   case "$platform:$cell_id" in
     ios:SUP-RN-IOS-MIN-001|android:SUP-RN-ANDROID-MIN-001) cell_rn_version=0.82.1 ;;
-    ios:SUP-RN-IOS-CURRENT-001|android:SUP-RN-ANDROID-CURRENT-001) cell_rn_version=0.83.10 ;;
+    ios:SUP-RN-IOS-CURRENT-001|android:SUP-RN-ANDROID-CURRENT-001) cell_rn_version=0.88.0 ;;
     *) printf '%s\n' "unsupported React Native consumer cell: $cell_id for $platform" >&2; exit 1 ;;
   esac
   if [ "${SYNCHRO_RN_VERSION+x}" = x ] && [ "$rn_version" != "$cell_rn_version" ]; then
@@ -51,7 +51,7 @@ if [ "$mode" = "smoke" ]; then
 fi
 case "$rn_version" in
   0.82.1) react_version=19.1.1 ;;
-  0.83.10) react_version=19.2.4 ;;
+  0.88.0) react_version=19.3.0 ;;
   *) printf '%s\n' "unsupported React Native consumer version: $rn_version" >&2; exit 1 ;;
 esac
 

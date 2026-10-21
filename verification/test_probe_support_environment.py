@@ -93,14 +93,14 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
     def test_react_native_reads_installed_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            app = self.installed_app(root, '{"name":"react-native","version":"0.83.11"}')
+            app = self.installed_app(root, '{"name":"react-native","version":"0.88.0"}')
             # The unrelated template and Synchro metadata do not supply this version.
             (app / "package.json").write_text('{"version":"9.9.9","dependencies":{"react-native":"0.83.10"}}')
             record = self.run_probe(root, command_fixtures(), probe.RN_IOS_CELL, app)
-            self.assertEqual(record["environment"], {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.11"})
+            self.assertEqual(record["environment"], {"ios": "27.0", "xcode": "27.0", "react_native": "0.88.0"})
 
     def test_minimum_react_native_requires_exact_installed_runtime(self) -> None:
-        for version in ("0.82.1", "0.82.0", "0.82.2", "0.83.10", None):
+        for version in ("0.82.1", "0.82.0", "0.82.2", "0.88.0", None):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 app = root / "missing-app" if version is None else self.installed_app(root, json.dumps({"version": version}))
@@ -211,25 +211,13 @@ class AppleEnvironmentProbeTests(unittest.TestCase):
                 self.assert_rejected(Path(directory), command_fixtures(ios, xcode), cell)
 
     def test_installed_react_native_missing_malformed_and_duplicate_metadata_reject(self) -> None:
-        for text in (None, "{", "[]", '{}', '{"version":null}', '{"version":"0.84.0"}', '{"version":"0.82.1"}',
-                     '{"version":"0.083.10"}', '{"version":"0.83"}', '{"version":"current"}',
-                     '{"version":"0.83.10","version":"0.83.10"}', '{"metadata":{"a":1,"a":1},"version":"0.83.10"}'):
+        for text in (None, "{", "[]", '{}', '{"version":null}', '{"version":"0.83.10"}', '{"version":"0.89.0"}', '{"version":"0.82.1"}',
+                     '{"version":"0.088.0"}', '{"version":"0.88"}', '{"version":"current"}',
+                     '{"version":"0.88.0","version":"0.88.0"}', '{"metadata":{"a":1,"a":1},"version":"0.88.0"}'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 app = root / "missing-app" if text is None else self.installed_app(root, text)
                 self.assert_rejected(root, command_fixtures(), probe.RN_IOS_CELL, app)
-
-    def test_installed_react_native_xcode_supported_patch_boundary(self) -> None:
-        for xcode, version, accepted in (("26.3", "0.83.4", True), ("26.4", "0.83.4", False),
-                                         ("26.4.0", "0.83.4", False), ("26.4", "0.83.5", True), ("27.0", "0.83.5", True)):
-            with self.subTest(xcode=xcode, version=version), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                app = self.installed_app(root, json.dumps({"version": version}))
-                if accepted:
-                    record = self.run_probe(root, command_fixtures(xcode=xcode), probe.RN_IOS_CELL, app)
-                    self.assertEqual(record["environment"]["react_native"], version)
-                else:
-                    self.assert_rejected(root, command_fixtures(xcode=xcode), probe.RN_IOS_CELL, app)
 
     def test_each_command_failure_timeout_and_unreadable_text_are_bounded(self) -> None:
         secret = "arbitrary private tool output"
@@ -558,7 +546,7 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
         self.app = self.root / "app"
         package = self.app / "node_modules/react-native/package.json"
         package.parent.mkdir(parents=True)
-        package.write_text('{"name":"react-native","version":"0.83.5"}', encoding="utf-8")
+        package.write_text('{"name":"react-native","version":"0.88.0"}', encoding="utf-8")
         self.diagnostics = io.StringIO()
         for patcher in (
             mock.patch.dict(os.environ, {"KEEP_ME": "retained"}, clear=True),
@@ -671,13 +659,13 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
         self.assertEqual(record["environment"]["system_image_revision"], "27")
         self.image_fixture("37.0", "6")
         self.api = "37\n"
-        self.assertEqual(self.measure(probe.RN_ANDROID_CELL, react_native_app=self.app)["environment"]["react_native"], "0.83.5")
+        self.assertEqual(self.measure(probe.RN_ANDROID_CELL, react_native_app=self.app)["environment"]["react_native"], "0.88.0")
         self.version = self.version.replace("37.2.12.0", "37.2.12")
         self.assertEqual(self.measure()["environment"]["emulator_version"], "37.2.12")
 
     def test_minimum_react_native_requires_exact_installed_runtime(self) -> None:
         package = self.app / "node_modules/react-native/package.json"
-        for version in ("0.82.0", "0.82.2", "0.83.10", None):
+        for version in ("0.82.0", "0.82.2", "0.88.0", None):
             with self.subTest(version=version):
                 if version is None:
                     package.unlink()
@@ -1025,7 +1013,7 @@ class AndroidEnvironmentProbeTests(unittest.TestCase):
                 self.rejected()
         self.version = original
         package = self.app / "node_modules/react-native/package.json"
-        for text in ('{"version":"0.84.0"}', '{"version":"0.82.1"}', None):
+        for text in ('{"version":"0.83.10"}', '{"version":"0.89.0"}', '{"version":"0.82.1"}', None):
             with self.subTest(metadata=text):
                 if text is None:
                     package.unlink()

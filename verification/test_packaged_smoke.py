@@ -59,7 +59,7 @@ def measured_environment(cell_id: str) -> dict[str, str]:
         "SUP-PG-LINUX-X64-001": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"},
         "SUP-IOS-MIN-001": {"ios": "17.0", "xcode": "27.0"},
         "SUP-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0"},
-        "SUP-RN-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.83.10"},
+        "SUP-RN-IOS-CURRENT-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.88.0"},
         "SUP-RN-IOS-MIN-001": {"ios": "27.0", "xcode": "27.0", "react_native": "0.82.1"},
         "SUP-ANDROID-MIN-001": {
             "android_api": "24", "os": "ubuntu-24.04",
@@ -74,7 +74,7 @@ def measured_environment(cell_id: str) -> dict[str, str]:
         "SUP-RN-ANDROID-CURRENT-001": {
             "android_api": "37", "os": "ubuntu-24.04",
             "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6",
-            "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.83.10",
+            "emulator_version": "37.2.12", "emulator_build": "16428233", "react_native": "0.88.0",
         },
         "SUP-RN-ANDROID-MIN-001": {
             "android_api": "37", "os": "ubuntu-24.04",
@@ -545,8 +545,8 @@ adb_command() {
             ("SUP-ANDROID-CURRENT-001", {"system_image": "system-images;android-37;google_apis;x86_64"}),
             ("SUP-ANDROID-CURRENT-001", {"emulator_version": "37.2.13"}),
             ("SUP-ANDROID-CURRENT-001", {"emulator_build": "16428234"}),
-            ("SUP-RN-IOS-CURRENT-001", {"react_native": "0.83.11"}),
-            ("SUP-RN-ANDROID-CURRENT-001", {"react_native": "0.83.11"}),
+            ("SUP-RN-IOS-CURRENT-001", {"react_native": "0.88.1"}),
+            ("SUP-RN-ANDROID-CURRENT-001", {"react_native": "0.88.1"}),
         ):
             for phase in ("initial", "resume", "both"):
                 with self.subTest(cell=cell_id, changes=changes, phase=phase), tempfile.TemporaryDirectory() as directory:
@@ -970,7 +970,7 @@ adb_command() {
                 ("SUP-ANDROID-CURRENT-001", "system_image_revision", "7"),
                 ("SUP-ANDROID-CURRENT-001", "emulator_version", "37.2.13"),
                 ("SUP-ANDROID-CURRENT-001", "emulator_build", "16428234"),
-                ("SUP-RN-IOS-CURRENT-001", "react_native", "0.83.11"),
+                ("SUP-RN-IOS-CURRENT-001", "react_native", "0.88.1"),
             ):
                 different = copy.deepcopy(original_summary)
                 next(record for record in different["resolved_support_cells"] if record["id"] == cell_id)["environment"][field] = actual

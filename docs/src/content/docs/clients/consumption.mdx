@@ -9,9 +9,9 @@ It uses that guide's `synchro_quickstart` database, `alice` identity,
 
 ## Choose an artifact source
 
-Use local artifacts before Synchro `0.4.0-rc.2` is published. Use the published commands
+Use local artifacts before Synchro `0.4.0-rc.3` is published. Use the published commands
 only after the matching release artifact is available. Both paths use Synchro
-`0.4.0-rc.2` and the same client APIs.
+`0.4.0-rc.3` and the same client APIs.
 
 Build local artifacts from this repository:
 
@@ -23,26 +23,26 @@ This creates:
 
 - Apple package files in `dist/local-consumer/apple/Synchro`
 - a Kotlin Maven repository in `dist/local-consumer/maven`
-- `dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.2.tgz`
+- `dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.3.tgz`
 
 Do not link raw source directories into another application. The staged
 artifacts are the supported pre-release path.
 
 | Surface | Local artifact | Published artifact after release |
 | --- | --- | --- |
-| Swift | local package path | Git tag `v0.4.0-rc.2` |
-| CocoaPods | local pod path | Git tag `v0.4.0-rc.2` |
-| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.4.0-rc.2` |
-| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.4.0-rc.2` |
+| Swift | local package path | Git tag `v0.4.0-rc.3` |
+| CocoaPods | local pod path | Git tag `v0.4.0-rc.3` |
+| Kotlin | local Maven repository | Maven Central `fit.trainstar:synchro:0.4.0-rc.3` |
+| React Native | local `.tgz` | npm `@trainstar/synchro-react-native@0.4.0-rc.3` |
 
 ## Prerequisites
 
 - Swift clients require iOS 17 or later.
 - Kotlin clients require Android API 24 or later and JDK 17.
-- React Native requires `>=0.82.1 <0.84.0` and React `>=19.1.1 <20.0.0`.
+- React Native requires `>=0.82.1 <0.89.0` and React `>=19.1.1 <20.0.0`.
+- React Native 0.88.0 requires React 19.3.0 and Node `^22.13.0 || ^24.3.0 || >=26.0.0`.
 - React Native 0.82.1 iOS applications require the [fmt backport](/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27.
 - Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
-- React Native consumers require Node `20.19.4` or later.
 - The repository React Native development toolchain is pinned to Node `22.20.0`
   in `clients/react-native/.nvmrc`. This pin is for repository development.
   It does not raise the published package floor.
@@ -56,13 +56,13 @@ endpoint, not a host loopback address.
 
 ## Swift
 
-Add the package to `Package.swift` after Synchro `v0.4.0-rc.2` is published:
+Add the package to `Package.swift` after Synchro `v0.4.0-rc.3` is published:
 
 ```swift
 dependencies: [
     .package(
         url: "https://github.com/trainstar/synchro.git",
-        exact: "0.4.0-rc.2"
+        exact: "0.4.0-rc.3"
     )
 ],
 targets: [
@@ -156,7 +156,7 @@ local tutorial adapter. When the application exits, call
 
 ## Kotlin
 
-Add the published artifact after Synchro `0.4.0-rc.2` is available:
+Add the published artifact after Synchro `0.4.0-rc.3` is available:
 
 ```kotlin
 repositories {
@@ -164,7 +164,7 @@ repositories {
 }
 
 dependencies {
-    implementation("fit.trainstar:synchro:0.4.0-rc.2")
+    implementation("fit.trainstar:synchro:0.4.0-rc.3")
 }
 ```
 
@@ -249,16 +249,16 @@ the callback return.
 
 ## React Native
 
-Install the published package after Synchro `0.4.0-rc.2` is available:
+Install the published package after Synchro `0.4.0-rc.3` is available:
 
 ```sh
-npm install @trainstar/synchro-react-native@0.4.0-rc.2
+npm install @trainstar/synchro-react-native@0.4.0-rc.3
 ```
 
 For local development, install the staged package:
 
 ```sh
-npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.2.tgz
+npm install /absolute/path/to/synchro/dist/local-consumer/npm/trainstar-synchro-react-native-0.4.0-rc.3.tgz
 ```
 
 Pin the CLI toolchain and apply its delivered correction after each fresh npm installation:
@@ -291,10 +291,10 @@ the project before removal.
 ### React Native iOS Podfile requirements
 
 The React Native bridge requires both Synchro and GRDB. Use these exact Git
-dependencies for a published Synchro `0.4.0-rc.2` integration:
+dependencies for a published Synchro `0.4.0-rc.3` integration:
 
 ```ruby
-pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.2'
+pod 'Synchro', :git => 'https://github.com/trainstar/synchro.git', :tag => 'v0.4.0-rc.3'
 pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
 ```
 

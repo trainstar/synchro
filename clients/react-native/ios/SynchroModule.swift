@@ -179,6 +179,7 @@ enum TransactionOp {
 private struct TransactionTimeoutError: Error {}
 private struct TransactionRollbackError: Error {}
 private struct DatabaseAlreadyExistsError: Error {}
+private struct InvalidAuthoredWriteOperationError: Error {}
 private struct TransactionAbortedError: LocalizedError {
     let message: String
 
@@ -219,6 +220,7 @@ public class SynchroModuleImpl: NSObject {
 
     private(set) var client: SynchroClient?
     private let lifecycleMutex = LifecycleMutex()
+    private let databaseBridgeQueue = DispatchQueue(label: "com.trainstar.synchro.react-native.database")
     var sessions: [String: TransactionSession] = [:]
     let sessionsLock = NSLock()
     private var acceptingTransactions = false
@@ -253,6 +255,8 @@ public class SynchroModuleImpl: NSObject {
             reject("TRANSACTION_TIMEOUT", "Transaction timed out due to inactivity", nil)
         } else if error is TransactionAbortedError {
             reject("NOT_CONNECTED", "Client closed during transaction", error)
+        } else if error is InvalidAuthoredWriteOperationError {
+            reject("INVALID_CONFIG", "Invalid authored write operation", nil)
         } else {
             reject("UNKNOWN", error.localizedDescription, error)
         }
@@ -487,16 +491,13 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let rows = try client.query(sql, params: try bridgeParams(params))
-            resolve(rowsToBridgeRows(rows))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                try self.rowsToBridgeRows(client.query(sql, params: try self.bridgeParams(params)))
+            }
+        )
     }
 
     @objc
@@ -506,20 +507,16 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let row = try client.queryOne(sql, params: try bridgeParams(params))
-            if let row = row {
-                resolve(rowToBridgeRow(row))
-            } else {
-                resolve(NSNull())
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client -> Any? in
+                if let row = try client.queryOne(sql, params: try self.bridgeParams(params)) {
+                    return self.rowToBridgeRow(row)
+                }
+                return NSNull()
             }
-        } catch {
-            rejectWithError(reject, error)
-        }
+        )
     }
 
     @objc
@@ -529,16 +526,14 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let result = try client.execute(sql, params: try bridgeParams(params))
-            resolve(["rowsAffected": result.rowsAffected])
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let result = try client.execute(sql, params: try self.bridgeParams(params))
+                return ["rowsAffected": result.rowsAffected]
+            }
+        )
     }
 
     @objc
@@ -551,27 +546,24 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        guard let authoredOperation = Synchro.Operation(rawValue: operation) else {
-            reject("INVALID_CONFIG", "Invalid authored write operation", nil)
-            return
-        }
-        do {
-            let params = try bridgeParams(values)
-            let result = try client.authoredWriteTransaction(
-                tableName: tableName,
-                operation: authoredOperation,
-                columnNames: columnNames
-            ) { transaction in
-                try transaction.execute(sql, params: params)
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                guard let authoredOperation = Synchro.Operation(rawValue: operation) else {
+                    throw InvalidAuthoredWriteOperationError()
+                }
+                let params = try self.bridgeParams(values)
+                let result = try client.authoredWriteTransaction(
+                    tableName: tableName,
+                    operation: authoredOperation,
+                    columnNames: columnNames
+                ) { transaction in
+                    try transaction.execute(sql, params: params)
+                }
+                return ["rowsAffected": result.rowsAffected]
             }
-            resolve(["rowsAffected": result.rowsAffected])
-        } catch {
-            rejectWithError(reject, error)
-        }
+        )
     }
 
     @objc
@@ -580,16 +572,14 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let total = try client.executeBatch(try bridgeStatements(statements))
-            resolve(["totalRowsAffected": total])
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let total = try client.executeBatch(try self.bridgeStatements(statements))
+                return ["totalRowsAffected": total]
+            }
+        )
     }
 
     // MARK: - Transactions
@@ -917,20 +907,17 @@ public class SynchroModuleImpl: NSObject {
     }
 
     private func wireClientEvents(_ client: SynchroClient) {
-        statusSubscription?.cancel()
-        syncEventSubscription?.cancel()
-        conflictSubscription?.cancel()
         statusDetailsLock.lock()
         cachedBackoff = nil
         cachedFailure = nil
         statusDetailsLock.unlock()
 
-        statusSubscription = client.onStatusChange { [weak self] status in
+        let statusSubscription = client.onStatusChange { [weak self] status in
             guard status != .backoff, status != .error else { return }
-            self?.emit("onStatusChange", self?.statusPayload(status) ?? [:])
+            self?.emit("onStatusChange", self?.statusPayload(status, client: client) ?? [:])
         }
 
-        syncEventSubscription = client.onSyncEvent { [weak self] event in
+        let syncEventSubscription = client.onSyncEvent { [weak self] event in
             guard let self else { return }
             self.recordStatusDetails(event)
             self.emit("onSyncEvent", self.syncEventPayload(event))
@@ -938,16 +925,22 @@ public class SynchroModuleImpl: NSObject {
             case .backoff, .failure:
                 self.emit(
                     "onStatusChange",
-                    self.statusPayload(client.getSyncStatus())
+                    self.statusPayload(client.getSyncStatus(), client: client)
                 )
             default:
                 break
             }
         }
 
-        conflictSubscription = client.onConflict { [weak self] event in
+        let conflictSubscription = client.onConflict { [weak self] event in
             self?.emit("onConflict", self?.conflictPayload(event) ?? [:])
         }
+
+        sessionsLock.lock()
+        self.statusSubscription = statusSubscription
+        self.syncEventSubscription = syncEventSubscription
+        self.conflictSubscription = conflictSubscription
+        sessionsLock.unlock()
     }
 
     private func setClient(_ client: SynchroClient?, acceptingTransactions: Bool) {
@@ -968,13 +961,30 @@ public class SynchroModuleImpl: NSObject {
         }
     }
 
+    private func submitDatabaseOperation(
+        resolve: @escaping RCTPromiseResolveBlock,
+        reject: @escaping RCTPromiseRejectBlock,
+        operation: @escaping (SynchroClient) throws -> Any?
+    ) {
+        sessionsLock.lock()
+        guard acceptingTransactions, let client else {
+            sessionsLock.unlock()
+            reject("NOT_CONNECTED", "Client not initialized", nil)
+            return
+        }
+        databaseBridgeQueue.async {
+            let result = Result { try operation(client) }
+            switch result {
+            case .success(let value):
+                resolve(value)
+            case .failure(let error):
+                self.rejectWithError(reject, error)
+            }
+        }
+        sessionsLock.unlock()
+    }
+
     private func detachRuntimeState() -> [TransactionSession] {
-        statusSubscription?.cancel()
-        syncEventSubscription?.cancel()
-        conflictSubscription?.cancel()
-        statusSubscription = nil
-        syncEventSubscription = nil
-        conflictSubscription = nil
         transportObservations?.cancelPauseBarrier()
         transportObservations = nil
         statusDetailsLock.lock()
@@ -982,14 +992,25 @@ public class SynchroModuleImpl: NSObject {
         cachedFailure = nil
         statusDetailsLock.unlock()
 
-        observers.values.forEach { $0.cancel() }
-        observers.removeAll()
-
         sessionsLock.lock()
         acceptingTransactions = false
         let activeSessions = Array(sessions.values)
         sessions.removeAll()
+        let activeObservers = Array(observers.values)
+        observers.removeAll()
+        let activeSubscriptions = (
+            statusSubscription,
+            syncEventSubscription,
+            conflictSubscription
+        )
+        statusSubscription = nil
+        syncEventSubscription = nil
+        conflictSubscription = nil
         sessionsLock.unlock()
+        activeObservers.forEach { $0.cancel() }
+        activeSubscriptions.0?.cancel()
+        activeSubscriptions.1?.cancel()
+        activeSubscriptions.2?.cancel()
 
         authLock.lock()
         let authContinuations = pendingAuthContinuations
@@ -1013,9 +1034,14 @@ public class SynchroModuleImpl: NSObject {
         for session in activeSessions {
             await session.waitUntilFinished()
         }
+        await withCheckedContinuation { continuation in
+            databaseBridgeQueue.async {
+                continuation.resume()
+            }
+        }
     }
 
-    private func statusPayload(_ status: SyncStatus) -> [String: Any] {
+    private func statusPayload(_ status: SyncStatus, client: SynchroClient) -> [String: Any] {
         var payload: [String: Any] = [
             "status": status.rawValue,
             "retryAt": NSNull(),
@@ -1038,11 +1064,7 @@ public class SynchroModuleImpl: NSObject {
             let cachedFailure = self.cachedFailure
             statusDetailsLock.unlock()
             let persistedFailure: SyncFailure?
-            if let client = self.client {
-                persistedFailure = try? client.getBlockingFailure()
-            } else {
-                persistedFailure = nil
-            }
+            persistedFailure = try? client.getBlockingFailure()
             if let failure = cachedFailure ?? persistedFailure {
                 payload["failure"] = failurePayload(failure)
             }
@@ -1234,18 +1256,16 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let columns = try parseColumns(columnsJson)
-            let options = try optionsJson.flatMap { try parseTableOptions($0) }
-            try client.createTable(name, columns: columns, options: options)
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let columns = try self.parseColumns(columnsJson)
+                let options = try optionsJson.flatMap { try self.parseTableOptions($0) }
+                try client.createTable(name, columns: columns, options: options)
+                return nil
+            }
+        )
     }
 
     @objc
@@ -1255,17 +1275,15 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let columns = try parseColumns(columnsJson)
-            try client.alterTable(name, addColumns: columns)
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let columns = try self.parseColumns(columnsJson)
+                try client.alterTable(name, addColumns: columns)
+                return nil
+            }
+        )
     }
 
     @objc
@@ -1276,16 +1294,14 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            try client.createIndex(table, columns: columns, unique: unique)
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                try client.createIndex(table, columns: columns, unique: unique)
+                return nil
+            }
+        )
     }
 
     // MARK: - Observation
@@ -1297,14 +1313,18 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
+        sessionsLock.lock()
+        guard acceptingTransactions, let client else {
+            sessionsLock.unlock()
             reject("NOT_CONNECTED", "Client not initialized", nil)
             return
         }
         let cancellable = client.onChange(tables: tables) { [weak self] in
             self?.emit("onChange", ["observerID": observerID])
         }
-        observers[observerID] = cancellable
+        let previous = observers.updateValue(cancellable, forKey: observerID)
+        sessionsLock.unlock()
+        previous?.cancel()
         resolve(nil)
     }
 
@@ -1317,7 +1337,9 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
+        sessionsLock.lock()
+        guard acceptingTransactions, let client else {
+            sessionsLock.unlock()
             reject("NOT_CONNECTED", "Client not initialized", nil)
             return
         }
@@ -1328,9 +1350,12 @@ public class SynchroModuleImpl: NSObject {
                     self?.emit("onQueryResult", ["observerID": observerID, "rows": payload])
                 }
             }
-            observers[observerID] = cancellable
+            let previous = observers.updateValue(cancellable, forKey: observerID)
+            sessionsLock.unlock()
+            previous?.cancel()
             resolve(nil)
         } catch {
+            sessionsLock.unlock()
             rejectWithError(reject, error)
         }
     }
@@ -1341,9 +1366,10 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        if let cancellable = observers.removeValue(forKey: observerID) {
-            cancellable.cancel()
-        }
+        sessionsLock.lock()
+        let cancellable = observers.removeValue(forKey: observerID)
+        sessionsLock.unlock()
+        cancellable?.cancel()
         resolve(nil)
     }
 
@@ -1501,15 +1527,11 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            resolve(try client.pendingChangeCount())
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in try client.pendingChangeCount() }
+        )
     }
 
     @objc
@@ -1517,15 +1539,13 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            resolve(try encodeBridgeJSON(statusPayload(client.getSyncStatus())))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                try self.encodeBridgeJSON(self.statusPayload(client.getSyncStatus(), client: client))
+            }
+        )
     }
 
     @objc
@@ -1533,16 +1553,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let payload = try client.inspectPendingMutations().map(pendingMutationPayload)
-            resolve(try encodeBridgeJSON(payload))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let payload = try client.inspectPendingMutations().map(self.pendingMutationPayload)
+                return try self.encodeBridgeJSON(payload)
+            }
+        )
     }
 
     @objc
@@ -1550,16 +1568,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let payload = try client.inspectRetainedMutations().map(pendingMutationPayload)
-            resolve(try encodeBridgeJSON(payload))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let payload = try client.inspectRetainedMutations().map(self.pendingMutationPayload)
+                return try self.encodeBridgeJSON(payload)
+            }
+        )
     }
 
     @objc
@@ -1567,16 +1583,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let payload = try client.inspectRetainedMutationRecords().map(retainedMutationPayload)
-            resolve(try encodeBridgeJSON(payload))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let payload = try client.inspectRetainedMutationRecords().map(self.retainedMutationPayload)
+                return try self.encodeBridgeJSON(payload)
+            }
+        )
     }
 
     @objc
@@ -1584,16 +1598,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let payload = try client.inspectRejectedMutations().map(rejectedMutationPayload)
-            resolve(try encodeBridgeJSON(payload))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let payload = try client.inspectRejectedMutations().map(self.rejectedMutationPayload)
+                return try self.encodeBridgeJSON(payload)
+            }
+        )
     }
 
     @objc
@@ -1601,16 +1613,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let payload = try client.inspectRejectedMutationRecords().map(retainedRejectionPayload)
-            resolve(try encodeBridgeJSON(payload))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let payload = try client.inspectRejectedMutationRecords().map(self.retainedRejectionPayload)
+                return try self.encodeBridgeJSON(payload)
+            }
+        )
     }
 
     /// Reads client state, retained details, and the requested application rows
@@ -1621,38 +1631,36 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let statements = try bridgeStatements(rowStatements)
-            var rows: [Row] = []
-            let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 512) { _, transaction in
-                for statement in statements {
-                    rows += try transaction.query(statement.sql, params: statement.params)
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let statements = try self.bridgeStatements(rowStatements)
+                var rows: [Row] = []
+                let snapshot = try SynchroInspection(client: client).captureSnapshot(maximumRecords: 512) { _, transaction in
+                    for statement in statements {
+                        rows += try transaction.query(statement.sql, params: statement.params)
+                    }
                 }
+                let inspection: [String: Any] = [
+                    "client_state": self.clientStatePayload(snapshot.capture),
+                    "migration_journal": try snapshot.capture.migrationJournal.map {
+                        try JSONSerialization.jsonObject(with: JSONEncoder().encode($0))
+                    } ?? NSNull(),
+                    "migration_journal_truncated": snapshot.capture.migrationJournalTruncated,
+                    "physical_schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot.capture.physicalSchema)),
+                    "physical_schema_truncated": snapshot.capture.physicalSchemaTruncated,
+                    "accepted_mutation_outcomes": snapshot.capture.acceptedMutationOutcomes,
+                    "accepted_mutation_outcomes_truncated": snapshot.capture.acceptedMutationOutcomesTruncated,
+                    "retained_mutations": snapshot.retainedMutations.map { $0.map(self.retainedMutationPayload) } ?? NSNull(),
+                    "rejected_mutations": snapshot.rejectedMutations.map { $0.map(self.retainedRejectionPayload) } ?? NSNull(),
+                ]
+                return [
+                    "inspection": try self.encodeBridgeJSON(inspection),
+                    "applicationRows": self.rowsToBridgeRows(rows),
+                ]
             }
-            let inspection: [String: Any] = [
-                "client_state": clientStatePayload(snapshot.capture),
-                "migration_journal": try snapshot.capture.migrationJournal.map {
-                    try JSONSerialization.jsonObject(with: JSONEncoder().encode($0))
-                } ?? NSNull(),
-                "migration_journal_truncated": snapshot.capture.migrationJournalTruncated,
-                "physical_schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot.capture.physicalSchema)),
-                "physical_schema_truncated": snapshot.capture.physicalSchemaTruncated,
-                "accepted_mutation_outcomes": snapshot.capture.acceptedMutationOutcomes,
-                "accepted_mutation_outcomes_truncated": snapshot.capture.acceptedMutationOutcomesTruncated,
-                "retained_mutations": snapshot.retainedMutations.map { $0.map(retainedMutationPayload) } ?? NSNull(),
-                "rejected_mutations": snapshot.rejectedMutations.map { $0.map(retainedRejectionPayload) } ?? NSNull(),
-            ]
-            resolve([
-                "inspection": try encodeBridgeJSON(inspection),
-                "applicationRows": rowsToBridgeRows(rows),
-            ])
-        } catch {
-            rejectWithError(reject, error)
-        }
+        )
     }
 
     /// Reads one record's row metadata and every rebuild receipt. The inspection snapshot bounds
@@ -1664,46 +1672,44 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            let inspection = SynchroInspection(client: client)
-            let metadata: Any = try inspection.rowMetadata(
-                tableName: tableName,
-                recordID: recordID
-            ).map { value in
-                [
-                    "table_name": value.tableName,
-                    "record_id": value.recordID,
-                    "server_version": value.serverVersion,
-                    "row_checksum": value.rowChecksum ?? NSNull(),
-                ] as [String: Any]
-            } ?? NSNull()
-            let receipts = try inspection.rebuildReceipts().map { value in
-                [
-                    "rebuild_id_fingerprint": value.rebuildIDFingerprint,
-                    "page_count": value.pageCount,
-                    "returned_record_count": value.returnedRecordCount,
-                    "request_chain_expected": value.requestChainExpected,
-                    "request_chain_observed": value.requestChainObserved,
-                    "record_identities_hex": value.recordIdentitiesHex,
-                    "received_row_checksums": value.receivedRowChecksums,
-                    "computed_row_checksums": value.computedRowChecksums,
-                    "computed_scope_checksum": value.computedScopeChecksum ?? NSNull(),
-                    "final_scope_checksum": value.finalScopeChecksum ?? NSNull(),
-                    "stored_scope_checksum": value.storedScopeChecksum ?? NSNull(),
-                    "local_scope_checksum": value.localScopeChecksum ?? NSNull(),
-                ] as [String: Any]
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                let inspection = SynchroInspection(client: client)
+                let metadata: Any = try inspection.rowMetadata(
+                    tableName: tableName,
+                    recordID: recordID
+                ).map { value in
+                    [
+                        "table_name": value.tableName,
+                        "record_id": value.recordID,
+                        "server_version": value.serverVersion,
+                        "row_checksum": value.rowChecksum ?? NSNull(),
+                    ] as [String: Any]
+                } ?? NSNull()
+                let receipts = try inspection.rebuildReceipts().map { value in
+                    [
+                        "rebuild_id_fingerprint": value.rebuildIDFingerprint,
+                        "page_count": value.pageCount,
+                        "returned_record_count": value.returnedRecordCount,
+                        "request_chain_expected": value.requestChainExpected,
+                        "request_chain_observed": value.requestChainObserved,
+                        "record_identities_hex": value.recordIdentitiesHex,
+                        "received_row_checksums": value.receivedRowChecksums,
+                        "computed_row_checksums": value.computedRowChecksums,
+                        "computed_scope_checksum": value.computedScopeChecksum ?? NSNull(),
+                        "final_scope_checksum": value.finalScopeChecksum ?? NSNull(),
+                        "stored_scope_checksum": value.storedScopeChecksum ?? NSNull(),
+                        "local_scope_checksum": value.localScopeChecksum ?? NSNull(),
+                    ] as [String: Any]
+                }
+                return try self.encodeBridgeJSON([
+                    "row_metadata": metadata,
+                    "rebuild_receipts": receipts,
+                ])
             }
-            resolve(try encodeBridgeJSON([
-                "row_metadata": metadata,
-                "rebuild_receipts": receipts,
-            ]))
-        } catch {
-            rejectWithError(reject, error)
-        }
+        )
     }
 
     @objc
@@ -1808,16 +1814,14 @@ public class SynchroModuleImpl: NSObject {
         _ resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        guard let client = client else {
-            reject("NOT_CONNECTED", "Client not initialized", nil)
-            return
-        }
-        do {
-            try client.clearRejectedMutations()
-            resolve(nil)
-        } catch {
-            rejectWithError(reject, error)
-        }
+        submitDatabaseOperation(
+            resolve: resolve,
+            reject: reject,
+            operation: { client in
+                try client.clearRejectedMutations()
+                return nil
+            }
+        )
     }
 
     // MARK: - Helpers

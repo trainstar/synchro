@@ -22,19 +22,17 @@ The supported matrix is deliberately narrow:
 | Server | PostgreSQL 18 on Ubuntu 24.04 Linux x64 |
 | Apple client | iOS 17 and current stable iOS |
 | Android client | Android API 24 and current stable Android API |
-| React Native bridge | React Native 0.82.1 and 0.83.x on current stable iOS and current stable Android |
+| React Native bridge | React Native 0.82.1 and 0.88.x on current stable iOS and current stable Android |
 
 PostgreSQL 14, 15, 16, and 17 are excluded. Existing build features or incidental successful use do not expand this matrix.
 
-The React Native package accepts `react-native >=0.82.1 <0.84.0` and `react >=19.1.1 <20.0.0`.
-Package checks exercise both bridge paths on RN 0.82.1 and 0.83.10.
-The representative semantic corpus uses RN 0.83.10.
+The React Native package accepts `react-native >=0.82.1 <0.89.0` and `react >=19.1.1 <20.0.0`.
+Package checks exercise both bridge paths on RN 0.82.1 and 0.88.0.
+The representative semantic corpus uses RN 0.88.0.
 Native engine cells provide minimum operating system coverage.
 
-Current package consumers pin React Native 0.83.10.
-Use React Native 0.83.5 or later in the 0.83 line with Xcode 27.
-Earlier patches require the fmt dependency correction.
-The [upstream correction](https://github.com/react/react-native/commit/faeef2b90a56633ad44289b994d31e7ce590b145) updates fmt to 12.1.0.
+Current package consumers pin React Native 0.88.0.
+React Native 0.88 requires React 19.3.0 and Node `^22.13.0 || ^24.3.0 || >=26.0.0`.
 
 Applications built with Xcode 27 must adopt the [UIKit scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
 The example and consumer hosts use this lifecycle.
@@ -102,7 +100,7 @@ For Yarn 4 applications:
 5. Confirm that `Podfile.lock` resolves fmt 12.1.0.
 
 Other package managers must preserve the same patch across dependency installations.
-RN 0.83.10 already contains the upstream correction.
+This backport applies only to the RN 0.82.1 minimum track.
 
 ## Validation Hosts
 

@@ -16,6 +16,7 @@ Pod::Spec.new do |s|
   s.source_files = "ios/**/*.{h,m,mm,swift,cpp}"
   s.private_header_files = "ios/**/*.h"
   s.compiler_flags = "-Werror=protocol"
+  s.libraries = "c++"
 
   s.dependency "Synchro", "= #{s.version}"
 

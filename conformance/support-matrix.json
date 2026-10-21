@@ -1,7 +1,7 @@
 {
   "$schema": "./schemas/support-matrix.schema.json",
   "schema_version": 1,
-  "release": "0.4.0-rc.2",
+  "release": "0.4.0-rc.3",
   "current_track_policy": {
     "selector": "current-stable",
     "resolve_at": "release-candidate-start",
@@ -166,7 +166,7 @@
       },
       "runtime_version": {
         "kind": "series",
-        "value": "0.83.x"
+        "value": "0.88.x"
       },
       "policy": "required"
     },
@@ -179,7 +179,7 @@
       },
       "runtime_version": {
         "kind": "series",
-        "value": "0.83.x"
+        "value": "0.88.x"
       },
       "policy": "required"
     }
