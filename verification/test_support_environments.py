@@ -17,7 +17,7 @@ def valid_records() -> list[dict[str, object]]:
         {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}},
         {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
         {"id": "SUP-RN-IOS-CURRENT-001", "environment": {
-            "ios": "27.0", "xcode": "27.0", "react_native": "0.83.10",
+            "ios": "27.0", "xcode": "27.0", "react_native": "0.88.0",
         }},
         {"id": "SUP-ANDROID-MIN-001", "environment": {
             "android_api": "24", "os": "ubuntu-24.04",
@@ -33,7 +33,7 @@ def valid_records() -> list[dict[str, object]]:
             "android_api": "37", "os": "ubuntu-24.04",
             "system_image": "system-images;android-37.0;google_apis;x86_64",
             "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233",
-            "react_native": "0.83.10",
+            "react_native": "0.88.0",
         }},
         {"id": "SUP-RN-IOS-MIN-001", "environment": {
             "ios": "27.0", "xcode": "27.0", "react_native": "0.82.1",
@@ -63,18 +63,18 @@ def invalid_collections() -> list[tuple[str, object]]:
         ("SUP-IOS-CURRENT-001", "xcode", "27"),
         ("SUP-IOS-CURRENT-001", "xcode", "27.0.0.0"),
         ("SUP-IOS-CURRENT-001", "xcode", "27.0-beta"),
-        ("SUP-RN-IOS-CURRENT-001", "react_native", "0.83.4"),
-        ("SUP-RN-IOS-CURRENT-001", "react_native", "0.84.0"),
-        ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.083.10"),
-        ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.83"),
+        ("SUP-RN-IOS-CURRENT-001", "react_native", "0.83.10"),
+        ("SUP-RN-IOS-CURRENT-001", "react_native", "0.89.0"),
+        ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.088.0"),
+        ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.88"),
         ("SUP-RN-IOS-CURRENT-001", "react_native", "0.82.1"),
         ("SUP-RN-ANDROID-CURRENT-001", "react_native", "0.82.1"),
         ("SUP-RN-IOS-MIN-001", "react_native", "0.82.0"),
         ("SUP-RN-IOS-MIN-001", "react_native", "0.82.2"),
-        ("SUP-RN-IOS-MIN-001", "react_native", "0.83.10"),
+        ("SUP-RN-IOS-MIN-001", "react_native", "0.88.0"),
         ("SUP-RN-ANDROID-MIN-001", "react_native", "0.82.0"),
         ("SUP-RN-ANDROID-MIN-001", "react_native", "0.82.2"),
-        ("SUP-RN-ANDROID-MIN-001", "react_native", "0.83.10"),
+        ("SUP-RN-ANDROID-MIN-001", "react_native", "0.88.0"),
         ("SUP-RN-IOS-MIN-001", "ios", "26.0"),
         ("SUP-ANDROID-MIN-001", "android_api", "25"),
         ("SUP-ANDROID-CURRENT-001", "android_api", "23"),
@@ -172,21 +172,6 @@ class SupportEnvironmentTests(unittest.TestCase):
             value = {**records[5]["environment"], "system_image_revision": bad}
             with self.subTest(bad=bad), self.assertRaises(environments.EnvironmentError):
                 environments.validate_environment(records[5]["id"], value)
-
-    def test_react_native_xcode_minimum_boundary(self) -> None:
-        value = valid_records()[3]["environment"]
-        for xcode, runtime, accepted in (
-            ("26.3", "0.83.4", True), ("26.4", "0.83.4", False),
-            ("26.4.0", "0.83.4", False), ("26.4", "0.83.5", True),
-            ("27.0", "0.83.5", True), ("27.0", "0.83.10", True),
-        ):
-            with self.subTest(xcode=xcode, runtime=runtime):
-                candidate = {**value, "xcode": xcode, "react_native": runtime}
-                if accepted:
-                    environments.validate_environment("SUP-RN-IOS-CURRENT-001", candidate)
-                else:
-                    with self.assertRaises(environments.EnvironmentError):
-                        environments.validate_environment("SUP-RN-IOS-CURRENT-001", candidate)
 
     def test_current_consistency_without_claiming_stable_authority(self) -> None:
         records = valid_records()

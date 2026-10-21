@@ -107,10 +107,16 @@ func runSwiftPushResponseLoss(t *testing.T) {
 
 func runSwiftSchemaQueuedMutation(t *testing.T) {
 	t.Helper()
-	ctx, scenario, _, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "schema-queued-mutation-001.json"), 100)
+	ctx, scenario, harness, controller, platform := newSwiftPerformanceFixture(t, filepath.Join("server", "schema-queued-mutation-001.json"), 100)
 	result, err := RunSchemaQueuedMutationScenario(ctx, scenario, controller, platform, Client{Key: "client-a", UserID: "user-a", ClientID: "client-a", DatabaseKey: "schema-queued-mutation-client-a"})
 	if err != nil {
-		t.Fatalf("run direct Swift schema-queued-mutation scenario: %v", err)
+		diagnosticContext, cancelDiagnostics := context.WithTimeout(context.Background(), 5*time.Second)
+		diagnostics, diagnosticErr := harness.Operator().WALDiagnostics(diagnosticContext)
+		cancelDiagnostics()
+		if diagnosticErr != nil {
+			t.Fatalf("run direct Swift schema-queued-mutation scenario: %v; read WAL diagnostics: %v", err, diagnosticErr)
+		}
+		t.Fatalf("run direct Swift schema-queued-mutation scenario: %v; WAL diagnostics: %s", err, diagnostics)
 	}
 	if len(result.IdentityResolution) != len(scenario.NativeIdentityAliases) {
 		t.Fatalf("Swift schema-queued-mutation identity resolutions = %d, want %d", len(result.IdentityResolution), len(scenario.NativeIdentityAliases))
@@ -274,7 +280,13 @@ func runSwiftSeededEmptyStartup(t *testing.T) {
 	})
 	result, err := RunSeededEmptyStartupScenario(ctx, scenario, controller, artifact, platform)
 	if err != nil {
-		t.Fatalf("run direct Swift seeded-empty-startup scenario: %v", err)
+		diagnosticContext, cancelDiagnostics := context.WithTimeout(context.Background(), 5*time.Second)
+		diagnostics, diagnosticErr := harness.Operator().WALDiagnostics(diagnosticContext)
+		cancelDiagnostics()
+		if diagnosticErr != nil {
+			t.Fatalf("run direct Swift seeded-empty-startup scenario: %v; read WAL diagnostics: %v", err, diagnosticErr)
+		}
+		t.Fatalf("run direct Swift seeded-empty-startup scenario: %v; WAL diagnostics: %s", err, diagnostics)
 	}
 	if len(result.Clients) != 6 {
 		t.Fatalf("Swift seeded-empty-startup clients = %d, want 6", len(result.Clients))

@@ -9,6 +9,23 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+## [0.4.0-rc.3] - 2026-10-20
+
+This release candidate is for consumer validation of `0.4.0`.
+Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
+
+### Changed
+
+- React Native applications can use RN 0.82.1 through 0.88.x. Current consumers use RN 0.88.0 with React 19.3.0. ([#370](https://github.com/trainstar/synchro/issues/370))
+
+### Fixed
+
+- iOS database calls release native method dispatch while they wait for SQLite capacity. Active transaction commands can complete without timeout-driven release. ([#369](https://github.com/trainstar/synchro/issues/369))
+
+### Security
+
+- Documentation development servers use Vite 8.2.4 to correct Windows editor command handling. ([#372](https://github.com/trainstar/synchro/issues/372))
+
 ## [0.4.0-rc.2] - 2026-10-09
 
 This release candidate is for consumer validation of `0.4.0`.
@@ -112,6 +129,7 @@ Clients:
 - Parser and rebuild diagnostics do not include submitted or record-owned values. ([#210](https://github.com/trainstar/synchro/issues/210))
 - The React Native lock file does not contain vulnerable `brace-expansion` versions. ([#279](https://github.com/trainstar/synchro/issues/279))
 
-[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.2...HEAD
+[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.3...HEAD
+[0.4.0-rc.3]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.2...v0.4.0-rc.3
 [0.4.0-rc.2]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/trainstar/synchro/compare/v0.3.2...v0.4.0-rc.1

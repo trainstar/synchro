@@ -1,15 +1,11 @@
-import type { TurboModule } from 'react-native';
-import type {
-  EventEmitter,
-  UnsafeObject,
-} from 'react-native/Libraries/Types/CodegenTypes';
+import type { CodegenTypes, TurboModule } from 'react-native';
 import { TurboModuleRegistry } from 'react-native';
 
 // Codegen does not support a discriminated union of object and primitive
 // parameter types. UnsafeObject keeps the TurboModule boundary representable,
 // while the public client validates the tagged values before crossing it.
-type NativeSQLiteBindValue = string | number | boolean | null | UnsafeObject;
-type NativeRow = UnsafeObject;
+type NativeSQLiteBindValue = string | number | boolean | null | CodegenTypes.UnsafeObject;
+type NativeRow = CodegenTypes.UnsafeObject;
 type NativeSQLStatement = {
   sql: string;
   params: ReadonlyArray<NativeSQLiteBindValue>;
@@ -18,7 +14,7 @@ type StatusEvent = {
   status: string;
   retryAt: string | null;
   operation: string | null;
-  failure: UnsafeObject | null;
+  failure: CodegenTypes.UnsafeObject | null;
 };
 type ConflictEvent = {
   table: string;
@@ -33,8 +29,8 @@ type SyncEvent = {
   operation: string | null;
   attempt: number | null;
   retryAt: string | null;
-  source: UnsafeObject | null;
-  target: UnsafeObject | null;
+  source: CodegenTypes.UnsafeObject | null;
+  target: CodegenTypes.UnsafeObject | null;
   action: string | null;
   mutationID: string | null;
   tableID: string | null;
@@ -42,7 +38,7 @@ type SyncEvent = {
   rejectionCode: string | null;
   scopeID: string | null;
   rebuildID: string | null;
-  failure: UnsafeObject | null;
+  failure: CodegenTypes.UnsafeObject | null;
 };
 type AuthRequestEvent = { requestID: string };
 type ChangeEvent = { observerID: string };
@@ -171,12 +167,12 @@ export interface Spec extends TurboModule {
   rejectAuthRequest(requestID: string, error: string): void;
 
   // Typed events
-  readonly onStatusChange: EventEmitter<StatusEvent>;
-  readonly onSyncEvent: EventEmitter<SyncEvent>;
-  readonly onConflict: EventEmitter<ConflictEvent>;
-  readonly onAuthRequest: EventEmitter<AuthRequestEvent>;
-  readonly onChange: EventEmitter<ChangeEvent>;
-  readonly onQueryResult: EventEmitter<QueryResultEvent>;
+  readonly onStatusChange: CodegenTypes.EventEmitter<StatusEvent>;
+  readonly onSyncEvent: CodegenTypes.EventEmitter<SyncEvent>;
+  readonly onConflict: CodegenTypes.EventEmitter<ConflictEvent>;
+  readonly onAuthRequest: CodegenTypes.EventEmitter<AuthRequestEvent>;
+  readonly onChange: CodegenTypes.EventEmitter<ChangeEvent>;
+  readonly onQueryResult: CodegenTypes.EventEmitter<QueryResultEvent>;
 
   // NativeEventEmitter compatibility
   addListener(eventName: string): void;

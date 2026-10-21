@@ -271,8 +271,10 @@ jobs:
             "platform-tools" \
             "platforms;android-34" \
             "platforms;android-36" \
+            "platforms;android-37.0" \
             "build-tools;34.0.0" \
-            "build-tools;36.0.0"
+            "build-tools;36.0.0" \
+            "build-tools;37.0.0"
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
@@ -350,8 +352,8 @@ jobs:
               {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
               {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
-              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.83.10", "xcode": "27.0"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.83.10", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.88.0", "xcode": "27.0"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.88.0", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-RN-IOS-MIN-001", "environment": {"ios": "27.0", "react_native": "0.82.1", "xcode": "27.0"}},
               {"id": "SUP-RN-ANDROID-MIN-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.82.1", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
@@ -564,8 +566,10 @@ jobs:
             "platform-tools" \
             "platforms;android-34" \
             "platforms;android-36" \
+            "platforms;android-37.0" \
             "build-tools;34.0.0" \
-            "build-tools;36.0.0"
+            "build-tools;36.0.0" \
+            "build-tools;37.0.0"
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
@@ -1480,7 +1484,7 @@ jobs:
           sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$sdkmanager"
           yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
-          "$sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          "$sdkmanager" "platform-tools" "platforms;android-36" "platforms;android-37.0" "build-tools;36.0.0" "build-tools;37.0.0"
           mkdir -p "$RUNNER_TEMP/public-rn" "$RUNNER_TEMP/empty-artifacts"
           sh verification/consumers/react-native/test-consumer.sh ios "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
           sh verification/consumers/react-native/test-consumer.sh android "$RUNNER_TEMP/empty-artifacts" "${{ needs.candidate.outputs.version }}" build-only
