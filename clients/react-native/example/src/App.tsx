@@ -550,8 +550,10 @@ function StandardApp() {
         }
       };
 
-      const fourReaderCapacity = await runReaderCapacity(4, false);
-      const fiveReaderCapacity = await runReaderCapacity(5, true);
+      // Android serializes read transactions through SQLite's transaction lock.
+      const readerCapacity = Platform.OS === 'ios'
+        ? await runReaderCapacity(4, false) && await runReaderCapacity(5, true)
+        : await runReaderCapacity(1, true);
       const rejectedWriteID = uuid();
       let rejectedWrite = false;
       try {
@@ -582,8 +584,7 @@ function StandardApp() {
       );
       update(
         'readTx',
-        fourReaderCapacity &&
-          fiveReaderCapacity &&
+        readerCapacity &&
           rejectedWrite &&
           rejectedWriteRow === null &&
           rows.length === 1 &&
