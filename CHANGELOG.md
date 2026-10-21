@@ -22,6 +22,10 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 
 - iOS database calls release native method dispatch while they wait for SQLite capacity. Active transaction commands can complete without timeout-driven release. ([#369](https://github.com/trainstar/synchro/issues/369))
 
+### Security
+
+- Documentation development servers use Vite 8.2.4 to correct Windows editor command handling. ([#372](https://github.com/trainstar/synchro/issues/372))
+
 ## [0.4.0-rc.2] - 2026-10-09
 
 This release candidate is for consumer validation of `0.4.0`.
