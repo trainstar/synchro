@@ -29,10 +29,12 @@ import (
 func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 	for _, origin := range realUpdateOrigins(t) {
 		var wantSourceRequirement sql.NullInt64
+		var retainsAssignmentRegistration bool
 		switch origin.version {
 		case "0.3.1", "0.3.2":
-		case "0.4.0-rc.1":
+		case "0.4.0-rc.1", "0.4.0-rc.2":
 			wantSourceRequirement = sql.NullInt64{Int64: 2, Valid: true}
+			retainsAssignmentRegistration = true
 		default:
 			t.Fatalf("missing fixture contract for update origin %s", origin.version)
 		}
@@ -71,7 +73,7 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			)
 			observeAssignmentRegistration := func() string {
 				t.Helper()
-				if origin.version != "0.4.0-rc.1" {
+				if !retainsAssignmentRegistration {
 					return "null"
 				}
 				var registration string
@@ -84,8 +86,22 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				return registration
 			}
 			var predecessorRegistration string
-			if origin.version == "0.4.0-rc.1" {
+			if retainsAssignmentRegistration {
 				database := registerRealScopeAssignmentFunction(t, ctx, harness, 8)
+				if origin.version == "0.4.0-rc.2" {
+					if _, err := database.ExecContext(ctx,
+						"SELECT synchro.synchro_register_assignment_function('public.cf_assigned_scopes', NULL)"); err != nil {
+						t.Fatalf("register the predecessor function without a bound: %v", err)
+					}
+					var unbounded bool
+					if err := database.QueryRowContext(ctx, `
+						SELECT max_scopes IS NULL FROM synchro.sync_assignment_function WHERE singleton`).Scan(&unbounded); err != nil {
+						t.Fatalf("observe the unbounded predecessor registration: %v", err)
+					}
+					if !unbounded {
+						t.Fatal("the predecessor assignment registration retained a bound")
+					}
+				}
 				if _, err := database.ExecContext(ctx,
 					"INSERT INTO public.cf_scope_assignments (user_id, scope_id) VALUES ($1, 'cf:global')",
 					clientUser); err != nil {
@@ -176,7 +192,7 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 
 			// The worker gate keeps the validated field addition pending.
 			// Legacy origins retain an unknown source requirement.
-			// Rc.1 records requirement 2 because the field has a value at admission.
+			// Both prerelease origins record requirement 2 because the field has a value at admission.
 			// Both paths require bootstrap and Class 3 activation.
 			const retainedValue = "retained-pending-value"
 			session, err := admin.Conn(ctx)
@@ -283,7 +299,7 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 			if state := retainedClientState(); state != predecessorState {
 				t.Fatalf("push replay after the update from %s changed durable state:\nbefore=%s\nafter=%s", origin.version, predecessorState, state)
 			}
-			if origin.version == "0.4.0-rc.1" {
+			if retainsAssignmentRegistration {
 				for _, call := range []string{
 					"synchro.synchro_register_assignment_function(NULL)",
 					"synchro.synchro_register_assignment_function(NULL, NULL)",
