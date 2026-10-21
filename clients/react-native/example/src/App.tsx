@@ -474,6 +474,84 @@ function StandardApp() {
   const runReadTx = useCallback(async () => {
     try {
       await ensureLocalTable();
+      const isSelectOne = (rows: readonly Record<string, unknown>[]) =>
+        rows.length === 1 && rows[0]?.['1'] === 1;
+      const runReaderCapacity = async (readerCount: number, includeQueryOne: boolean) => {
+        let entered = 0;
+        let released = false;
+        let releaseReaders!: () => void;
+        let markAllEntered!: () => void;
+        let failBeforeEntry!: (reason?: unknown) => void;
+        let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+        const releaseGate = new Promise<void>((resolve) => {
+          releaseReaders = () => {
+            if (!released) {
+              released = true;
+              resolve();
+            }
+          };
+        });
+        const allEntered = new Promise<void>((resolve, reject) => {
+          markAllEntered = resolve;
+          failBeforeEntry = reject;
+        });
+        try {
+          const deadline = new Promise<never>((_, reject) => {
+            deadlineTimer = setTimeout(() => {
+              releaseReaders();
+              reject(new Error(`Reader capacity ${readerCount} did not complete promptly`));
+            }, 4000);
+          });
+          const transactions = Array.from({ length: readerCount }, () => {
+            const transaction = client.readTransaction(async (tx) => {
+              const rows = await tx.query('SELECT 1');
+              if (!isSelectOne(rows)) {
+                throw new Error('Read transaction returned an invalid capacity probe');
+              }
+              entered += 1;
+              if (entered === readerCount) markAllEntered();
+              await releaseGate;
+              return rows;
+            });
+            return transaction.then(
+              (rows) => isSelectOne(rows),
+              (error) => {
+                releaseReaders();
+                failBeforeEntry(error);
+                return false;
+              }
+            );
+          });
+          const composition = (async () => {
+            try {
+              await allEntered;
+              const ordinaryQuery = client.query('SELECT 1').then(isSelectOne, () => false);
+              const ordinaryQueryOne = includeQueryOne
+                ? client.queryOne('SELECT 1').then((row) => row?.['1'] === 1, () => false)
+                : Promise.resolve(true);
+              releaseTimer = setTimeout(releaseReaders, 0);
+              const [queryOK, queryOneOK, transactionChecks] = await Promise.all([
+                ordinaryQuery,
+                ordinaryQueryOne,
+                Promise.all(transactions),
+              ]);
+              return queryOK && queryOneOK && transactionChecks.every(Boolean);
+            } finally {
+              releaseReaders();
+            }
+          })();
+          const result = await Promise.race([composition, deadline]);
+          return result;
+        } finally {
+          releaseReaders();
+          if (releaseTimer !== undefined) clearTimeout(releaseTimer);
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        }
+      };
+
+      const fourReaderCapacity = await runReaderCapacity(4, false);
+      const fiveReaderCapacity = await runReaderCapacity(5, true);
       const rejectedWriteID = uuid();
       let rejectedWrite = false;
       try {
@@ -504,7 +582,9 @@ function StandardApp() {
       );
       update(
         'readTx',
-        rejectedWrite &&
+        fourReaderCapacity &&
+          fiveReaderCapacity &&
+          rejectedWrite &&
           rejectedWriteRow === null &&
           rows.length === 1 &&
           rows[0].id === seedID

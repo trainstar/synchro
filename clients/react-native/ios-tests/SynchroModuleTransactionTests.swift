@@ -4,6 +4,7 @@ import Synchro
 import XCTest
 
 private let settlementTimeout: TimeInterval = 60
+private let promptDispatchTimeout: TimeInterval = 4
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 private let columnsJSON = #"[{"name":"id","type":"TEXT","primaryKey":true},{"name":"name","type":"TEXT"}]"#
 private let insertSQL = "INSERT INTO bridge_items (id, name) VALUES (?, ?)"
@@ -365,6 +366,169 @@ final class SynchroModuleTransactionTests: XCTestCase {
         XCTAssertEqual(events.names, [])
     }
 
+    func testFourReadersLeaveCapacityForOrdinaryQuery() throws {
+        try initializeModule()
+        let held = try holdReadTransactions(count: 4)
+        let ordinary = settle("ordinary query with four readers") {
+            module.query("SELECT 1", params: [], resolve: $0.resolve, reject: $0.reject)
+        }
+        XCTAssertEqual((try resolvedValue(ordinary) as? [[String: Any]])?.count, 1)
+
+        let commits = try held.ids.enumerated().map { index, txID in
+            let commit = settle("commit reader \(index)") {
+                module.commitTransaction(txID, resolve: $0.resolve, reject: $0.reject)
+            }
+            _ = try resolvedValue(commit)
+            return commit
+        }
+        let close = try closeModule()
+
+        requireSettledOnce(held.recorders + [ordinary] + commits + [close])
+        XCTAssertEqual(events.names, [])
+    }
+
+    func testFiveReadersDoNotBlockOrdinaryQueryAheadOfCommits() throws {
+        try initializeModule()
+        let held = try holdReadTransactions(count: 5)
+        let ordinary = PromiseRecorder("ordinary query with five readers")
+        let commits = held.ids.indices.map { PromiseRecorder("commit reader \($0)") }
+        let invocationReturned = XCTestExpectation(description: "ordinary query invocation returns")
+        let methodQueue = DispatchQueue(label: "test.react-native.query-dispatch")
+        let module = try XCTUnwrap(self.module)
+
+        methodQueue.async {
+            module.query("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
+            invocationReturned.fulfill()
+        }
+        methodQueue.async {
+            for (index, txID) in held.ids.enumerated() {
+                module.commitTransaction(txID, resolve: commits[index].resolve, reject: commits[index].reject)
+            }
+        }
+
+        XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
+        waitForSettlements([ordinary] + commits)
+        XCTAssertEqual((try resolvedValue(ordinary) as? [[String: Any]])?.count, 1)
+        let close = try closeModule()
+
+        requireSettledOnce(held.recorders + [ordinary] + commits + [close])
+        XCTAssertEqual(events.names, [])
+    }
+
+    func testFiveReadersDoNotBlockOrdinaryQueryOneAheadOfRollbacks() throws {
+        try initializeModule()
+        let held = try holdReadTransactions(count: 5)
+        let ordinary = PromiseRecorder("ordinary query one with five readers")
+        let rollbacks = held.ids.indices.map { PromiseRecorder("rollback reader \($0)") }
+        let invocationReturned = XCTestExpectation(description: "ordinary query one invocation returns")
+        let methodQueue = DispatchQueue(label: "test.react-native.query-one-dispatch")
+        let module = try XCTUnwrap(self.module)
+
+        methodQueue.async {
+            module.queryOne("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
+            invocationReturned.fulfill()
+        }
+        methodQueue.async {
+            for (index, txID) in held.ids.enumerated() {
+                module.rollbackTransaction(txID, resolve: rollbacks[index].resolve, reject: rollbacks[index].reject)
+            }
+        }
+
+        XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
+        waitForSettlements([ordinary] + rollbacks)
+        XCTAssertEqual((try resolvedValue(ordinary) as? [String: Any])?.count, 1)
+        let close = try closeModule()
+
+        requireSettledOnce(held.recorders + [ordinary] + rollbacks + [close])
+        XCTAssertEqual(events.names, [])
+    }
+
+    func testOrdinaryWriterSurfacesDoNotBlockWriteTransactionCommands() throws {
+        try initializeModule()
+        let module = try XCTUnwrap(self.module)
+        let methodQueue = DispatchQueue(label: "test.react-native.writer-dispatch")
+        let ordinaryCalls: [(String, (PromiseRecorder) -> Void)] = [
+            ("execute", { recorder in
+                module.execute("SELECT 1", params: [], resolve: recorder.resolve, reject: recorder.reject)
+            }),
+            ("authored write", { recorder in
+                module.executeAuthoredWrite(
+                    "bridge_items",
+                    operation: "update",
+                    columnNames: ["name"],
+                    sql: "SELECT 1",
+                    values: [],
+                    resolve: recorder.resolve,
+                    reject: recorder.reject
+                )
+            }),
+            ("batch", { recorder in
+                module.executeBatch(
+                    [["sql": "SELECT 1", "params": []]],
+                    resolve: recorder.resolve,
+                    reject: recorder.reject
+                )
+            }),
+        ]
+        var recorders: [PromiseRecorder] = []
+
+        for (name, call) in ordinaryCalls {
+            let begin = settle("begin before \(name)") {
+                module.beginWriteTransaction($0.resolve, reject: $0.reject)
+            }
+            let txID = try XCTUnwrap(try resolvedValue(begin) as? String)
+            let probe = settle("transaction query before \(name)") {
+                module.txQuery(txID, sql: "SELECT 1", params: [], resolve: $0.resolve, reject: $0.reject)
+            }
+            let ordinary = PromiseRecorder(name)
+            let commit = PromiseRecorder("commit after \(name)")
+            let invocationReturned = XCTestExpectation(description: "\(name) invocation returns")
+
+            methodQueue.async {
+                call(ordinary)
+                invocationReturned.fulfill()
+            }
+            methodQueue.async {
+                module.commitTransaction(txID, resolve: commit.resolve, reject: commit.reject)
+            }
+
+            XCTAssertEqual(
+                XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout),
+                .completed,
+                name
+            )
+            waitForSettlements([ordinary, commit])
+            recorders += [begin, probe, ordinary, commit]
+        }
+
+        let close = try closeModule()
+        requireSettledOnce(recorders + [close])
+        XCTAssertEqual(events.names, [])
+    }
+
+    func testCloseDrainsAdmittedQueryAfterAbortingSaturatedReaders() throws {
+        try initializeModule()
+        let held = try holdReadTransactions(count: 5)
+        let query = PromiseRecorder("admitted query")
+        module.query("SELECT 1", params: [], resolve: query.resolve, reject: query.reject)
+
+        let close = PromiseRecorder("close with admitted query")
+        module.close(close.resolve, reject: close.reject)
+        waitForSettlements([close])
+
+        XCTAssertEqual(query.settlementCount, 1)
+        XCTAssertEqual((try resolvedValue(query) as? [[String: Any]])?.count, 1)
+        requireSettledOnce(held.recorders + [query, close])
+
+        let afterClose = settle("query after close") {
+            module.query("SELECT 1", params: [], resolve: $0.resolve, reject: $0.reject)
+        }
+        XCTAssertEqual(afterClose.resolutions.count, 0)
+        XCTAssertEqual(afterClose.rejections, ["NOT_CONNECTED"])
+        XCTAssertEqual(afterClose.settlementCount, 1)
+        XCTAssertEqual(events.names, [])
+    }
+
     /// Observes an accepted commit after its durable write and before its SDK call returns.
     /// This is not a window inside SQLite COMMIT.
     func testCloseWaitsForAcceptedCommitHeldAfterDurableWrite() throws {
@@ -602,6 +766,26 @@ final class SynchroModuleTransactionTests: XCTestCase {
         requireSettledOnce([inspect, snapshot, close])
     }
 
+    // MARK: - Transaction capacity
+
+    private func holdReadTransactions(count: Int) throws -> (ids: [String], recorders: [PromiseRecorder]) {
+        var ids: [String] = []
+        var recorders: [PromiseRecorder] = []
+        for index in 0..<count {
+            let begin = settle("begin reader \(index)") {
+                module.beginReadTransaction($0.resolve, reject: $0.reject)
+            }
+            let txID = try XCTUnwrap(try resolvedValue(begin) as? String)
+            let query = settle("query reader \(index)") {
+                module.txQuery(txID, sql: "SELECT 1", params: [], resolve: $0.resolve, reject: $0.reject)
+            }
+            XCTAssertEqual((try resolvedValue(query) as? [[String: Any]])?.count, 1)
+            ids.append(txID)
+            recorders += [begin, query]
+        }
+        return (ids, recorders)
+    }
+
     // MARK: - Bridge calls
 
     private func initializeModule() throws {
@@ -684,6 +868,18 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let result = XCTWaiter().wait(for: [recorder.firstSettlement], timeout: settlementTimeout)
         XCTAssertEqual(result, .completed, "\(name) did not settle")
         return recorder
+    }
+
+    private func waitForSettlements(
+        _ recorders: [PromiseRecorder],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let result = XCTWaiter().wait(
+            for: recorders.map(\.firstSettlement),
+            timeout: settlementTimeout
+        )
+        XCTAssertEqual(result, .completed, "promises did not settle", file: file, line: line)
     }
 
     private func resolvedValue(
