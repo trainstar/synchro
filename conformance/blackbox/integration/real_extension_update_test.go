@@ -30,11 +30,14 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 	for _, origin := range realUpdateOrigins(t) {
 		var wantSourceRequirement sql.NullInt64
 		var retainsAssignmentRegistration bool
+		var wantObjectsCurrent bool
 		switch origin.version {
 		case "0.3.1", "0.3.2":
 		case "0.4.0-rc.1", "0.4.0-rc.2":
 			wantSourceRequirement = sql.NullInt64{Int64: 2, Valid: true}
 			retainsAssignmentRegistration = true
+			// RC2 and RC3 install the same SQL, so only the version gate stays closed.
+			wantObjectsCurrent = origin.version == "0.4.0-rc.2"
 		default:
 			t.Fatalf("missing fixture contract for update origin %s", origin.version)
 		}
@@ -251,7 +254,7 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 				t.Fatalf("update extension from %s: %v", origin.version, err)
 			}
 			if update.VersionBeforeUpdate != origin.version || update.ReadyBeforeUpdate ||
-				update.ExtensionObjectsStateBeforeUpdate == "ok" || update.VersionAfterUpdate != release.Version ||
+				(update.ExtensionObjectsStateBeforeUpdate == "ok") != wantObjectsCurrent || update.VersionAfterUpdate != release.Version ||
 				!update.WorkerStableBeforeUpdate {
 				t.Fatalf(
 					"extension update observation is invalid: before=%q ready=%t objects=%q after=%q worker_stable=%t",
