@@ -442,14 +442,14 @@ private class RecordingPromise(val name: String) : Promise {
     }
 
     override fun resolve(value: Any?) = record { resolved.add(value) }
-    override fun reject(code: String, message: String?) = rejectWith(code, null)
-    override fun reject(code: String, throwable: Throwable?) = rejectWith(code, throwable)
-    override fun reject(code: String, message: String?, throwable: Throwable?) = rejectWith(code, throwable)
+    override fun reject(code: String?, message: String?) = rejectWith(code, null)
+    override fun reject(code: String?, throwable: Throwable?) = rejectWith(code, throwable)
+    override fun reject(code: String?, message: String?, throwable: Throwable?) = rejectWith(code, throwable)
     override fun reject(throwable: Throwable) = rejectWith(null, throwable)
     override fun reject(throwable: Throwable, userInfo: WritableMap) = rejectWith(null, throwable)
-    override fun reject(code: String, userInfo: WritableMap) = rejectWith(code, null)
-    override fun reject(code: String, throwable: Throwable?, userInfo: WritableMap) = rejectWith(code, throwable)
-    override fun reject(code: String, message: String?, userInfo: WritableMap) = rejectWith(code, null)
+    override fun reject(code: String?, userInfo: WritableMap) = rejectWith(code, null)
+    override fun reject(code: String?, throwable: Throwable?, userInfo: WritableMap) = rejectWith(code, throwable)
+    override fun reject(code: String?, message: String?, userInfo: WritableMap) = rejectWith(code, null)
     override fun reject(code: String?, message: String?, throwable: Throwable?, userInfo: WritableMap?) =
         rejectWith(code, throwable)
 
