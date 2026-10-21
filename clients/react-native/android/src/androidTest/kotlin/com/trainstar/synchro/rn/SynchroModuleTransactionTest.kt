@@ -407,10 +407,7 @@ class SynchroModuleTransactionTest {
 }
 
 /**
- * RN 0.83 makes ReactApplicationContext abstract. BridgeReactContext is its concrete
- * @VisibleForTesting subclass. Its legacy-architecture assertion is inert only because the pinned
- * react-android 0.83.0 debug artifact sets UNSTABLE_ENABLE_MINIFY_LEGACY_ARCHITECTURE to false.
- * This context runs no JavaScript, so these tests do not cover the bridgeless JavaScript host.
+ * This context exercises native SQLite calls. The application tests verify JavaScript dispatch.
  */
 @Suppress("DEPRECATION")
 internal fun bridgeTestContext(context: android.content.Context): BridgeReactContext = BridgeReactContext(context)
