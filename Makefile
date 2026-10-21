@@ -212,6 +212,7 @@ export ANDROID_SERIAL
 endif
 RN_IOS_TEST_DESTINATION ?= platform=iOS Simulator,name=iPhone SE (3rd generation)
 RN_IOS_BUILD_ARGS ?=
+RN_IOS_TEST_DIAGNOSTICS ?= on-failure
 RN_POD_UPDATE ?=
 # AGP selects connected devices through ANDROID_SERIAL. Without one serial it
 # uses every online device, so a device gate requires exactly one serial.
@@ -1594,9 +1595,10 @@ test-rn-bridge-transactions:
 
 # CocoaPods adds the SynchroReactNative test spec to the pod scheme. The gate runs its whole test target.
 test-rn-bridge-transactions-ios: rn-ios-pods
+	@case "$(RN_IOS_TEST_DIAGNOSTICS)" in on-failure|never) ;; *) echo "RN_IOS_TEST_DIAGNOSTICS must be on-failure or never" >&2; exit 1 ;; esac
 	rm -rf clients/react-native/example/ios/build/bridge-transactions.xcresult
 	@status=0; \
-		(cd clients/react-native/example && xcodebuild test -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination '$(RN_IOS_TEST_DESTINATION)' -derivedDataPath ios/build/bridge-transactions -resultBundlePath ios/build/bridge-transactions.xcresult -only-testing:SynchroReactNative-Unit-Tests) || status=$$?; \
+		(cd clients/react-native/example && xcodebuild test -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination '$(RN_IOS_TEST_DESTINATION)' -derivedDataPath ios/build/bridge-transactions -resultBundlePath ios/build/bridge-transactions.xcresult -collect-test-diagnostics $(RN_IOS_TEST_DIAGNOSTICS) -only-testing:SynchroReactNative-Unit-Tests) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/react-native/example/ios/build/bridge-transactions.xcresult) || status=$$?; \
 		exit "$$status"
 
