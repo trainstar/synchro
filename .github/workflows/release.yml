@@ -351,11 +351,11 @@ jobs:
               {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}},
               {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
               {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
-              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.88.0", "xcode": "27.0"}},
-              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.88.0", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.88.0", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-RN-IOS-MIN-001", "environment": {"ios": "27.0", "react_native": "0.82.1", "xcode": "27.0"}},
-              {"id": "SUP-RN-ANDROID-MIN-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.82.1", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "6", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
+              {"id": "SUP-RN-ANDROID-MIN-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.82.1", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
           PY

@@ -207,6 +207,7 @@ export default function App(): React.JSX.Element {
       try {
         await reportPhaseResult(result);
       } catch (error) {
+        console.error('Packaged smoke application result delivery failed');
         const detail = error instanceof Error ? error.message : String(error);
         setStatus(`application result delivery failed: ${detail}`.slice(0, 1024));
         return;

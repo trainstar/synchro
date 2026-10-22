@@ -458,6 +458,10 @@ GRADLE
     installed_platform=android
     adb_command shell pm clear com.synchroconsumer >/dev/null
     adb_command shell am force-stop com.synchroconsumer
+    if [ "$rn_version" = "0.88.0" ] && [ "$(adb_command shell getprop ro.build.version.sdk | tr -d '\r')" -ge 37 ]; then
+      # RN 0.88 waits for this permission before it loads the application.
+      adb_command shell pm grant com.synchroconsumer android.permission.ACCESS_LOCAL_NETWORK
+    fi
     python3 "$probe" android --cell "$cell_id" --sdk-root "$ANDROID_HOME" --serial "$serial" \
       --react-native-app "$work_dir/app" --output "$environment_dir/initial.json" \
       --identity-output "$environment_dir/initial-identity.json"

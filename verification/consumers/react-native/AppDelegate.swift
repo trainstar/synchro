@@ -5,6 +5,8 @@ import ReactAppDependencyProvider
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
+  // RN 0.82 reads this window during orientation updates.
+  var window: UIWindow?
   private(set) var launchOptions: [UIApplication.LaunchOptionsKey: Any]?
 
   func application(
@@ -40,6 +42,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     window = UIWindow(windowScene: windowScene)
 
     let appDelegate = UIApplication.shared.delegate as! AppDelegate
+    appDelegate.window = window
     factory.startReactNative(
       withModuleName: "SynchroConsumer",
       in: window,
