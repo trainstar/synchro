@@ -25,13 +25,14 @@ type formatSummary struct {
 }
 
 type junitSuite struct {
-	XMLName  xml.Name
-	Tests    string       `xml:"tests,attr"`
-	Skipped  string       `xml:"skipped,attr"`
-	Failures string       `xml:"failures,attr"`
-	Errors   string       `xml:"errors,attr"`
-	Cases    []junitCase  `xml:"testcase"`
-	Suites   []junitSuite `xml:"testsuite"`
+	XMLName    xml.Name
+	Tests      *string      `xml:"tests,attr"`
+	Skipped    *string      `xml:"skipped,attr"`
+	Failures   *string      `xml:"failures,attr"`
+	Errors     *string      `xml:"errors,attr"`
+	Cases      []junitCase  `xml:"testcase"`
+	Suites     []junitSuite `xml:"testsuite"`
+	Containers []junitSuite `xml:"testsuites"`
 }
 
 type junitCase struct {
@@ -145,7 +146,7 @@ func validateJUnitPath(path string) (formatSummary, error) {
 		}
 		fileTests := 0
 		for _, suite := range suites {
-			if len(suite.Suites) != 0 {
+			if len(suite.Suites) != 0 || len(suite.Containers) != 0 {
 				return formatSummary{}, fmt.Errorf("JUnit suite %s contains nested suites", file)
 			}
 			tests, err := parseResultCount("tests", suite.Tests)
@@ -186,7 +187,7 @@ func validateJUnitPath(path string) (formatSummary, error) {
 		if report.XMLName.Local == "testsuites" {
 			for _, field := range []struct {
 				name  string
-				value string
+				value *string
 				want  int
 			}{
 				{"tests", report.Tests, fileTests},
@@ -194,7 +195,7 @@ func validateJUnitPath(path string) (formatSummary, error) {
 				{"failures", report.Failures, 0},
 				{"errors", report.Errors, 0},
 			} {
-				if field.value == "" {
+				if field.value == nil {
 					continue
 				}
 				count, err := parseResultCount(field.name, field.value)
@@ -217,8 +218,26 @@ func loadJUnitSuite(path string) (junitSuite, error) {
 	}
 	var suite junitSuite
 	decoder := xml.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&suite); err != nil {
-		return junitSuite{}, fmt.Errorf("decode JUnit suite %s: %w", path, err)
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return junitSuite{}, fmt.Errorf("decode JUnit suite %s: %w", path, err)
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			if err := decoder.DecodeElement(&suite, &start); err != nil {
+				return junitSuite{}, fmt.Errorf("decode JUnit suite %s: %w", path, err)
+			}
+			break
+		}
+		switch value := token.(type) {
+		case xml.Comment, xml.ProcInst:
+			continue
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) == "" {
+				continue
+			}
+		}
+		return junitSuite{}, fmt.Errorf("JUnit file %s contains invalid leading data", path)
 	}
 	for {
 		token, err := decoder.Token()
@@ -236,17 +255,20 @@ func loadJUnitSuite(path string) (junitSuite, error) {
 	if suite.XMLName.Local != "testsuite" && suite.XMLName.Local != "testsuites" {
 		return junitSuite{}, fmt.Errorf("JUnit file %s has an invalid root", path)
 	}
+	if len(suite.Containers) != 0 {
+		return junitSuite{}, fmt.Errorf("JUnit file %s contains nested containers", path)
+	}
 	if suite.XMLName.Local == "testsuites" && (len(suite.Suites) == 0 || len(suite.Cases) != 0) {
 		return junitSuite{}, fmt.Errorf("JUnit container %s must contain test suites", path)
 	}
 	return suite, nil
 }
 
-func parseResultCount(name, value string) (int, error) {
-	if value == "" {
+func parseResultCount(name string, value *string) (int, error) {
+	if value == nil {
 		return 0, fmt.Errorf("result field %s is missing", name)
 	}
-	count, err := strconv.Atoi(value)
+	count, err := strconv.Atoi(*value)
 	if err != nil || count < 0 {
 		return 0, fmt.Errorf("result field %s is invalid", name)
 	}

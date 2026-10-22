@@ -252,7 +252,6 @@ pods = <<~PODS
   project = Xcodeproj::Project.open(File.join(__dir__, 'SynchroConsumer.xcodeproj'))
   project.files.select { |file| File.basename(file.path) == 'SceneDelegate.swift' }.each do |file|
     file.real_path.delete
-    file.build_files.each(&:remove_from_project)
     file.remove_from_project
   end
   project.save
