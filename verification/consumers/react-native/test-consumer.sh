@@ -248,6 +248,13 @@ target = "target 'SynchroConsumer' do\n"
 abort "consumer Podfile target was not found" unless content.include?(target)
 abort "consumer Podfile platform was not found" unless content.sub!(/^platform :ios,.*$/, "platform :ios, '17.0'")
 pods = <<~PODS
+  # The supplied AppDelegate owns the scene on both supported React Native versions.
+  project = Xcodeproj::Project.open(File.join(__dir__, 'SynchroConsumer.xcodeproj'))
+  project.files.select { |file| File.basename(file.path) == 'SceneDelegate.swift' }.each do |file|
+    file.real_path.delete
+    file.remove_from_project
+  end
+  project.save
   target 'SynchroConsumer' do
     pod 'Synchro', :git => '#{synchro_git_url}', :tag => 'v#{version}'
     pod 'GRDB.swift', :git => 'https://github.com/groue/GRDB.swift.git', :tag => 'v7.8.0'
