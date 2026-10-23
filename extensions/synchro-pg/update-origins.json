@@ -11,6 +11,10 @@
     {
       "version": "0.4.0-rc.2",
       "artifact_sha256": "59f937169816b8e626437fa2f6c8cd8ff8dc756a12c56957988794760002c975"
+    },
+    {
+      "version": "0.4.0-rc.3",
+      "artifact_sha256": "9f17ae7add1d2be34c98c2606afec2c027e0defd8ea51fd24f7a438efd12d77f"
     }
   ]
 }

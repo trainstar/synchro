@@ -1746,9 +1746,9 @@ PODS:
   - ReactNativeDependencies (0.88.0)
   - SocketRocket (0.7.1):
     - ReactNativeDependencies
-  - Synchro (0.4.0-rc.3):
+  - Synchro (0.4.0-rc.4):
     - GRDB.swift (~> 7.8)
-  - SynchroReactNative (0.4.0-rc.3):
+  - SynchroReactNative (0.4.0-rc.4):
     - hermes-engine
     - RCTRequired
     - RCTTypeSafety
@@ -1770,9 +1770,9 @@ PODS:
     - ReactCodegen
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
-    - Synchro (= 0.4.0-rc.3)
+    - Synchro (= 0.4.0-rc.4)
     - Yoga
-  - SynchroReactNative/TestHost (0.4.0-rc.3):
+  - SynchroReactNative/TestHost (0.4.0-rc.4):
     - hermes-engine
     - RCTRequired
     - RCTTypeSafety
@@ -1794,9 +1794,9 @@ PODS:
     - ReactCodegen
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
-    - Synchro (= 0.4.0-rc.3)
+    - Synchro (= 0.4.0-rc.4)
     - Yoga
-  - SynchroReactNative/Tests (0.4.0-rc.3):
+  - SynchroReactNative/Tests (0.4.0-rc.4):
     - hermes-engine
     - RCTRequired
     - RCTTypeSafety
@@ -1818,7 +1818,7 @@ PODS:
     - ReactCodegen
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
-    - Synchro (= 0.4.0-rc.3)
+    - Synchro (= 0.4.0-rc.4)
     - SynchroReactNative/TestHost
     - Yoga
   - Yoga (0.0.0):
@@ -2191,8 +2191,8 @@ SPEC CHECKSUMS:
   ReactCommon: c6895b36d81986f89a7e40a00b4b72ca70e82710
   ReactNativeDependencies: d3b7423ba1e52525e42085c8470109abde583d2e
   SocketRocket: d57b1af80c029e12a75cd9b218287c67381e4593
-  Synchro: 906168f9536f6800a07b1ef0a14974e3e0a56440
-  SynchroReactNative: a005aa9525b8ca35193e0d2481a902b8303d3ef7
+  Synchro: d3623f1d53448ff083bc800841c38ffa27915450
+  SynchroReactNative: 009c26fde1f6152c971c370fd493b41599dfdd7b
   Yoga: 58b502c52b14ad3c4468805d461fc37d275c2a42
 
 PODFILE CHECKSUM: 0a7cbffdccfcaaa255c32fb1a9dff014dadff003

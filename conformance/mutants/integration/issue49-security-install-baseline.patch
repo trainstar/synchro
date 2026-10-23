@@ -1,6 +1,6 @@
-diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.3.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.3.sql
---- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.3.sql
-+++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.3.sql
+diff --git a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.4.sql b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.4.sql
+--- a/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.4.sql
++++ b/extensions/synchro-pg/sql/synchro_pg--0.4.0-rc.4.sql
 @@ -10,6 +10,10 @@
  -- synchro-pg/src/lib.rs:40
  -- bootstrap
