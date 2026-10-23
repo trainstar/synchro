@@ -33,11 +33,11 @@ func TestRealExtensionUpdateFromBaseline(t *testing.T) {
 		var wantObjectsCurrent bool
 		switch origin.version {
 		case "0.3.1", "0.3.2":
-		case "0.4.0-rc.1", "0.4.0-rc.2":
+		case "0.4.0-rc.1", "0.4.0-rc.2", "0.4.0-rc.3":
 			wantSourceRequirement = sql.NullInt64{Int64: 2, Valid: true}
 			retainsAssignmentRegistration = true
-			// RC2 and RC3 install the same SQL, so only the version gate stays closed.
-			wantObjectsCurrent = origin.version == "0.4.0-rc.2"
+			// RC2, RC3, and RC4 install the same SQL, so only the version gate stays closed.
+			wantObjectsCurrent = origin.version == "0.4.0-rc.2" || origin.version == "0.4.0-rc.3"
 		default:
 			t.Fatalf("missing fixture contract for update origin %s", origin.version)
 		}
