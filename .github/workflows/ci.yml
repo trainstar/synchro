@@ -332,12 +332,6 @@ jobs:
 
       - uses: ./.github/actions/setup-conformance-pg18
 
-      - name: Install React Native dependencies
-        working-directory: clients/react-native
-        run: |
-          corepack enable
-          yarn install --immutable
-
       - name: Ensure iOS tools are available
         run: |
           command -v pod >/dev/null 2>&1 || sudo gem install cocoapods
@@ -356,6 +350,12 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
           echo "RN_IOS_TEST_DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
+      - name: Install React Native dependencies
+        working-directory: clients/react-native
+        run: |
+          corepack enable
+          yarn install --immutable
 
       - name: Start local PostgreSQL
         run: |
