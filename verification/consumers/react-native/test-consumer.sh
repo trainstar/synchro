@@ -254,6 +254,12 @@ pods = <<~PODS
     file.real_path.delete
     file.remove_from_project
   end
+  # Dependencies must declare their own language mode in a Swift 6 application.
+  project.targets.each do |consumer_target|
+    consumer_target.build_configurations.each do |configuration|
+      configuration.build_settings['SWIFT_VERSION'] = '6.0'
+    end
+  end
   project.save
   target 'SynchroConsumer' do
     pod 'Synchro', :git => '#{synchro_git_url}', :tag => 'v#{version}'
