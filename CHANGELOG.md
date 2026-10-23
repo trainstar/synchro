@@ -9,6 +9,11 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+## [0.4.0-rc.4] - 2026-10-23
+
+This release candidate corrects iOS package integration for Swift 6 applications.
+Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
+
 ### Fixed
 
 - React Native iOS packages declare Swift 5 language mode for the bridge. Swift 6 applications no longer select an incompatible bridge language mode. ([#369](https://github.com/trainstar/synchro/issues/369))
@@ -133,7 +138,8 @@ Clients:
 - Parser and rebuild diagnostics do not include submitted or record-owned values. ([#210](https://github.com/trainstar/synchro/issues/210))
 - The React Native lock file does not contain vulnerable `brace-expansion` versions. ([#279](https://github.com/trainstar/synchro/issues/279))
 
-[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.3...HEAD
+[Unreleased]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.4...HEAD
+[0.4.0-rc.4]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.3...v0.4.0-rc.4
 [0.4.0-rc.3]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.2...v0.4.0-rc.3
 [0.4.0-rc.2]: https://github.com/trainstar/synchro/compare/v0.4.0-rc.1...v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/trainstar/synchro/compare/v0.3.2...v0.4.0-rc.1
