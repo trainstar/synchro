@@ -24,7 +24,7 @@ Pod::Spec.new do |s|
   install_modules_dependencies(s)
 
   s.app_spec "TestHost" do |app_spec|
-    app_spec.source_files = "ios-test-host/main.m"
+    app_spec.source_files = ["ios-test-host/AppDelegate.m", "ios-test-host/main.swift"]
     app_spec.info_plist = {
       "UIApplicationSceneManifest" => {
         "UIApplicationSupportsMultipleScenes" => false
