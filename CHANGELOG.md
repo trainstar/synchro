@@ -9,6 +9,10 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
+### Fixed
+
+- React Native iOS packages declare Swift 5 language mode for the bridge. Swift 6 applications no longer select an incompatible bridge language mode. ([#369](https://github.com/trainstar/synchro/issues/369))
+
 ## [0.4.0-rc.3] - 2026-10-20
 
 This release candidate is for consumer validation of `0.4.0`.
