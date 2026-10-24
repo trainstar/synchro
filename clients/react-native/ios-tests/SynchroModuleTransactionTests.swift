@@ -670,6 +670,40 @@ final class SynchroModuleTransactionTests: XCTestCase {
         XCTAssertEqual(events.names, [])
     }
 
+    func testUnsupportedCyclicSQLParametersRejectPromptlyAndSettleOnce() throws {
+        try initializeModule()
+        let cyclicArray = NSMutableArray()
+        cyclicArray.add(cyclicArray)
+        let cyclicDictionary = NSMutableDictionary()
+        cyclicDictionary["type"] = "bytes"
+        cyclicDictionary["base64"] = cyclicDictionary
+        let inputs: [(String, Any)] = [
+            ("cyclic array", cyclicArray),
+            ("cyclic dictionary", cyclicDictionary),
+        ]
+        var rejections: [PromiseRecorder] = []
+
+        for (name, value) in inputs {
+            let recorder = PromiseRecorder(name)
+            let invocationStarted = Date()
+            module.query("SELECT ?", params: [value], resolve: recorder.resolve, reject: recorder.reject)
+            XCTAssertLessThan(Date().timeIntervalSince(invocationStarted), promptDispatchTimeout, name)
+            waitForSettlements([recorder], timeout: promptDispatchTimeout)
+            rejections.append(recorder)
+        }
+
+        cyclicArray.removeAllObjects()
+        cyclicDictionary.removeAllObjects()
+        let close = try closeModule()
+        for recorder in rejections {
+            XCTAssertEqual(recorder.resolutions.count, 0, recorder.name)
+            XCTAssertEqual(recorder.rejections, ["UNKNOWN"], recorder.name)
+            XCTAssertEqual(recorder.settlementCount, 1, recorder.name)
+        }
+        requireSettledOnce([close])
+        XCTAssertEqual(events.names, [])
+    }
+
     // MARK: - Inspection snapshot
 
     func testClientStateSnapshotReadsRequestedRowsInsideReadOnlySnapshot() throws {

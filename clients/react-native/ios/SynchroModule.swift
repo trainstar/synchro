@@ -604,7 +604,7 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         submitDatabaseOperation(
             resolve: resolve,
             reject: reject,
@@ -621,7 +621,7 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         submitDatabaseOperation(
             resolve: resolve,
             reject: reject,
@@ -641,7 +641,7 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         submitDatabaseOperation(
             resolve: resolve,
             reject: reject,
@@ -662,7 +662,7 @@ public class SynchroModuleImpl: NSObject {
         resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
-        let capturedValues = Result { try Self.captureBridgeValues(values) }
+        let capturedValues = Result { try Self.captureSQLParams(values) }
         submitDatabaseOperation(
             resolve: resolve,
             reject: reject,
@@ -905,7 +905,7 @@ public class SynchroModuleImpl: NSObject {
             settlement.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         let op = TransactionOp.query(sql: sql, params: capturedParams, settlement: settlement)
         guard session.enqueue(op) else {
             settlement.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
@@ -926,7 +926,7 @@ public class SynchroModuleImpl: NSObject {
             settlement.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
             return
         }
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         let op = TransactionOp.queryOne(sql: sql, params: capturedParams, settlement: settlement)
         guard session.enqueue(op) else {
             settlement.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
@@ -951,7 +951,7 @@ public class SynchroModuleImpl: NSObject {
             settlement.reject("DATABASE_ERROR", "Read transactions cannot execute SQL", nil)
             return
         }
-        let capturedParams = Result { try Self.captureBridgeValues(params) }
+        let capturedParams = Result { try Self.captureSQLParams(params) }
         let op = TransactionOp.execute(sql: sql, params: capturedParams, settlement: settlement)
         guard session.enqueue(op) else {
             settlement.reject("TRANSACTION_TIMEOUT", "Transaction not found or expired", nil)
@@ -1450,7 +1450,7 @@ public class SynchroModuleImpl: NSObject {
             return
         }
         do {
-            let nativeParams = try Self.bridgeParams(Self.captureBridgeValues(params))
+            let nativeParams = try Self.bridgeParams(Self.captureSQLParams(params))
             let eventTarget = eventTarget
             let cancellable = client.watch(sql, params: nativeParams, tables: tables) { rows in
                 eventTarget.emit(
@@ -2028,13 +2028,36 @@ public class SynchroModuleImpl: NSObject {
         let params: [BridgeValue]?
     }
 
-    private static func captureBridgeValues(_ values: [Any]) throws -> [BridgeValue] {
+    private static func captureSQLParams<Values: Sequence>(
+        _ values: Values
+    ) throws -> [BridgeValue] where Values.Element == Any {
         try values.enumerated().map { index, value in
-            try captureBridgeValue(value, index: index)
+            try captureSQLParam(value, index: index)
         }
     }
 
-    private static func captureBridgeValue(_ value: Any, index: Int) throws -> BridgeValue {
+    private static func captureSQLParam(_ value: Any, index: Int) throws -> BridgeValue {
+        if let scalar = try captureBridgeScalar(value, index: index) {
+            return scalar
+        }
+
+        switch value {
+        case let value as NSDictionary:
+            let validated = try bridgeTagToParam(
+                fieldCount: value.count,
+                stringField: { value[$0] as? String },
+                containsField: { value[$0] != nil },
+                index: index
+            )
+            return .object(validated.tag)
+        case is NSArray:
+            throw BridgeParamError.unsupported(index: index, type: "array")
+        default:
+            throw BridgeParamError.unsupported(index: index, type: String(describing: type(of: value)))
+        }
+    }
+
+    private static func captureBridgeScalar(_ value: Any, index: Int) throws -> BridgeValue? {
         switch value {
         case is NSNull:
             return .null
@@ -2054,6 +2077,17 @@ public class SynchroModuleImpl: NSObject {
                 return .integer(Int64(doubleValue))
             }
             return .double(doubleValue)
+        default:
+            return nil
+        }
+    }
+
+    private static func captureBridgeValue(_ value: Any, index: Int) throws -> BridgeValue {
+        if let scalar = try captureBridgeScalar(value, index: index) {
+            return scalar
+        }
+
+        switch value {
         case let value as NSDictionary:
             var object: [String: BridgeValue] = [:]
             for (key, fieldValue) in value {
@@ -2085,7 +2119,7 @@ public class SynchroModuleImpl: NSObject {
             guard let sql = item["sql"] as? String else {
                 throw SynchroError.invalidResponse(message: "Missing SQL at index \(index)")
             }
-            let params = try (item["params"] as? [Any]).map(captureBridgeValues)
+            let params = try (item["params"] as? NSArray).map(captureSQLParams)
             return CapturedBridgeStatement(sql: sql, params: params)
         }
     }
@@ -2263,25 +2297,32 @@ public class SynchroModuleImpl: NSObject {
     }
 
     private static func bridgeTagToParam(
-        _ tag: [String: BridgeValue],
+        fieldCount: Int,
+        stringField: (String) -> String?,
+        containsField: (String) -> Bool,
         index: Int
-    ) throws -> (any DatabaseValueConvertible)? {
-        guard tag.count == 2,
-              case .string(let type)? = tag["type"] else {
+    ) throws -> (tag: [String: BridgeValue], param: (any DatabaseValueConvertible)?) {
+        guard fieldCount == 2, let type = stringField("type") else {
             throw BridgeParamError.invalidTag(index: index, reason: "tag must contain exactly type and payload fields")
         }
 
         switch type {
         case "bytes":
-            guard case .string(let base64)? = tag["base64"], tag["value"] == nil else {
+            guard let base64 = stringField("base64"), !containsField("value") else {
                 throw BridgeParamError.invalidTag(index: index, reason: "bytes tag must contain base64")
             }
-            return try decodeCanonicalBase64URL(base64, index: index)
+            return (
+                ["type": .string(type), "base64": .string(base64)],
+                try decodeCanonicalBase64URL(base64, index: index)
+            )
         case "int64":
-            guard case .string(let value)? = tag["value"], tag["base64"] == nil else {
+            guard let value = stringField("value"), !containsField("base64") else {
                 throw BridgeParamError.invalidTag(index: index, reason: "int64 tag must contain value")
             }
-            return try decodeCanonicalInt64(value, index: index)
+            return (
+                ["type": .string(type), "value": .string(value)],
+                try decodeCanonicalInt64(value, index: index)
+            )
         default:
             throw BridgeParamError.invalidTag(index: index, reason: "unknown tag type")
         }
@@ -2313,7 +2354,15 @@ public class SynchroModuleImpl: NSObject {
         case .string(let stringVal):
             return stringVal
         case .object(let dictionary):
-            return try bridgeTagToParam(dictionary, index: index)
+            return try bridgeTagToParam(
+                fieldCount: dictionary.count,
+                stringField: { field in
+                    guard case .string(let value)? = dictionary[field] else { return nil }
+                    return value
+                },
+                containsField: { dictionary[$0] != nil },
+                index: index
+            ).param
         case .array:
             throw BridgeParamError.unsupported(index: index, type: "array")
         }
