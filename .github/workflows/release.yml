@@ -991,6 +991,8 @@ jobs:
           ref: ${{ needs.candidate.outputs.source_commit }}
           fetch-depth: 0
 
+      - uses: ./.github/actions/setup-current-xcode
+
       - name: Load dispatch publication helper
         run: |
           set -euo pipefail
@@ -1399,7 +1401,7 @@ jobs:
           sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$sdkmanager"
           yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
-          "$sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$sdkmanager" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           export SYNCHRO_CONSUMER_MAVEN_REPOSITORY=https://repo1.maven.org/maven2
           export JAVA_HOME="$ANDROID_JAVA_HOME"
           export PATH="$ANDROID_JAVA_HOME/bin:$PATH"
@@ -1466,8 +1468,6 @@ jobs:
           path: ${{ runner.temp }}/npm-operation.json
           if-no-files-found: error
           retention-days: 90
-
-      - uses: ./.github/actions/setup-current-xcode
 
       - name: Verify public React Native iOS and Android consumers
         env:
