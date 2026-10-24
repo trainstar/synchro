@@ -2,8 +2,8 @@
 
 React Native TurboModule bridge for Synchro. The package wraps the native Swift and Kotlin SDKs; it does not implement a separate sync engine in JavaScript.
 
-The iOS bridge uses Swift 5 language mode with the supported Swift 6 compiler.
-Its podspec selects that mode independently of the application's Swift language mode.
+The iOS bridge and native Apple SDK compile in Swift 6 language mode.
+Their CocoaPods and Swift Package Manager declarations require Swift 6.
 
 ## Requirements
 
@@ -14,6 +14,7 @@ Its podspec selects that mode independently of the application's Swift language 
 - iOS `17.0+`
 - Android `minSdk 24`
 - Android development and CI should use JDK `17`
+- Current Android validation uses Kotlin `2.4.21`, AGP `9.4.1`, Gradle `9.8.2`, and API `37`.
 
 ## Installation
 
@@ -49,6 +50,28 @@ The correction escapes the documented `jsSrcsDir` directory before the CLI
 adds its fixed source-extension glob. It also preserves the CLI's authored
 temporary-cache suffix patterns while treating the host temporary directory as
 a literal prefix. It does not change the upstream version.
+
+React Native `0.82.1` and `0.88.0` use an included Gradle plugin.
+Current Android validation compiles that plugin with Kotlin `2.4.21` and Kotlin API `2.4` under Gradle `9.8.2`.
+Apply the exact delivered correction after installation and before an Android build:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs rngp
+```
+
+The command accepts only the supported React Native and Gradle plugin version
+pairs. It verifies each Kotlin catalog and compiler-options source hash before
+and after it changes the Kotlin compiler and API modes.
+
+React Native hosts retain the [current upstream Gradle integration settings](https://github.com/react-native-community/template/blob/0.88-stable/template/android/gradle.properties):
+
+```properties
+android.builtInKotlin=false
+android.newDsl=false
+```
+
+These settings use the external Kotlin `2.4.21` plugin with AGP `9.4.1`.
+The native Android SDK also validates AGP's built-in Kotlin integration.
 
 Applications that use `bunyamin` 1.6.3 with `stream-json` 1.9.1 must also apply
 the delivered correction before they run that tooling:

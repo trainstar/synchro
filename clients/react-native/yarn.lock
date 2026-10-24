@@ -2588,6 +2588,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@react-native/gradle-plugin@patch:@react-native/gradle-plugin@npm%3A0.88.0#./tooling-patches/react-native-gradle-plugin-0.88.0-kotlin-2.4.21.patch::locator=%40trainstar%2Fsynchro-react-native%40workspace%3A.":
+  version: 0.88.0
+  resolution: "@react-native/gradle-plugin@patch:@react-native/gradle-plugin@npm%3A0.88.0#./tooling-patches/react-native-gradle-plugin-0.88.0-kotlin-2.4.21.patch::version=0.88.0&hash=405233&locator=%40trainstar%2Fsynchro-react-native%40workspace%3A."
+  checksum: 10c0/0b2d9a99b90a8da1693b1b7b7b0666dd66aa17c538576db356bf1c66f5b2f6ee44e6ff5dd50c71551014b8ea8024c1827ad23431b19bbff776d09a4bf83a9c01
+  languageName: node
+  linkType: hard
+
 "@react-native/jest-preset@npm:0.88.0":
   version: 0.88.0
   resolution: "@react-native/jest-preset@npm:0.88.0"
