@@ -4649,12 +4649,6 @@ final class SyncEngineTests: XCTestCase {
         ]
     }
 
-    private func mockResponse(statusCode: Int = 200, json: [String: Any]) throws -> (HTTPURLResponse, Data) {
-        let data = try JSONSerialization.data(withJSONObject: json)
-        let response = HTTPURLResponse(url: URL(string: "http://test.local")!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
-        return (response, data)
-    }
-
     private func ordersLocalSchemaTable(includeNotes: Bool) -> LocalSchemaTable {
         var columns = [
             LocalSchemaColumn(fieldID: "field-id", name: "id", logicalType: "string", nullable: false, writable: false, precision: nil, scale: nil, sqliteDefaultSQL: nil, isPrimaryKey: true),
