@@ -119,7 +119,7 @@ const repairs = {
     }, {
       path: 'react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt',
       preimage: 'd25dbfc8d9ee685269e22cddff9f4e86691fe922074dde32e1c5662d9a406309',
-      postimage: '1fec3e5418004d82ae2b09c53c132e7b10b524f81265cbb1a7f4a9c918481387'
+      postimage: 'd1e7e31b236484cf06521e64eadff3c85502e822c08351de7caf7a78ed51bea0'
     }]
   }]
 };

@@ -58,8 +58,6 @@ diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/React
 diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
 --- a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
 +++ b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
-@@ -12 +11,0 @@
--import com.android.build.gradle.LibraryExtension
 @@ -84,9 +83,9 @@
 -  fun configureBuildConfigFieldsForLibraries(appProject: Project) {
 -    appProject.rootProject.allprojects { subproject ->
@@ -79,7 +77,7 @@ diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils
 +        .getByType(LibraryAndroidComponentsExtension::class.java)
 +        .finalizeDsl { ext -> ext.buildFeatures.buildConfig = true }
 +  }
-@@ -116,22 +115,20 @@
+@@ -116,22 +116,22 @@
 -  fun configureNamespaceForLibraries(appProject: Project) {
 -    appProject.rootProject.allprojects { subproject ->
 -      subproject.pluginManager.withPlugin("com.android.library") {
@@ -111,7 +109,9 @@ diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils
 +        .getByType(LibraryAndroidComponentsExtension::class.java)
 +        .finalizeDsl { ext ->
 +          if (ext.namespace == null) {
-+            val manifestFile = project.layout.projectDirectory.file("src/main/AndroidManifest.xml").asFile
++            val android = project.extensions.getByType(LibraryExtension::class.java)
++            val manifestFile = android.sourceSets.getByName("main").manifest.srcFile
++
 +            manifestFile
 +                .takeIf { it.exists() }
 +                ?.let { file ->
@@ -122,7 +122,7 @@ diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils
 +          }
 +        }
 +  }
-@@ -139 +136,5 @@
+@@ -139 +139,5 @@
 -
 +
 +private const val BUILD_CONFIG_FIELDS_CONFIGURED_PROPERTY =
