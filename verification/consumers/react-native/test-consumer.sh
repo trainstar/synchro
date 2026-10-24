@@ -87,22 +87,92 @@ local_binding() {
   "$@"
 }
 local_binding
-configure_android_host() {
-  android_dir=${1:?Android host directory is required}
-  android_rn_version=${2:?React Native version is required}
-  ANDROID_HOST_DIR="$android_dir" ANDROID_RN_VERSION="$android_rn_version" python3 - <<'PY'
+adb=
+serial=
+if [ "$platform" = "android" ] && [ "$mode" = "smoke" ]; then
+  adb="${ANDROID_HOME:?ANDROID_HOME is required}/platform-tools/adb"
+  test -x "$adb"
+  serial=$(python3 "$probe" resolve-android-serial --sdk-root "$ANDROID_HOME")
+  ANDROID_SERIAL=$serial
+  KOTLIN_ANDROID_SERIAL=$serial
+  export ANDROID_SERIAL KOTLIN_ANDROID_SERIAL
+fi
+adb_command() {
+  python3 -c '
+import subprocess
+import sys
+
+try:
+    status = subprocess.run(sys.argv[1:], timeout=180).returncode
+except subprocess.TimeoutExpired:
+    print("Android ADB client deadline exceeded", file=sys.stderr)
+    sys.exit(124)
+except OSError:
+    print("Android ADB client invocation failed", file=sys.stderr)
+    sys.exit(127)
+sys.exit(status if status >= 0 else 128 - status)
+' "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
+}
+tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
+mkdir -p "$tmp_root"
+work_dir=$(mktemp -d "$tmp_root/synchro-rn-consumer.XXXXXX")
+work_dir=$(cd "$work_dir" && pwd -P)
+if [ "$resolution" = "public" ]; then
+  synchro_git_url=https://github.com/trainstar/synchro.git
+elif [ -n "${SYNCHRO_PREPUBLICATION_GIT_URL:-}" ]; then
+  synchro_git_url=$SYNCHRO_PREPUBLICATION_GIT_URL
+else
+  git clone --bare --quiet "$repo_root" "$work_dir/source.git"
+  git --git-dir="$work_dir/source.git" tag -f "v$version" "$(git -C "$repo_root" rev-parse HEAD)"
+  synchro_git_url=file://$work_dir/source.git
+fi
+local_binding "$work_dir/source.git"
+installed_platform=
+simulator_udid=
+reverse_port=
+collector_reverse_port=
+collector_pid=
+cleanup() {
+  case "$installed_platform" in
+    ios) xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true ;;
+    android)
+      adb_command shell am force-stop com.synchroconsumer >/dev/null 2>&1 || true
+      adb_command uninstall com.synchroconsumer >/dev/null 2>&1 || true
+      ;;
+  esac
+  if [ -n "$adb" ] && [ -n "$reverse_port" ]; then
+    adb_command reverse --remove "tcp:$reverse_port" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$adb" ] && [ -n "$collector_reverse_port" ]; then
+    adb_command reverse --remove "tcp:$collector_reverse_port" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$collector_pid" ]; then
+    kill "$collector_pid" >/dev/null 2>&1 || true
+    wait "$collector_pid" 2>/dev/null || true
+  fi
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+cli_version=20.2.0
+npx --yes "@react-native-community/cli@$cli_version" init SynchroConsumer \
+  --version "$rn_version" \
+  --directory "$work_dir/app" \
+  --pm npm \
+  --skip-install
+
+ANDROID_HOST_DIR="$work_dir/app/android" ANDROID_RN_VERSION="$rn_version" python3 - <<'PY'
 import os
 import re
 from pathlib import Path
 
 
-def replace_exactly_once(path: Path, pattern: str, replacement: str, label: str) -> str:
+def replace_exactly_once(path: Path, pattern: str, replacement: str, label: str) -> None:
     content = path.read_text()
     updated, count = re.subn(pattern, replacement, content, count=1, flags=re.MULTILINE)
     if count != 1:
         raise SystemExit(f"expected one {label} entry in {path}")
     path.write_text(updated)
-    return updated
 
 
 android_dir = Path(os.environ["ANDROID_HOST_DIR"])
@@ -198,82 +268,24 @@ if rn_version == "0.82.1":
 elif rn_version != "0.88.0":
     raise SystemExit(f"unsupported React Native version: {rn_version}")
 PY
+
+if [ "$platform" = "android" ] && [ "$mode" = "build-only" ] && [ "$rn_version" = "0.82.1" ]; then
+  cp -R "$source_dir/minimum-rn-manifest" "$work_dir/app/manifest-proof"
+  cat >> "$work_dir/app/android/settings.gradle" <<'GRADLE'
+
+include ':manifest-proof-react'
+project(':manifest-proof-react').projectDir = file('../manifest-proof/react-library')
+include ':manifest-proof-plain'
+project(':manifest-proof-plain').projectDir = file('../manifest-proof/plain-library')
+GRADLE
+  cat >> "$work_dir/app/android/app/build.gradle" <<'GRADLE'
+
+dependencies {
+    implementation project(':manifest-proof-react')
+    implementation project(':manifest-proof-plain')
 }
-adb=
-serial=
-if [ "$platform" = "android" ] && [ "$mode" = "smoke" ]; then
-  adb="${ANDROID_HOME:?ANDROID_HOME is required}/platform-tools/adb"
-  test -x "$adb"
-  serial=$(python3 "$probe" resolve-android-serial --sdk-root "$ANDROID_HOME")
-  ANDROID_SERIAL=$serial
-  KOTLIN_ANDROID_SERIAL=$serial
-  export ANDROID_SERIAL KOTLIN_ANDROID_SERIAL
+GRADLE
 fi
-adb_command() {
-  python3 -c '
-import subprocess
-import sys
-
-try:
-    status = subprocess.run(sys.argv[1:], timeout=180).returncode
-except subprocess.TimeoutExpired:
-    print("Android ADB client deadline exceeded", file=sys.stderr)
-    sys.exit(124)
-except OSError:
-    print("Android ADB client invocation failed", file=sys.stderr)
-    sys.exit(127)
-sys.exit(status if status >= 0 else 128 - status)
-' "$adb" -L tcp:127.0.0.1:5037 -s "$serial" "$@"
-}
-tmp_root=${PACKAGED_SMOKE_TMP_ROOT:-$repo_root/.ignore/r2/tmp}
-mkdir -p "$tmp_root"
-work_dir=$(mktemp -d "$tmp_root/synchro-rn-consumer.XXXXXX")
-work_dir=$(cd "$work_dir" && pwd -P)
-if [ "$resolution" = "public" ]; then
-  synchro_git_url=https://github.com/trainstar/synchro.git
-elif [ -n "${SYNCHRO_PREPUBLICATION_GIT_URL:-}" ]; then
-  synchro_git_url=$SYNCHRO_PREPUBLICATION_GIT_URL
-else
-  git clone --bare --quiet "$repo_root" "$work_dir/source.git"
-  git --git-dir="$work_dir/source.git" tag -f "v$version" "$(git -C "$repo_root" rev-parse HEAD)"
-  synchro_git_url=file://$work_dir/source.git
-fi
-local_binding "$work_dir/source.git"
-installed_platform=
-simulator_udid=
-reverse_port=
-collector_reverse_port=
-collector_pid=
-cleanup() {
-  case "$installed_platform" in
-    ios) xcrun simctl uninstall "$simulator_udid" dev.synchro.consumer >/dev/null 2>&1 || true ;;
-    android)
-      adb_command shell am force-stop com.synchroconsumer >/dev/null 2>&1 || true
-      adb_command uninstall com.synchroconsumer >/dev/null 2>&1 || true
-      ;;
-  esac
-  if [ -n "$adb" ] && [ -n "$reverse_port" ]; then
-    adb_command reverse --remove "tcp:$reverse_port" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$adb" ] && [ -n "$collector_reverse_port" ]; then
-    adb_command reverse --remove "tcp:$collector_reverse_port" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$collector_pid" ]; then
-    kill "$collector_pid" >/dev/null 2>&1 || true
-    wait "$collector_pid" 2>/dev/null || true
-  fi
-  rm -rf "$work_dir"
-}
-trap cleanup EXIT HUP INT TERM
-
-cli_version=20.2.0
-npx --yes "@react-native-community/cli@$cli_version" init SynchroConsumer \
-  --version "$rn_version" \
-  --directory "$work_dir/app" \
-  --pm npm \
-  --skip-install
-
-configure_android_host "$work_dir/app/android" "$rn_version"
 
 cp "$(dirname "$0")/App.tsx" "$work_dir/app/App.tsx"
 cp "$(dirname "$0")/packagedSmokeConfig.ts" "$work_dir/app/packagedSmokeConfig.ts"
