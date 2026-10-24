@@ -15,6 +15,7 @@ control_url=${5:?control URL is required}
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 app=$work/app
 cli_version=20.2.0
+host_preparation=$source_dir/../../react-native/prepare-android-host.py
 
 case "$side" in
   predecessor) code=1 ;;
@@ -26,8 +27,13 @@ case "$side" in
 esac
 
 if [ ! -d "$app" ]; then
+  case "$platform" in
+    android) host_rn_version=0.83.10 ;;
+    ios) host_rn_version=0.83.10 ;;
+    *) printf '%s\n' "unknown platform: $platform" >&2; exit 1 ;;
+  esac
   npx --yes "@react-native-community/cli@$cli_version" init SynchroUpgrade \
-    --version 0.83.10 --directory "$app" --pm npm --skip-install
+    --version "$host_rn_version" --directory "$app" --pm npm --skip-install
   cp "$app/ios/Podfile" "$work/Podfile.template"
   (
     cd "$app"
@@ -50,6 +56,70 @@ GRADLE
   )
 fi
 
+if [ "$platform" = android ] && [ "$side" = candidate ]; then
+  template=$work/current-rn-template
+  original_application_id=$(sed -n 's/^[[:space:]]*applicationId[[:space:]]*"\([^"]*\)".*/\1/p' "$app/android/app/build.gradle")
+  test -n "$original_application_id" || { printf '%s\n' "React Native predecessor application id is missing" >&2; exit 1; }
+  original_keystore=$app/android/app/debug.keystore
+  test -f "$original_keystore" || { printf '%s\n' "React Native predecessor debug keystore is missing" >&2; exit 1; }
+  cp "$original_keystore" "$work/predecessor-debug.keystore"
+  rm -rf "$template"
+  npx --yes "@react-native-community/cli@$cli_version" init SynchroUpgrade \
+    --version 0.88.0 --directory "$template" --pm npm --skip-install
+  current_application_id=$(sed -n 's/^[[:space:]]*applicationId[[:space:]]*"\([^"]*\)".*/\1/p' "$template/android/app/build.gradle")
+  if [ "$current_application_id" != "$original_application_id" ]; then
+    printf '%s\n' "React Native current template changed the application id" >&2
+    exit 1
+  fi
+  for config in package.json babel.config.js metro.config.js tsconfig.json; do
+    test -f "$template/$config" || { printf '%s\n' "React Native current template is missing $config" >&2; exit 1; }
+    cp "$template/$config" "$app/$config"
+  done
+  rm -f "$app/package-lock.json"
+  rm -rf "$app/android"
+  cp -R "$template/android" "$app/android"
+  cp "$work/predecessor-debug.keystore" "$app/android/app/debug.keystore"
+  cmp -s "$work/predecessor-debug.keystore" "$app/android/app/debug.keystore" || {
+    printf '%s\n' "React Native current template did not preserve the debug keystore" >&2
+    exit 1
+  }
+  (
+    cd "$app"
+    npm pkg set \
+      "devDependencies.@react-native-community/cli=$cli_version" \
+      "devDependencies.@react-native-community/cli-platform-android=$cli_version" \
+      "devDependencies.@react-native-community/cli-platform-ios=$cli_version"
+    python3 "$host_preparation" "$app/android" 0.88.0
+    python3 - "$app/android/app/src/main/AndroidManifest.xml" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+content = manifest.read_text()
+permission = '<uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />'
+if permission in content:
+    raise SystemExit("generated Android manifest already declares ACCESS_LOCAL_NETWORK")
+updated, count = re.subn(r"(<manifest\b[^>]*>)", r"\1\n    " + permission, content, count=1)
+if count != 1:
+    raise SystemExit("generated Android manifest has an unexpected root element")
+manifest.write_text(updated)
+PY
+    # The packaged module and Kotlin SDK require core library desugaring.
+    cat >> android/app/build.gradle <<'GRADLE'
+
+android {
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+    }
+}
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+}
+GRADLE
+  )
+  app=$(CDPATH= cd -- "$app" && pwd -P)
+fi
 cd "$app"
 cp "$source_dir/App.tsx" App.tsx
 if [ "$side" = predecessor ]; then
@@ -61,6 +131,19 @@ installed=$(node -p "require('@trainstar/synchro-react-native/package.json').ver
 if [ "$installed" != "$version" ]; then
   printf '%s\n' "installed React Native package is $installed, want $version" >&2
   exit 1
+fi
+if [ "$platform" = android ] && [ "$side" = candidate ]; then
+  package_root=$(node -p "require('path').dirname(require.resolve('@trainstar/synchro-react-native/package.json'))")
+  package_root=$(cd "$package_root" && pwd -P)
+  expected_package_root=$app/node_modules/@trainstar/synchro-react-native
+  if [ "$package_root" != "$expected_package_root" ]; then
+    printf '%s\n' "React Native package resolved outside the isolated upgrade application" >&2
+    exit 1
+  fi
+  tooling_helper=$package_root/tooling-patches/apply.cjs
+  test -f "$tooling_helper" || { printf '%s\n' "React Native tooling helper is missing" >&2; exit 1; }
+  node "$tooling_helper" cli
+  node "$tooling_helper" rngp
 fi
 resolved=$(node -p "require('./package-lock.json').packages['node_modules/@trainstar/synchro-react-native'].resolved")
 printf '%s\n' "React Native $side installed @trainstar/synchro-react-native $installed from $resolved"
