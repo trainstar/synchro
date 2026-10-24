@@ -1600,6 +1600,7 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 	@status=0; \
 		(cd clients/react-native/example && xcodebuild test -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination '$(RN_IOS_TEST_DESTINATION)' -derivedDataPath ios/build/bridge-transactions -resultBundlePath ios/build/bridge-transactions.xcresult -collect-test-diagnostics $(RN_IOS_TEST_DIAGNOSTICS) -only-testing:SynchroReactNative-Unit-Tests) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/react-native/example/ios/build/bridge-transactions.xcresult) || status=$$?; \
+		$(MAKE) --no-print-directory verify-rn-bridge-transactions-ios-linkage || status=$$?; \
 		exit "$$status"
 
 # Compiles the whole bridge test target for the host simulator architecture. It selects, boots, and tests
@@ -1607,6 +1608,11 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 # RN_IOS_BUILD_ARGS passes extra build-only xcodebuild arguments, for example '-jobs 2' on a shared host.
 build-rn-bridge-transactions-ios: rn-ios-pods
 	cd clients/react-native/example && xcodebuild build-for-testing -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/bridge-transactions ARCHS="$$(uname -m)" $(RN_IOS_BUILD_ARGS)
+	$(MAKE) --no-print-directory verify-rn-bridge-transactions-ios-linkage
+
+.PHONY: verify-rn-bridge-transactions-ios-linkage
+verify-rn-bridge-transactions-ios-linkage:
+	python3 verification/verify_rn_ios_test_linkage.py
 
 test-rn-bridge-transactions-android: release-kotlin-local
 	$(call declared_selection,GRADLE_TEST_ARGS)
