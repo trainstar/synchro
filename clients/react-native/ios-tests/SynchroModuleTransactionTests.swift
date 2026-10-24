@@ -244,6 +244,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
     private var events: EventRecorder!
     private var cleanup: CleanupState!
     private var databasePath: String!
+    private var externalConnections: [ExternalConnection] = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -257,32 +258,51 @@ final class SynchroModuleTransactionTests: XCTestCase {
         self.events = events
         self.cleanup = cleanup
         self.databasePath = databasePath
-        // Teardown blocks run in reverse order. This block is first, so every gate a test
-        // registers later is released before close joins the registered transactions.
-        addTeardownBlock {
-            withExtendedLifetime(events) {
-                let close = PromiseRecorder("teardown close")
-                module.close(close.resolve, reject: close.reject)
-                let settled = XCTWaiter().wait(for: [close.firstSettlement], timeout: settlementTimeout) == .completed
-                guard settled, close.resolutions.count == 1, close.rejections.isEmpty else {
-                    XCTFail("teardown close did not resolve once (settled: \(settled), resolutions: \(close.resolutions.count), rejections: \(close.rejections)). Kept \(databasePath).")
-                    return
-                }
-                guard !cleanup.hasFailure else {
-                    XCTFail("a test-owned resource did not close. Kept \(databasePath).")
-                    return
-                }
-                for suffix in ["", "-wal", "-shm"] {
-                    let path = databasePath + suffix
-                    guard FileManager.default.fileExists(atPath: path) else { continue }
-                    do {
-                        try FileManager.default.removeItem(atPath: path)
-                    } catch {
-                        XCTFail("remove \(path): \(error)")
-                    }
+    }
+
+    override func tearDownWithError() throws {
+        let teardownDatabasePath = databasePath ?? "unknown database path"
+        var moduleClosed = false
+        for connection in externalConnections.reversed() {
+            do {
+                try connection.close()
+            } catch {
+                cleanup.recordFailure()
+                XCTFail("close external connection: \(error)")
+            }
+        }
+        externalConnections.removeAll()
+
+        if let module {
+            let close = PromiseRecorder("teardown close")
+            module.close(close.resolve, reject: close.reject)
+            let settled = XCTWaiter().wait(for: [close.firstSettlement], timeout: settlementTimeout) == .completed
+            moduleClosed = settled && close.resolutions.count == 1 && close.rejections.isEmpty
+            if !moduleClosed {
+                XCTFail("teardown close did not resolve once (settled: \(settled), resolutions: \(close.resolutions.count), rejections: \(close.rejections)). Kept \(teardownDatabasePath).")
+            }
+            module.eventDelegate = nil
+        }
+        withExtendedLifetime(events) {}
+
+        if cleanup.hasFailure {
+            XCTFail("a test-owned resource did not close. Kept \(teardownDatabasePath).")
+        } else if moduleClosed {
+            for suffix in ["", "-wal", "-shm"] {
+                let path = teardownDatabasePath + suffix
+                guard FileManager.default.fileExists(atPath: path) else { continue }
+                do {
+                    try FileManager.default.removeItem(atPath: path)
+                } catch {
+                    XCTFail("remove \(path): \(error)")
                 }
             }
         }
+        module = nil
+        events = nil
+        cleanup = nil
+        databasePath = nil
+        try super.tearDownWithError()
     }
 
     func testAcquisitionFailureRejectsBeginOnce() throws {
@@ -392,21 +412,15 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let held = try holdReadTransactions(count: 5)
         let ordinary = PromiseRecorder("ordinary query with five readers")
         let commits = held.ids.indices.map { PromiseRecorder("commit reader \($0)") }
-        let invocationReturned = XCTestExpectation(description: "ordinary query invocation returns")
-        let methodQueue = DispatchQueue(label: "test.react-native.query-dispatch")
         let module = try XCTUnwrap(self.module)
 
-        methodQueue.async {
-            module.query("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
-            invocationReturned.fulfill()
-        }
-        methodQueue.async {
-            for (index, txID) in held.ids.enumerated() {
-                module.commitTransaction(txID, resolve: commits[index].resolve, reject: commits[index].reject)
-            }
+        let invocationStarted = Date()
+        module.query("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
+        XCTAssertLessThan(Date().timeIntervalSince(invocationStarted), promptDispatchTimeout)
+        for (index, txID) in held.ids.enumerated() {
+            module.commitTransaction(txID, resolve: commits[index].resolve, reject: commits[index].reject)
         }
 
-        XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
         waitForSettlements([ordinary] + commits, timeout: promptDispatchTimeout)
         XCTAssertEqual((try resolvedValue(ordinary) as? [[String: Any]])?.count, 1)
         let close = try closeModule()
@@ -420,21 +434,15 @@ final class SynchroModuleTransactionTests: XCTestCase {
         let held = try holdReadTransactions(count: 5)
         let ordinary = PromiseRecorder("ordinary query one with five readers")
         let rollbacks = held.ids.indices.map { PromiseRecorder("rollback reader \($0)") }
-        let invocationReturned = XCTestExpectation(description: "ordinary query one invocation returns")
-        let methodQueue = DispatchQueue(label: "test.react-native.query-one-dispatch")
         let module = try XCTUnwrap(self.module)
 
-        methodQueue.async {
-            module.queryOne("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
-            invocationReturned.fulfill()
-        }
-        methodQueue.async {
-            for (index, txID) in held.ids.enumerated() {
-                module.rollbackTransaction(txID, resolve: rollbacks[index].resolve, reject: rollbacks[index].reject)
-            }
+        let invocationStarted = Date()
+        module.queryOne("SELECT 1", params: [], resolve: ordinary.resolve, reject: ordinary.reject)
+        XCTAssertLessThan(Date().timeIntervalSince(invocationStarted), promptDispatchTimeout)
+        for (index, txID) in held.ids.enumerated() {
+            module.rollbackTransaction(txID, resolve: rollbacks[index].resolve, reject: rollbacks[index].reject)
         }
 
-        XCTAssertEqual(XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout), .completed)
         waitForSettlements([ordinary] + rollbacks, timeout: promptDispatchTimeout)
         XCTAssertEqual((try resolvedValue(ordinary) as? [String: Any])?.count, 1)
         let close = try closeModule()
@@ -446,7 +454,6 @@ final class SynchroModuleTransactionTests: XCTestCase {
     func testOrdinaryWriterSurfacesDoNotBlockWriteTransactionCommands() throws {
         try initializeModule()
         let module = try XCTUnwrap(self.module)
-        let methodQueue = DispatchQueue(label: "test.react-native.writer-dispatch")
         let ordinaryCalls: [(String, (PromiseRecorder) -> Void)] = [
             ("execute", { recorder in
                 module.execute("SELECT 1", params: [], resolve: recorder.resolve, reject: recorder.reject)
@@ -482,21 +489,11 @@ final class SynchroModuleTransactionTests: XCTestCase {
             }
             let ordinary = PromiseRecorder(name)
             let commit = PromiseRecorder("commit after \(name)")
-            let invocationReturned = XCTestExpectation(description: "\(name) invocation returns")
+            let invocationStarted = Date()
+            call(ordinary)
+            XCTAssertLessThan(Date().timeIntervalSince(invocationStarted), promptDispatchTimeout, name)
+            module.commitTransaction(txID, resolve: commit.resolve, reject: commit.reject)
 
-            methodQueue.async {
-                call(ordinary)
-                invocationReturned.fulfill()
-            }
-            methodQueue.async {
-                module.commitTransaction(txID, resolve: commit.resolve, reject: commit.reject)
-            }
-
-            XCTAssertEqual(
-                XCTWaiter().wait(for: [invocationReturned], timeout: promptDispatchTimeout),
-                .completed,
-                name
-            )
             waitForSettlements([ordinary, commit])
             recorders += [begin, probe, ordinary, commit]
         }
@@ -874,15 +871,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
     private func openExternalConnection() throws -> ExternalConnection {
         let getPath = settle("get path") { module.getPath($0.resolve, reject: $0.reject) }
         let connection = try ExternalConnection(path: try XCTUnwrap(try resolvedValue(getPath) as? String))
-        let cleanup = self.cleanup!
-        addTeardownBlock {
-            do {
-                try connection.close()
-            } catch {
-                cleanup.recordFailure()
-                XCTFail("close external connection: \(error)")
-            }
-        }
+        externalConnections.append(connection)
         return connection
     }
 
@@ -909,9 +898,7 @@ final class SynchroModuleTransactionTests: XCTestCase {
 
     private func registrySnapshot() throws -> [String] {
         let module = try XCTUnwrap(self.module)
-        module.sessionsLock.lock()
-        defer { module.sessionsLock.unlock() }
-        return Array(module.sessions.keys)
+        return module.activeTransactionIDs
     }
 
     /// Close removes every registered session under the registry lock before it waits for them.
