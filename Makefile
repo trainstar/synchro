@@ -108,6 +108,7 @@
 	test-swift-upgrade \
 	test-kotlin-upgrade \
 	test-rn-upgrade-ios \
+	build-rn-upgrade-android \
 	test-rn-upgrade-android \
 	test-rn-unit \
 	test-rn-android-parity \
@@ -445,6 +446,7 @@ help:
 	@echo "  test-swift-upgrade    - Upgrade Swift intent from the published predecessor to the candidate package"
 	@echo "  test-kotlin-upgrade   - Upgrade Kotlin intent from the published predecessor APK on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rn-upgrade-ios   - Upgrade React Native intent from the published predecessor on the booted simulator"
+	@echo "  build-rn-upgrade-android - Build both React Native Android upgrade package sides without a device"
 	@echo "  test-rn-upgrade-android - Upgrade React Native intent from the published predecessor on KOTLIN_ANDROID_SERIAL"
 	@echo "  test-rn-unit          - Run React Native Jest tests"
 	@echo "  test-rn-android-parity - Regenerate the TurboModule spec and compile the Android implementation"
@@ -1509,11 +1511,8 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 		exit "$$status"
 
 # React Native reaches the native SDKs through the published bridge package.
-test-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifact client-consumer-rn-artifact
-	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+build-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifact client-consumer-rn-artifact
 	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
-	@$(MAKE) --no-print-directory synchrod-pg-test-start
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-android"; \
 		rm -rf "$$work"; \
@@ -1524,7 +1523,14 @@ test-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifac
 			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_JAVA_HOME="$(ANDROID_JAVA_HOME)" \
 				sh verification/consumers/upgrade/react-native/build-app.sh android "$$work" "$$side" "$$version" "$$control_url"; \
-		done; \
+		done
+
+test-rn-upgrade-android: build-rn-upgrade-android
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
+	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@set -eu; \
+		work="$(UPGRADE_WORK_DIR)/rn-android"; \
 		status=0; \
 		(cd conformance && \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \

@@ -33,6 +33,9 @@ if [ "$phase" = predecessor ]; then
 else
   device install -r -g "$apk" >/dev/null
 fi
+if [ "$(device shell getprop ro.build.version.sdk | tr -d '\r')" -ge 37 ]; then
+  device shell pm grant "$package" android.permission.ACCESS_LOCAL_NETWORK
+fi
 installed=$(device shell dumpsys package "$package" | tr -d '\r' | sed -n 's/^ *versionCode=\([0-9]*\).*/\1/p' | head -n 1)
 if [ "$installed" != "$version_code" ]; then
   printf '%s\n' "installed $package versionCode is $installed, want $version_code" >&2

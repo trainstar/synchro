@@ -15,6 +15,7 @@ control_url=${5:?control URL is required}
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 app=$work/app
 cli_version=20.2.0
+host_preparation=$source_dir/../../react-native/prepare-android-host.py
 
 case "$side" in
   predecessor) code=1 ;;
@@ -26,8 +27,13 @@ case "$side" in
 esac
 
 if [ ! -d "$app" ]; then
+  case "$platform" in
+    android) host_rn_version=0.88.0; host_react_version=19.3.0 ;;
+    ios) host_rn_version=0.83.10 ;;
+    *) printf '%s\n' "unknown platform: $platform" >&2; exit 1 ;;
+  esac
   npx --yes "@react-native-community/cli@$cli_version" init SynchroUpgrade \
-    --version 0.83.10 --directory "$app" --pm npm --skip-install
+    --version "$host_rn_version" --directory "$app" --pm npm --skip-install
   cp "$app/ios/Podfile" "$work/Podfile.template"
   (
     cd "$app"
@@ -35,6 +41,27 @@ if [ ! -d "$app" ]; then
       "devDependencies.@react-native-community/cli=$cli_version" \
       "devDependencies.@react-native-community/cli-platform-android=$cli_version" \
       "devDependencies.@react-native-community/cli-platform-ios=$cli_version"
+    if [ "$platform" = android ]; then
+      npm pkg set \
+        "dependencies.react=$host_react_version" \
+        "devDependencies.react-test-renderer=$host_react_version"
+      python3 "$host_preparation" "$app/android" "$host_rn_version"
+      python3 - "$app/android/app/src/main/AndroidManifest.xml" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+content = manifest.read_text()
+permission = '<uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />'
+if permission in content:
+    raise SystemExit("generated Android manifest already declares ACCESS_LOCAL_NETWORK")
+updated, count = re.subn(r"(<manifest\b[^>]*>)", r"\1\n    " + permission, content, count=1)
+if count != 1:
+    raise SystemExit("generated Android manifest has an unexpected root element")
+manifest.write_text(updated)
+PY
+    fi
     # The packaged module and Kotlin SDK require core library desugaring.
     cat >> android/app/build.gradle <<'GRADLE'
 
@@ -50,6 +77,9 @@ GRADLE
   )
 fi
 
+if [ "$platform" = android ]; then
+  app=$(CDPATH= cd -- "$app" && pwd -P)
+fi
 cd "$app"
 cp "$source_dir/App.tsx" App.tsx
 if [ "$side" = predecessor ]; then
@@ -61,6 +91,24 @@ installed=$(node -p "require('@trainstar/synchro-react-native/package.json').ver
 if [ "$installed" != "$version" ]; then
   printf '%s\n' "installed React Native package is $installed, want $version" >&2
   exit 1
+fi
+if [ "$platform" = android ]; then
+  package_root=$(node -p "require('path').dirname(require.resolve('@trainstar/synchro-react-native/package.json'))")
+  package_root=$(cd "$package_root" && pwd -P)
+  expected_package_root=$app/node_modules/@trainstar/synchro-react-native
+  if [ "$package_root" != "$expected_package_root" ]; then
+    printf '%s\n' "React Native package resolved outside the isolated upgrade application" >&2
+    exit 1
+  fi
+  if [ "$side" = predecessor ]; then
+    repo_root=$(CDPATH= cd -- "$source_dir/../../../.." && pwd -P)
+    tooling_helper=$repo_root/clients/react-native/tooling-patches/apply.cjs
+  else
+    tooling_helper=$package_root/tooling-patches/apply.cjs
+  fi
+  test -f "$tooling_helper" || { printf '%s\n' "React Native tooling helper is missing" >&2; exit 1; }
+  node "$tooling_helper" cli
+  node "$tooling_helper" rngp
 fi
 resolved=$(node -p "require('./package-lock.json').packages['node_modules/@trainstar/synchro-react-native'].resolved")
 printf '%s\n' "React Native $side installed @trainstar/synchro-react-native $installed from $resolved"
