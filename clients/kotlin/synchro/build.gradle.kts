@@ -2,14 +2,13 @@ import org.gradle.api.tasks.testing.Test
 
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.vanniktech.maven.publish")
 }
 
 android {
     namespace = "com.trainstar.synchro"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 24
@@ -20,10 +19,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
         isCoreLibraryDesugaringEnabled = true
-    }
-
-    kotlinOptions {
-        jvmTarget = "1.8"
     }
 
     testOptions {
@@ -45,7 +40,7 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.11.1")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
-    testImplementation("org.jetbrains.kotlin:kotlin-reflect:1.9.22")
+    testImplementation("org.jetbrains.kotlin:kotlin-reflect:2.4.21")
     testImplementation("androidx.test:core:1.5.0")
 }
 

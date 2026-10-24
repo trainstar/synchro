@@ -31,7 +31,7 @@ if [ "$phase" = predecessor ]; then
   device uninstall "$package" >/dev/null 2>&1 || true
   device install "$apk" >/dev/null
 else
-  device install -r "$apk" >/dev/null
+  device install -r -g "$apk" >/dev/null
 fi
 installed=$(device shell dumpsys package "$package" | tr -d '\r' | sed -n 's/^ *versionCode=\([0-9]*\).*/\1/p' | head -n 1)
 if [ "$installed" != "$version_code" ]; then
