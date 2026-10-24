@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import os
 @testable @_spi(Inspection) import Synchro
 
 final class TransportObservationTests: XCTestCase {
@@ -40,10 +41,13 @@ final class TransportObservationTests: XCTestCase {
     func testRetryAttemptsProduceIndividualPullObservationsWithoutCursorLeakage() async throws {
         let collector = TransportObservationCollector(capacity: 8)
         let client = makeClient(collector: collector)
-        var attempt = 0
+        let attempt = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { request in
-            attempt += 1
-            if attempt == 1 {
+            let currentAttempt = attempt.withLock { value in
+                value += 1
+                return value
+            }
+            if currentAttempt == 1 {
                 let body = try JSONSerialization.data(withJSONObject: [
                     "error": [
                         "code": "temporary_unavailable",

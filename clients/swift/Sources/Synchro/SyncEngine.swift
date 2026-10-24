@@ -15,11 +15,11 @@ public struct SyncOptions: Sendable {
     }
 }
 
-private struct SyncEngineState {
+private struct SyncEngineState: Sendable {
     var currentStatus: SyncStatus = .uninitialized
-    var statusCallbacks: [UUID: (SyncStatus) -> Void] = [:]
-    var eventCallbacks: [UUID: (SyncEvent) -> Void] = [:]
-    var conflictCallbacks: [UUID: (ConflictEvent) -> Void] = [:]
+    var statusCallbacks: [UUID: @Sendable (SyncStatus) -> Void] = [:]
+    var eventCallbacks: [UUID: @Sendable (SyncEvent) -> Void] = [:]
+    var conflictCallbacks: [UUID: @Sendable (ConflictEvent) -> Void] = [:]
     var started = false
     var connectionReady = false
     var closed = false
@@ -366,7 +366,7 @@ final class SyncEngine: @unchecked Sendable {
         state.withLock { $0.currentStatus }
     }
 
-    func onStatusChange(_ callback: @escaping (SyncStatus) -> Void) -> any Cancellable {
+    func onStatusChange(_ callback: @escaping @Sendable (SyncStatus) -> Void) -> any Cancellable {
         let id = UUID()
         state.withLock { $0.statusCallbacks[id] = callback }
         return CallbackCancellable { [weak self] in
@@ -374,7 +374,7 @@ final class SyncEngine: @unchecked Sendable {
         }
     }
 
-    func onEvent(_ callback: @escaping (SyncEvent) -> Void) -> any Cancellable {
+    func onEvent(_ callback: @escaping @Sendable (SyncEvent) -> Void) -> any Cancellable {
         let id = UUID()
         state.withLock { $0.eventCallbacks[id] = callback }
         return CallbackCancellable { [weak self] in
@@ -386,7 +386,7 @@ final class SyncEngine: @unchecked Sendable {
         try loadBlockingFailure()
     }
 
-    func onConflict(_ callback: @escaping (ConflictEvent) -> Void) -> any Cancellable {
+    func onConflict(_ callback: @escaping @Sendable (ConflictEvent) -> Void) -> any Cancellable {
         let id = UUID()
         state.withLock { $0.conflictCallbacks[id] = callback }
         return CallbackCancellable { [weak self] in
@@ -1929,8 +1929,8 @@ final class SyncEngine: @unchecked Sendable {
     ) throws {
         let result = try state.withLock { state -> (
             SyncStateChangeEvent,
-            [(SyncStatus) -> Void],
-            [(SyncEvent) -> Void]
+            [@Sendable (SyncStatus) -> Void],
+            [@Sendable (SyncEvent) -> Void]
         ) in
             if let lifecycleGeneration {
                 guard state.started,
@@ -2290,30 +2290,36 @@ final class SyncEngine: @unchecked Sendable {
 
 // MARK: - DatabaseCancellableWrapper
 
-final class DatabaseCancellableWrapper: Cancellable, @unchecked Sendable {
-    private var inner: (any DatabaseCancellable)?
+final class DatabaseCancellableWrapper: Cancellable {
+    private let inner: OSAllocatedUnfairLock<(any DatabaseCancellable)?>
 
     init(_ inner: any DatabaseCancellable) {
-        self.inner = inner
+        self.inner = OSAllocatedUnfairLock(initialState: inner)
     }
 
     func cancel() {
-        inner?.cancel()
-        inner = nil
+        let cancellable = inner.withLock { inner in
+            defer { inner = nil }
+            return inner
+        }
+        cancellable?.cancel()
     }
 }
 
 // MARK: - CallbackCancellable
 
-final class CallbackCancellable: Cancellable, @unchecked Sendable {
-    private var onCancel: (() -> Void)?
+final class CallbackCancellable: Cancellable {
+    private let onCancel: OSAllocatedUnfairLock<(@Sendable () -> Void)?>
 
-    init(onCancel: @escaping () -> Void) {
-        self.onCancel = onCancel
+    init(onCancel: @escaping @Sendable () -> Void) {
+        self.onCancel = OSAllocatedUnfairLock(initialState: onCancel)
     }
 
     func cancel() {
-        onCancel?()
-        onCancel = nil
+        let callback = onCancel.withLock { callback in
+            defer { callback = nil }
+            return callback
+        }
+        callback?()
     }
 }

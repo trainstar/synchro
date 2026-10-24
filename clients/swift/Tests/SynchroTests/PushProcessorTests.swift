@@ -141,18 +141,22 @@ final class PushProcessorTests: XCTestCase {
             appVersion: "1.0.0"
         )
         let httpClient = HttpClient(config: config, session: session)
-        let decoder = JSONDecoder.synchroDecoder()
-        let encoder = JSONEncoder.synchroEncoder()
-        var requests: [PushRequest] = []
-        var requestBodies: [Data] = []
-        var loseFirstResponse = true
+        let table = testTable
+        let responses = OSAllocatedUnfairLock(initialState: (
+            requests: [PushRequest](),
+            requestBodies: [Data](),
+            loseFirstResponse: true
+        ))
         MockURLProtocol.requestHandler = { request in
             let body = try XCTUnwrap(request.bodyData())
-            requestBodies.append(body)
-            let pushRequest = try decoder.decode(PushRequest.self, from: body)
-            requests.append(pushRequest)
-            if loseFirstResponse {
-                loseFirstResponse = false
+            let pushRequest = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
+            let losesResponse = responses.withLock { state in
+                state.requestBodies.append(body)
+                state.requests.append(pushRequest)
+                defer { state.loseFirstResponse = false }
+                return state.loseFirstResponse
+            }
+            if losesResponse {
                 throw URLError(.networkConnectionLost)
             }
             let serverVersion = "opaque-v2"
@@ -165,7 +169,7 @@ final class PushProcessorTests: XCTestCase {
             ]
             let accepted = try makeAcceptedMutation(
                 mutationID: pushRequest.mutations[0].mutationID,
-                schema: self.testTable,
+                schema: table,
                 pk: ["id": AnyCodable("w1")],
                 status: .applied,
                 serverRow: serverRow,
@@ -183,7 +187,7 @@ final class PushProcessorTests: XCTestCase {
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!
-            return (httpResponse, try encoder.encode(response))
+            return (httpResponse, try JSONEncoder.synchroEncoder().encode(response))
         }
 
         do {
@@ -221,13 +225,14 @@ final class PushProcessorTests: XCTestCase {
             syncedTables: [testTable]
         )
 
-        XCTAssertEqual(requests.count, 2)
-        XCTAssertEqual(requests[0], requests[1])
-        XCTAssertEqual(requestBodies.count, 2)
-        XCTAssertEqual(requestBodies[0], requestBodies[1])
+        let recordedResponses = responses.withLock { $0 }
+        XCTAssertEqual(recordedResponses.requests.count, 2)
+        XCTAssertEqual(recordedResponses.requests[0], recordedResponses.requests[1])
+        XCTAssertEqual(recordedResponses.requestBodies.count, 2)
+        XCTAssertEqual(recordedResponses.requestBodies[0], recordedResponses.requestBodies[1])
         let completed = try reopenedDatabase.queryOne(
             "SELECT state, completed_at FROM _synchro_push_batches WHERE batch_id = ?",
-            params: [requests[0].batchID]
+            params: [recordedResponses.requests[0].batchID]
         )
         XCTAssertEqual(completed?["state"] as String?, "completed")
         XCTAssertNotNil(completed?["completed_at"] as String?)
@@ -294,11 +299,13 @@ final class PushProcessorTests: XCTestCase {
             appVersion: "1.0.0"
         )
         let httpClient = HttpClient(config: config, session: session)
-        var requestCount = 0
-        var requestBodies: [Data] = []
+        let sentRequests = OSAllocatedUnfairLock(initialState: (count: 0, bodies: [Data]()))
         MockURLProtocol.requestHandler = { request in
-            requestCount += 1
-            requestBodies.append(try XCTUnwrap(request.bodyData()))
+            let body = try XCTUnwrap(request.bodyData())
+            sentRequests.withLock { state in
+                state.count += 1
+                state.bodies.append(body)
+            }
             throw URLError(.networkConnectionLost)
         }
 
@@ -319,9 +326,10 @@ final class PushProcessorTests: XCTestCase {
             }
             operationReads.append(historyReads.withLock { $0 })
         }
-        XCTAssertEqual(requestCount, 2)
-        XCTAssertEqual(requestBodies[0], requestBodies[1])
-        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: requestBodies[0])
+        let recordedRequests = sentRequests.withLock { $0 }
+        XCTAssertEqual(recordedRequests.count, 2)
+        XCTAssertEqual(recordedRequests.bodies[0], recordedRequests.bodies[1])
+        let request = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: recordedRequests.bodies[0])
         XCTAssertEqual(request.mutations.count, 3)
         XCTAssertEqual(Set(request.mutations.map(\.table)), Set(tables.map(\.tableID)))
         for reads in operationReads {
@@ -353,7 +361,7 @@ final class PushProcessorTests: XCTestCase {
             XCTFail("expected historical schema conflict")
         } catch SynchroError.invalidResponse {
         }
-        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(sentRequests.withLock { $0.count }, 2)
     }
 
     func testPushCompletionClearsMatchingDurableBackoffWithCommittedState() async throws {
@@ -378,11 +386,10 @@ final class PushProcessorTests: XCTestCase {
             appVersion: "1.0.0"
         )
         let httpClient = HttpClient(config: config, session: session)
-        let decoder = JSONDecoder.synchroDecoder()
-        let encoder = JSONEncoder.synchroEncoder()
+        let table = testTable
         MockURLProtocol.requestHandler = { request in
             let body = try XCTUnwrap(request.bodyData())
-            let pushRequest = try decoder.decode(PushRequest.self, from: body)
+            let pushRequest = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
             try db.writeTransaction { connection in
                 try SynchroMeta.upsertBackoffRecord(
                     connection,
@@ -405,7 +412,7 @@ final class PushProcessorTests: XCTestCase {
             ]
             let accepted = try makeAcceptedMutation(
                 mutationID: try XCTUnwrap(pushRequest.mutations.first?.mutationID),
-                schema: self.testTable,
+                schema: table,
                 pk: ["id": AnyCodable("w1")],
                 status: .applied,
                 serverRow: serverRow,
@@ -423,7 +430,7 @@ final class PushProcessorTests: XCTestCase {
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!
-            return (httpResponse, try encoder.encode(response))
+            return (httpResponse, try JSONEncoder.synchroEncoder().encode(response))
         }
 
         _ = try await processor.processPush(
@@ -480,7 +487,7 @@ final class PushProcessorTests: XCTestCase {
             appVersion: "1.0.0"
         )
         let httpClient = HttpClient(config: config, session: session)
-        var serverGeneration = 2
+        let serverGeneration = OSAllocatedUnfairLock(initialState: 2)
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(
                 url: request.url!,
@@ -493,7 +500,7 @@ final class PushProcessorTests: XCTestCase {
                     "code": "client_generation_expired",
                     "message": "generation expired",
                     "retryable": false,
-                    "current_client_generation": serverGeneration,
+                    "current_client_generation": serverGeneration.withLock { $0 },
                 ] as [String: Any]
             ])
             return (response, body)
@@ -545,7 +552,7 @@ final class PushProcessorTests: XCTestCase {
             .compactMap { $0["state"] as String? }
         XCTAssertEqual(Set(states), ["pending", "superseded"])
 
-        serverGeneration = 3
+        serverGeneration.withLock { $0 = 3 }
         do {
             _ = try await processor.processPush(
                 httpClient: httpClient,
@@ -1567,11 +1574,11 @@ final class PushProcessorTests: XCTestCase {
             MockURLProtocol.requestHandler = nil
             session.invalidateAndCancel()
         }
-        var bodies: [Data] = []
+        let bodies = OSAllocatedUnfairLock(initialState: [Data]())
         MockURLProtocol.requestHandler = { [notesTable] request in
             let body = try XCTUnwrap(request.bodyData())
-            bodies.append(body)
-            let pushRequest = try decoder.decode(PushRequest.self, from: body)
+            bodies.withLock { $0.append(body) }
+            let pushRequest = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
             let accepted = try pushRequest.mutations.map { mutation in
                 var serverRow = try XCTUnwrap(mutation.columns)
                 serverRow["id"] = try XCTUnwrap(mutation.pk["id"])
@@ -1599,7 +1606,7 @@ final class PushProcessorTests: XCTestCase {
                 headerFields: ["Content-Type": "application/json"]
             )!
             // The client accepts only canonical numbers in a response.
-            return (httpResponse, try PushLimits.canonicalJSON(encoder.encode(response)))
+            return (httpResponse, try PushLimits.canonicalJSON(JSONEncoder.synchroEncoder().encode(response)))
         }
         for _ in localOrder {
             let outcome = try await processor.processPush(
@@ -1613,10 +1620,11 @@ final class PushProcessorTests: XCTestCase {
             if outcome == nil { break }
         }
 
-        XCTAssertGreaterThanOrEqual(bodies.count, 2)
+        let sentBodies = bodies.withLock { $0 }
+        XCTAssertGreaterThanOrEqual(sentBodies.count, 2)
         var sealedIDs: [String] = []
         var singleRequest = reserve
-        for body in bodies {
+        for body in sentBodies {
             let octets = try requestOctets(body)
             XCTAssertLessThanOrEqual(octets.body, PushLimits.maxRequestOctets)
             XCTAssertLessThanOrEqual(octets.canonical, PushLimits.maxRequestOctets)
@@ -2003,9 +2011,9 @@ final class PushProcessorTests: XCTestCase {
             MockURLProtocol.requestHandler = nil
             session.invalidateAndCancel()
         }
-        var requestCount = 0
+        let requestCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { _ in
-            requestCount += 1
+            requestCount.withLock { $0 += 1 }
             throw URLError(.networkConnectionLost)
         }
 
@@ -2024,7 +2032,7 @@ final class PushProcessorTests: XCTestCase {
             pushError = error
         }
 
-        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(requestCount.withLock { $0 }, 0)
         XCTAssertNil(pushError)
         XCTAssertNil(outcome)
         XCTAssertEqual(try lifecycleState(db, mutationID: insertID), "exceeds_push_limit")
@@ -2065,9 +2073,9 @@ final class PushProcessorTests: XCTestCase {
             MockURLProtocol.requestHandler = nil
             session.invalidateAndCancel()
         }
-        var requestCount = 0
+        let requestCount = OSAllocatedUnfairLock(initialState: 0)
         MockURLProtocol.requestHandler = { _ in
-            requestCount += 1
+            requestCount.withLock { $0 += 1 }
             throw URLError(.networkConnectionLost)
         }
 
@@ -2085,7 +2093,7 @@ final class PushProcessorTests: XCTestCase {
             thrown = error
         }
 
-        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(requestCount.withLock { $0 }, 0)
         guard let synchroError = thrown as? SynchroError, case let .blocked(failure) = synchroError else {
             XCTFail("processPush result: \(String(describing: thrown))")
             return
@@ -2190,9 +2198,9 @@ final class PushProcessorTests: XCTestCase {
             MockURLProtocol.requestHandler = nil
             session.invalidateAndCancel()
         }
-        var sentBody: Data?
+        let sentBody = OSAllocatedUnfairLock<Data?>(initialState: nil)
         MockURLProtocol.requestHandler = { request in
-            sentBody = request.bodyData()
+            sentBody.withLock { $0 = request.bodyData() }
             throw URLError(.networkConnectionLost)
         }
         do {
@@ -2209,7 +2217,7 @@ final class PushProcessorTests: XCTestCase {
         } catch is RetryableError {
         }
         let stored = try batchJSON(db, state: "pending")
-        XCTAssertEqual(sentBody, stored)
+        XCTAssertEqual(sentBody.withLock { $0 }, stored)
         return stored
     }
 

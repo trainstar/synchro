@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import os
 @preconcurrency import GRDB
 @testable @_spi(Inspection) import Synchro
 
@@ -619,14 +620,19 @@ final class Issue49RequirementProofTests: XCTestCase {
             ),
             session: session
         )
-        let decoder = JSONDecoder.synchroDecoder()
-        let encoder = JSONEncoder.synchroEncoder()
-        var bodies: [Data] = []
-        var responseIndex = 0
+        let acceptedRow = proofRow(
+            recordID: "queue-row",
+            value: "normalized",
+            versionTime: "2026-03-03T01:00:00.000000Z"
+        )
+        let responseState = OSAllocatedUnfairLock(initialState: (bodies: [Data](), responseIndex: 0))
         MockURLProtocol.requestHandler = { request in
             let body = try XCTUnwrap(request.bodyData())
-            bodies.append(body)
-            defer { responseIndex += 1 }
+            let responseIndex = responseState.withLock { state in
+                state.bodies.append(body)
+                defer { state.responseIndex += 1 }
+                return state.responseIndex
+            }
             if responseIndex == 0 || responseIndex == 1 {
                 let status = responseIndex == 0 ? 429 : 503
                 let code = status == 429 ? "retry_later" : "temporary_unavailable"
@@ -646,18 +652,13 @@ final class Issue49RequirementProofTests: XCTestCase {
             if responseIndex == 2 {
                 throw URLError(.networkConnectionLost)
             }
-            let push = try decoder.decode(PushRequest.self, from: body)
-            let row = self.proofRow(
-                recordID: "queue-row",
-                value: "normalized",
-                versionTime: "2026-03-03T01:00:00.000000Z"
-            )
+            let push = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
             let accepted = try makeAcceptedMutation(
                 mutationID: try XCTUnwrap(push.mutations.first?.mutationID),
                 schema: table,
                 pk: ["id": AnyCodable("queue-row")],
                 status: .applied,
-                serverRow: row,
+                serverRow: acceptedRow,
                 serverVersion: "opaque-accepted-v2"
             )
             return (
@@ -667,7 +668,7 @@ final class Issue49RequirementProofTests: XCTestCase {
                     httpVersion: nil,
                     headerFields: ["Content-Type": "application/json"]
                 )!,
-                try encoder.encode(PushResponse(
+                try JSONEncoder.synchroEncoder().encode(PushResponse(
                     batchID: push.batchID,
                     serverTime: "2026-03-03T01:00:00.000000Z",
                     accepted: [accepted],
@@ -690,11 +691,12 @@ final class Issue49RequirementProofTests: XCTestCase {
             } catch is RetryableError {
             }
         }
-        let sealedRequest = try decoder.decode(PushRequest.self, from: bodies[0])
+        let initialBodies = responseState.withLock { $0.bodies }
+        let sealedRequest = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: initialBodies[0])
         XCTAssertEqual(sealedRequest.mutations.count, 1)
         XCTAssertEqual(sealedRequest.mutations[0].op, .insert)
         XCTAssertEqual(sealedRequest.mutations[0].columns?["ship_address"], AnyCodable("normalized"))
-        XCTAssertEqual(bodies[0], bodies[1])
+        XCTAssertEqual(initialBodies[0], initialBodies[1])
         let normalizedLedger = try database.query(
             "SELECT lifecycle_state, normalized_mutation_id, mutation_id FROM _synchro_pending_changes ORDER BY local_order",
             params: nil
@@ -714,7 +716,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             XCTFail("Response loss was accepted")
         } catch is RetryableError {
         }
-        XCTAssertEqual(bodies[0], bodies[2])
+        XCTAssertEqual(responseState.withLock { $0.bodies[0] }, responseState.withLock { $0.bodies[2] })
         try database.close()
 
         let reopened = try SynchroDatabase(path: path)
@@ -728,7 +730,7 @@ final class Issue49RequirementProofTests: XCTestCase {
             schemaHash: protocolTestSchemaHash,
             syncedTables: [table]
         )
-        XCTAssertEqual(bodies[0], bodies[3])
+        XCTAssertEqual(responseState.withLock { $0.bodies[0] }, responseState.withLock { $0.bodies[3] })
         let successor = try XCTUnwrap(try reopenedTracker.pendingChanges().only)
         XCTAssertNotEqual(successor.mutationID, sealedRequest.mutations[0].mutationID)
         XCTAssertNil(successor.dependencyMutationID)
