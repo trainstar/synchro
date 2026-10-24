@@ -64,7 +64,7 @@ class ChangeTrackerTests {
                 2.5, byteArrayOf(1, 2, 3), "2026-01-01T00:00:00.000000Z",
             ),
         )
-        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf("after", 3.5, "o1"))
+        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf<Any?>("after", 3.5, "o1"))
         database.execute("UPDATE orders SET title = ? WHERE id = ?", arrayOf("later", "o1"))
 
         val ledger = database.query(

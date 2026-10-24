@@ -234,7 +234,7 @@ class IntegrationTests {
                     ids.zip(cases).map { (id, case) ->
                         SQLStatement(
                             "INSERT INTO type_zoo (id, user_id, col_text, col_double, created_at, updated_at) VALUES (?, ?, 'float-wire', ?, ?, ?)",
-                            arrayOf(id, userID, case.first.toDouble(), "2026-01-09T00:00:00.000Z", "2026-01-09T00:00:00.000Z"),
+                            arrayOf<Any?>(id, userID, case.first.toDouble(), "2026-01-09T00:00:00.000Z", "2026-01-09T00:00:00.000Z"),
                         )
                     },
                 )

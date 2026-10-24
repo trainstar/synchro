@@ -1265,7 +1265,7 @@ class InspectionTests {
                     UPDATE _synchro_rebuild_page_receipts SET response_json = ?
                     WHERE scope_id = ? AND rebuild_id = ? AND request_cursor_is_null = ? AND request_cursor = ?
                     """.trimIndent(),
-                    arrayOf(
+                    arrayOf<Any?>(
                         update(source),
                         PROOF_SCOPE_ID,
                         PROOF_REBUILD_ID,

@@ -251,7 +251,7 @@ class PullProcessorTests {
                     lifecycle_state, source_kind, sealed_batch_id, sealed_ordinal, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf(
+                arrayOf<Any?>(
                     mutationID,
                     localTestTable.tableID,
                     localTestTable.tableName,
@@ -790,7 +790,7 @@ class PullProcessorTests {
                     (scope_id, receipt, schema_version, schema_hash, cardinality, checksum)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf(removedScope, "receipt", 1, PROTOCOL_TEST_SCHEMA_HASH, 1, "checksum"),
+                arrayOf<Any?>(removedScope, "receipt", 1, PROTOCOL_TEST_SCHEMA_HASH, 1, "checksum"),
             )
             connection.execSQL(
                 """
