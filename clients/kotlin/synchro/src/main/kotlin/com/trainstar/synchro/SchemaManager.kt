@@ -849,7 +849,7 @@ internal class SchemaManager(private val database: SynchroDatabase) {
                 substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'
             )
             """.trimIndent(),
-            arrayOf(
+            arrayOf<Any?>(
                 journal.journalVersion,
                 journal.source.version,
                 journal.source.hash,
@@ -993,7 +993,7 @@ internal class SchemaManager(private val database: SynchroDatabase) {
             INSERT OR IGNORE INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
             VALUES (?, ?, ?, substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
             """.trimIndent(),
-            arrayOf(schemaVersion, schemaHash, json.encodeToString(tables)),
+            arrayOf<Any?>(schemaVersion, schemaHash, json.encodeToString(tables)),
         )
     }
 

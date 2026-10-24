@@ -958,31 +958,23 @@ extension JSONEncoder {
 }
 
 enum SynchroDateCoding {
-    private static let lock = NSLock()
-    private static let fractionalFormatter: ISO8601DateFormatter = {
+    private static func formatter(fractionalSeconds: Bool) -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.formatOptions = fractionalSeconds
+            ? [.withInternetDateTime, .withFractionalSeconds]
+            : [.withInternetDateTime]
         return formatter
-    }()
-    private static let fallbackFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
+    }
 
     static func parse(_ string: String) -> Date? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let date = fractionalFormatter.date(from: string) {
+        if let date = formatter(fractionalSeconds: true).date(from: string) {
             return date
         }
-        return fallbackFormatter.date(from: string)
+        return formatter(fractionalSeconds: false).date(from: string)
     }
 
     static func string(from date: Date) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        return fractionalFormatter.string(from: date)
+        formatter(fractionalSeconds: true).string(from: date)
     }
 
     static func now() -> String {

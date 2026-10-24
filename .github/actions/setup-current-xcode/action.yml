@@ -1,0 +1,16 @@
+name: Select current Xcode
+description: Select the current stable Apple toolchain for Swift source validation.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        developer=/Applications/Xcode_27.1.app/Contents/Developer
+        test -d "$developer"
+        export DEVELOPER_DIR="$developer"
+        test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = '27.1'
+        xcodebuild -version
+        xcrun swift --version
+        xcrun swift --version | grep -E 'Swift version 6[.]4' >/dev/null
+        echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"

@@ -145,12 +145,12 @@ public final class SynchroClient: @unchecked Sendable {
 
     // MARK: - Observation
 
-    public func onChange(tables: [String], callback: @escaping () -> Void) -> any Cancellable {
+    public func onChange(tables: [String], callback: @escaping @Sendable () -> Void) -> any Cancellable {
         DatabaseCancellableWrapper(database.onChange(tables: tables, callback: callback))
     }
 
     /// Delivers the initial snapshot and changed query results on the main queue.
-    public func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil, tables: [String], callback: @escaping ([Row]) -> Void) -> any Cancellable {
+    public func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]? = nil, tables: [String], callback: @escaping @Sendable ([Row]) -> Void) -> any Cancellable {
         DatabaseCancellableWrapper(database.watch(sql, params: params, tables: tables, callback: callback))
     }
 
@@ -804,11 +804,11 @@ public final class SynchroClient: @unchecked Sendable {
 
     // MARK: - Status
 
-    public func onStatusChange(_ callback: @escaping (SyncStatus) -> Void) -> any Cancellable {
+    public func onStatusChange(_ callback: @escaping @Sendable (SyncStatus) -> Void) -> any Cancellable {
         syncEngine.onStatusChange(callback)
     }
 
-    public func onSyncEvent(_ callback: @escaping (SyncEvent) -> Void) -> any Cancellable {
+    public func onSyncEvent(_ callback: @escaping @Sendable (SyncEvent) -> Void) -> any Cancellable {
         syncEngine.onEvent(callback)
     }
 
@@ -816,7 +816,7 @@ public final class SynchroClient: @unchecked Sendable {
         try syncEngine.getBlockingFailure()
     }
 
-    public func onConflict(_ callback: @escaping (ConflictEvent) -> Void) -> any Cancellable {
+    public func onConflict(_ callback: @escaping @Sendable (ConflictEvent) -> Void) -> any Cancellable {
         syncEngine.onConflict(callback)
     }
 

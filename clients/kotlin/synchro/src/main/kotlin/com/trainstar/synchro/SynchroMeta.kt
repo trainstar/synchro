@@ -243,7 +243,7 @@ internal object SynchroMeta {
                 updated_at = ?
             WHERE singleton = 1
             """.trimIndent(),
-            arrayOf(
+            arrayOf<Any?>(
                 failure.operation.wireName,
                 failure.code.wireName,
                 if (failure.retryable) 1 else 0,
@@ -711,7 +711,7 @@ internal object SynchroMeta {
         executeScopeRowUpdate(
             db,
             "DELETE FROM _synchro_scope_rows WHERE scope_id = ? AND generation <> ?",
-            arrayOf(scopeId, generation),
+            arrayOf<Any?>(scopeId, generation),
         )
     }
 
@@ -1092,7 +1092,7 @@ internal object SynchroMeta {
                  response_json, is_final, final_scope_cursor, final_checksum)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
-            arrayOf(
+            arrayOf<Any?>(
                 scopeId,
                 rebuildId,
                 if (requestCursor == null) 1 else 0,

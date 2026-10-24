@@ -94,6 +94,11 @@ adb_command uninstall "$package" >/dev/null 2>&1 || true
 adb_command install "$apk" >/dev/null
 app_installed=1
 adb_command shell pm clear "$package" >/dev/null
+device_api=$(adb_command shell getprop ro.build.version.sdk | tr -d '\r')
+case "$device_api" in *[!0-9]*|'') printf '%s\n' "Android API level is invalid" >&2; exit 1 ;; esac
+if [ "$device_api" -ge 37 ]; then
+  adb_command shell pm grant "$package" android.permission.ACCESS_LOCAL_NETWORK
+fi
 
 write_config() {
   source_path=$1

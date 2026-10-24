@@ -179,12 +179,12 @@ internal class PushProcessor(
                     updated_at = substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'
                 WHERE mutation_id = ? AND lifecycle_state = 'captured'
                 """.trimIndent(),
-                arrayOf(request.batchID, ordinal, candidate.mutationID),
+                arrayOf<Any?>(request.batchID, ordinal, candidate.mutationID),
             )
             requireExactlyOneChange(db, "mutation seal was not durable")
             db.execSQL(
                 "INSERT INTO _synchro_push_batch_members (batch_id, mutation_id, ordinal) VALUES (?, ?, ?)",
-                arrayOf(request.batchID, candidate.mutationID, ordinal),
+                arrayOf<Any?>(request.batchID, candidate.mutationID, ordinal),
             )
         }
         SealedPushBatch(
@@ -282,7 +282,7 @@ internal class PushProcessor(
             INSERT OR IGNORE INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
             VALUES (?, ?, ?, substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
             """.trimIndent(),
-            arrayOf(request.schema.version, request.schema.hash, encoded),
+            arrayOf<Any?>(request.schema.version, request.schema.hash, encoded),
         )
         return tables
     }
@@ -328,7 +328,7 @@ internal class PushProcessor(
             )
             db.execSQL(
                 "INSERT INTO _synchro_push_batch_members (batch_id, mutation_id, ordinal) VALUES (?, ?, ?)",
-                arrayOf(request.batchID, mutation.mutationID, ordinal),
+                arrayOf<Any?>(request.batchID, mutation.mutationID, ordinal),
             )
         }
     }
@@ -557,12 +557,12 @@ internal class PushProcessor(
                         updated_at = substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z'
                     WHERE mutation_id = ? AND lifecycle_state = 'captured'
                     """.trimIndent(),
-                    arrayOf(successor.batchID, ordinal, member.mutationID),
+                    arrayOf<Any?>(successor.batchID, ordinal, member.mutationID),
                 )
                 requireExactlyOneChange(db, "renewal successor mutation was not sealed")
                 db.execSQL(
                     "INSERT INTO _synchro_push_batch_members (batch_id, mutation_id, ordinal) VALUES (?, ?, ?)",
-                    arrayOf(successor.batchID, member.mutationID, ordinal),
+                    arrayOf<Any?>(successor.batchID, member.mutationID, ordinal),
                 )
             }
         }
@@ -1864,7 +1864,7 @@ internal class PushProcessor(
                 substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z',
                 substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
             """.trimIndent(),
-            arrayOf(
+            arrayOf<Any?>(
                 mutationID, tableID, tableName, recordID, pkFieldID, pkLogicalType, operation,
                 authoredSchema.version, authoredSchema.hash, baseVersion, clientVersion, lifecycleState,
                 sourceKind, dependsOnMutationID, normalizedMutationID, sealedBatchID, sealedOrdinal, atomicGroupID,

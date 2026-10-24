@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 val synchroVersion = providers.gradleProperty("synchroVersion").orNull
@@ -8,12 +7,12 @@ val synchroVersion = providers.gradleProperty("synchroVersion").orNull
 
 android {
     namespace = "com.trainstar.synchro.consumer"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.trainstar.synchro.consumer"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -25,9 +24,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
 }
 
 dependencies {

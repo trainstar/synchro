@@ -1600,6 +1600,7 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 	@status=0; \
 		(cd clients/react-native/example && xcodebuild test -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination '$(RN_IOS_TEST_DESTINATION)' -derivedDataPath ios/build/bridge-transactions -resultBundlePath ios/build/bridge-transactions.xcresult -collect-test-diagnostics $(RN_IOS_TEST_DIAGNOSTICS) -only-testing:SynchroReactNative-Unit-Tests) || status=$$?; \
 		(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult xcresult -path ../clients/react-native/example/ios/build/bridge-transactions.xcresult) || status=$$?; \
+		$(MAKE) --no-print-directory verify-rn-bridge-transactions-ios-linkage || status=$$?; \
 		exit "$$status"
 
 # Compiles the whole bridge test target for the host simulator architecture. It selects, boots, and tests
@@ -1607,6 +1608,11 @@ test-rn-bridge-transactions-ios: rn-ios-pods
 # RN_IOS_BUILD_ARGS passes extra build-only xcodebuild arguments, for example '-jobs 2' on a shared host.
 build-rn-bridge-transactions-ios: rn-ios-pods
 	cd clients/react-native/example && xcodebuild build-for-testing -workspace ios/SynchroReactNativeExample.xcworkspace -scheme SynchroReactNative -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/build/bridge-transactions ARCHS="$$(uname -m)" $(RN_IOS_BUILD_ARGS)
+	$(MAKE) --no-print-directory verify-rn-bridge-transactions-ios-linkage
+
+.PHONY: verify-rn-bridge-transactions-ios-linkage
+verify-rn-bridge-transactions-ios-linkage:
+	python3 verification/verify_rn_ios_test_linkage.py
 
 test-rn-bridge-transactions-android: release-kotlin-local
 	$(call declared_selection,GRADLE_TEST_ARGS)
@@ -2550,6 +2556,11 @@ test-rust-pg-all:
 		(cd conformance && GOFLAGS= GOWORK=off CARGO_TARGET_DIR="$(PGRX_TARGET_DIR)" go run ./cmd/testresult rust -dir ../extensions/synchro-pg -- cargo pgrx test pg$$v) || exit 1; \
 	done
 	@echo "All PG versions passed."
+
+.PHONY: lint-workflows
+lint-workflows:
+	@command -v actionlint >/dev/null || { echo "actionlint is required" >&2; exit 1; }
+	actionlint
 
 lint-go:
 	@test -z "$$(find api/go -name '*.go' -not -path '*/vendor/*' -print0 | xargs -0 gofmt -l)"

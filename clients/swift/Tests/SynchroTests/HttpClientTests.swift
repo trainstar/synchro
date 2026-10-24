@@ -1,11 +1,17 @@
 import XCTest
 import Foundation
+import os
 @testable import Synchro
 
 // MARK: - Mock URLProtocol
 
 final class MockURLProtocol: URLProtocol {
-    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    private static let handler = OSAllocatedUnfairLock<(@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))?>(initialState: nil)
+
+    static var requestHandler: (@Sendable (URLRequest) throws -> (HTTPURLResponse, Data))? {
+        get { handler.withLock { $0 } }
+        set { handler.withLock { $0 = newValue } }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -208,11 +214,11 @@ final class HttpClientTests: XCTestCase {
                 "received_schema": ["version": receivedSchema.version, "hash": receivedSchema.hash],
             ],
         ]
+        let responseData = try JSONSerialization.data(withJSONObject: responseBody)
 
         MockURLProtocol.requestHandler = { request in
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 422, httpVersion: nil, headerFields: nil)!
-            return (response, data)
+            return (response, responseData)
         }
 
         let req = PullRequest(
@@ -296,10 +302,10 @@ final class HttpClientTests: XCTestCase {
         )
 
         for errorBody in invalidErrors {
+            let responseData = try JSONSerialization.data(withJSONObject: ["error": errorBody])
             MockURLProtocol.requestHandler = { request in
-                let data = try JSONSerialization.data(withJSONObject: ["error": errorBody])
                 let response = HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!
-                return (response, data)
+                return (response, responseData)
             }
             do {
                 _ = try await httpClient.rebuild(request: request)
@@ -351,11 +357,11 @@ final class HttpClientTests: XCTestCase {
                 "retryable": true,
             ] as [String: Any],
         ]
+        let responseData = try JSONSerialization.data(withJSONObject: responseBody)
 
         MockURLProtocol.requestHandler = { request in
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "10"])!
-            return (response, data)
+            return (response, responseData)
         }
 
         let req = PushRequest(
@@ -387,11 +393,11 @@ final class HttpClientTests: XCTestCase {
                 "retryable": true,
             ] as [String: Any],
         ]
+        let responseData = try JSONSerialization.data(withJSONObject: responseBody)
 
         MockURLProtocol.requestHandler = { request in
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: ["Retry-After": "5"])!
-            return (response, data)
+            return (response, responseData)
         }
 
         let req = PullRequest(
@@ -545,16 +551,17 @@ final class HttpClientTests: XCTestCase {
         ]
 
         for malformed in cases {
+            let responseData = try JSONSerialization.data(withJSONObject: malformed.body)
+            let status = malformed.status
+            let headers = malformed.header.map { ["Retry-After": $0] }
             MockURLProtocol.requestHandler = { request in
-                let data = try JSONSerialization.data(withJSONObject: malformed.body)
-                let headers = malformed.header.map { ["Retry-After": $0] }
                 let response = HTTPURLResponse(
                     url: request.url!,
-                    statusCode: malformed.status,
+                    statusCode: status,
                     httpVersion: nil,
                     headerFields: headers
                 )!
-                return (response, data)
+                return (response, responseData)
             }
 
             do {
@@ -579,11 +586,11 @@ final class HttpClientTests: XCTestCase {
                 "retryable": false,
             ] as [String: Any],
         ]
+        let responseData = try JSONSerialization.data(withJSONObject: responseBody)
 
         MockURLProtocol.requestHandler = { request in
-            let data = try JSONSerialization.data(withJSONObject: responseBody)
             let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
-            return (response, data)
+            return (response, responseData)
         }
 
         let req = PullRequest(

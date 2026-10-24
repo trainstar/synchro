@@ -90,7 +90,7 @@ class SchemaManagerTests {
             database.writeTransaction { db ->
                 db.execSQL(
                     "UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = ? AND schema_hash = ?",
-                    arrayOf(journalJSON.encodeToString(corruptedTables), 1, source.schemaHash),
+                    arrayOf<Any?>(journalJSON.encodeToString(corruptedTables), 1, source.schemaHash),
                 )
             }
             database.close()
@@ -111,7 +111,7 @@ class SchemaManagerTests {
             reopened.writeTransaction { db ->
                 db.execSQL(
                     "UPDATE _synchro_schema_archives SET manifest_json = ? WHERE schema_version = ? AND schema_hash = ?",
-                    arrayOf(journalJSON.encodeToString(sourceTables), 1, source.schemaHash),
+                    arrayOf<Any?>(journalJSON.encodeToString(sourceTables), 1, source.schemaHash),
                 )
             }
             SchemaManager(reopened).recoverPendingMigration()
@@ -1036,11 +1036,11 @@ class SchemaManagerTests {
             )
             rawDb.execSQL(
                 "INSERT INTO _synchro_scopes (scope_id, cursor, checksum, generation, local_checksum) VALUES (?, ?, ?, ?, ?)",
-                arrayOf("orders:user-1", "cursor-v1", "scope-checksum-v1", 3, "local-checksum-v1"),
+                arrayOf<Any?>("orders:user-1", "cursor-v1", "scope-checksum-v1", 3, "local-checksum-v1"),
             )
             rawDb.execSQL(
                 "INSERT INTO _synchro_scope_rows (scope_id, table_name, record_id, checksum, generation) VALUES (?, ?, ?, ?, ?)",
-                arrayOf("orders:user-1", "orders", "ord-1", "row-checksum-v1", 3),
+                arrayOf<Any?>("orders:user-1", "orders", "ord-1", "row-checksum-v1", 3),
             )
         }
 

@@ -1,0 +1,26 @@
+def expectedNamespace = project.ext.manifestProofNamespace
+
+android {
+    compileSdkVersion rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        minSdkVersion rootProject.ext.minSdkVersion
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile "src/relocated/AndroidManifest.xml"
+        }
+    }
+}
+
+androidComponents {
+    finalizeDsl { extension ->
+        if (extension.namespace != expectedNamespace) {
+            throw new GradleException("configured manifest namespace was not applied")
+        }
+        if (!extension.buildFeatures.buildConfig) {
+            throw new GradleException("RNGP did not enable library BuildConfig")
+        }
+    }
+}

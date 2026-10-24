@@ -1,0 +1,6 @@
+plugins {
+    id "com.android.library"
+}
+
+ext.manifestProofNamespace = "dev.synchro.manifestproof.plain"
+apply from: rootProject.file("../manifest-proof/android-library.gradle")

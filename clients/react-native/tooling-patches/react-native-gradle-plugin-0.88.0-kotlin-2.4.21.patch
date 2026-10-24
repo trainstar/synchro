@@ -1,0 +1,30 @@
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -7 +7 @@
+-kotlin = "2.2.0"
++kotlin = "2.4.21"
+diff --git a/react-native-gradle-plugin/build.gradle.kts b/react-native-gradle-plugin/build.gradle.kts
+--- a/react-native-gradle-plugin/build.gradle.kts
++++ b/react-native-gradle-plugin/build.gradle.kts
+@@ -67 +67 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_2_0)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/settings-plugin/build.gradle.kts b/settings-plugin/build.gradle.kts
+--- a/settings-plugin/build.gradle.kts
++++ b/settings-plugin/build.gradle.kts
+@@ -57 +57 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_2_0)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/shared-testutil/build.gradle.kts b/shared-testutil/build.gradle.kts
+--- a/shared-testutil/build.gradle.kts
++++ b/shared-testutil/build.gradle.kts
+@@ -30 +30 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_2_0)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/shared/build.gradle.kts b/shared/build.gradle.kts
+--- a/shared/build.gradle.kts
++++ b/shared/build.gradle.kts
+@@ -36 +36 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_2_0)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)

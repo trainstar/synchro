@@ -1,0 +1,7 @@
+plugins {
+    id "com.android.library"
+    id "com.facebook.react"
+}
+
+ext.manifestProofNamespace = "dev.synchro.manifestproof.react"
+apply from: rootProject.file("../manifest-proof/android-library.gradle")

@@ -208,7 +208,7 @@ class PushProcessorTests {
         } else {
             database.execute(
                 "INSERT INTO orders (id, title, score, updated_at) VALUES (?, ?, ?, ?)",
-                arrayOf(id, title, score, "2026-01-01T00:00:00.000000Z"),
+                arrayOf<Any?>(id, title, score, "2026-01-01T00:00:00.000000Z"),
             )
         }
     }
@@ -350,7 +350,7 @@ class PushProcessorTests {
         val (database, _, processor) = environment()
         database.execute(
             "INSERT INTO orders (id, title, enabled, updated_at) VALUES (?, ?, ?, ?)",
-            arrayOf("o1", "captured", 1L, "2026-01-01T00:00:00.000000Z"),
+            arrayOf<Any?>("o1", "captured", 1L, "2026-01-01T00:00:00.000000Z"),
         )
         database.writeSyncLockedTransaction {
             it.execSQL("UPDATE orders SET title = 'mutable value' WHERE id = 'o1'")
@@ -518,7 +518,7 @@ class PushProcessorTests {
             database.execute("UPDATE _synchro_push_batches SET schema_json = '[]' WHERE state = 'superseded'")
             database.execute(
                 "DELETE FROM _synchro_schema_archives WHERE schema_version = ? AND schema_hash = ?",
-                arrayOf(1L, PROTOCOL_TEST_SCHEMA_HASH),
+                arrayOf<Any?>(1L, PROTOCOL_TEST_SCHEMA_HASH),
             )
 
             val missingHistory = runCatching {
@@ -729,9 +729,9 @@ class PushProcessorTests {
         val (database, _, processor) = environment()
         database.execute(
             "INSERT INTO orders (id, title, enabled, updated_at) VALUES (?, ?, ?, ?)",
-            arrayOf("o1", "first", 0L, "2026-01-01T00:00:00.000000Z"),
+            arrayOf<Any?>("o1", "first", 0L, "2026-01-01T00:00:00.000000Z"),
         )
-        database.execute("UPDATE orders SET title = ?, enabled = ? WHERE id = ?", arrayOf("last", 1L, "o1"))
+        database.execute("UPDATE orders SET title = ?, enabled = ? WHERE id = ?", arrayOf<Any?>("last", 1L, "o1"))
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "1").setBody(RETRYABLE_503_ERROR_JSON))
         server.start()
@@ -1425,7 +1425,7 @@ class PushProcessorTests {
         installServerRow(database, "server two", "sv-2", recordID = "o2")
         database.execute(
             "INSERT INTO orders (id, title, score, document, updated_at) VALUES (?, ?, ?, ?, ?)",
-            arrayOf(
+            arrayOf<Any?>(
                 "o3",
                 "quote \" backslash \\ slash / tab \t line \n control \u0001 \u007f \u00e9 \uD83D\uDE00 \u2028",
                 1e-7,
@@ -1433,7 +1433,7 @@ class PushProcessorTests {
                 "2026-01-01T00:00:00.000000Z",
             ),
         )
-        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf("\u00fc \"updated\"", 12345.678, "o1"))
+        database.execute("UPDATE orders SET title = ?, score = ? WHERE id = ?", arrayOf<Any?>("\u00fc \"updated\"", 12345.678, "o1"))
         database.execute("DELETE FROM orders WHERE id = ?", arrayOf("o2"))
         val server = MockWebServer()
         server.enqueue(retryableResponse())

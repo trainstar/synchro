@@ -2684,7 +2684,7 @@ class SyncEngineTests {
                                         client_version, lifecycle_state, source_kind, created_at, updated_at
                                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                     """.trimIndent(),
-                                    arrayOf(
+                                    arrayOf<Any?>(
                                         UUID.randomUUID().toString(), "table-orders", "orders", "preserved", "field-id", "string",
                                         "insert", 1, PROTOCOL_TEST_SCHEMA_HASH, null,
                                         "2026-01-01T10:00:00.000000Z", "sealed", "test", "2026-01-01T10:00:00.000000Z", "2026-01-01T10:00:00.000000Z",
@@ -4444,7 +4444,7 @@ class SyncEngineTests {
                 (scope_id, receipt, schema_version, schema_hash, cardinality, checksum)
             VALUES (?, ?, ?, ?, 0, ?)
             """.trimIndent(),
-            arrayOf(scopeID, receipt, 1L, PROTOCOL_TEST_SCHEMA_HASH, encoded),
+            arrayOf<Any?>(scopeID, receipt, 1L, PROTOCOL_TEST_SCHEMA_HASH, encoded),
         )
     }
 
@@ -4504,7 +4504,7 @@ class SyncEngineTests {
                     (scope_id, receipt, schema_version, schema_hash, cardinality, checksum)
                 VALUES (?, ?, 1, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf(scopeID, receipt, PROTOCOL_TEST_SCHEMA_HASH, rows.size.toLong(), encodedScopeChecksum),
+                arrayOf<Any?>(scopeID, receipt, PROTOCOL_TEST_SCHEMA_HASH, rows.size.toLong(), encodedScopeChecksum),
             )
         }
         return digests.singleOrNull()?.second?.checksum?.digest.orEmpty()

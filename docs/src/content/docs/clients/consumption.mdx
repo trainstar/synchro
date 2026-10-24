@@ -37,8 +37,8 @@ artifacts are the supported pre-release path.
 
 ## Prerequisites
 
-- Swift clients require iOS 17 or later.
-- Kotlin clients require Android API 24 or later and JDK 17.
+- Swift clients require Swift 6 and iOS 17 or later.
+- Kotlin clients require Android API 24 or later and JDK 17. Follow the [Android toolchain upgrade](#android-toolchain-upgrade).
 - React Native requires `>=0.82.1 <0.89.0` and React `>=19.1.1 <20.0.0`.
 - React Native 0.88.0 requires React 19.3.0 and Node `^22.13.0 || ^24.3.0 || >=26.0.0`.
 - React Native 0.82.1 iOS applications require the [fmt backport](/synchro/reference/support-policy/#react-native-0821-fmt-backport) with Xcode 27.
@@ -55,6 +55,16 @@ the local development adapter. Android emulators must use
 endpoint, not a host loopback address.
 
 ## Swift
+
+### Swift 6 callback upgrade
+
+The Apple SDK and React Native iOS bridge compile in Swift 6 language mode.
+Native change, query, status, sync-event, and conflict callbacks require `@Sendable` closures.
+
+Capture immutable Sendable values or synchronized Sendable owners in these callbacks.
+Use the owning actor to change actor-isolated state.
+Keep each callback subscription until observation ends, then call `cancel()`.
+Call `close()` when the client is no longer required.
 
 Add the package to `Package.swift` after Synchro `v0.4.0-rc.4` is published:
 
@@ -153,6 +163,63 @@ The application obtains `accessToken` from its identity provider. Do not put a
 JWT in source code. Pass `http://127.0.0.1:8091` as `serverURL` only for the
 local tutorial adapter. When the application exits, call
 `try await client.close()`.
+
+## Android toolchain upgrade
+
+RC4 uses Kotlin 2.4.21 with language and API mode 2.4, AGP 9.4.1, and Gradle 9.8.2.
+The published native library contains Kotlin 2.4 metadata.
+Use this compiler setup for native and React Native Android applications.
+An older Kotlin compiler cannot be assumed to read that metadata.
+The runtime floor remains Android API 24.
+Keep JVM 1.8 bytecode and core library desugaring for that floor.
+
+1. Install JDK 17 and Android API 37.
+2. Set application `compileSdk` and `targetSdk` to 37.
+3. Select AGP 9.4.1 and Kotlin compiler 2.4.21 in the root build configuration.
+4. Set the Gradle wrapper properties to these exact values:
+
+```properties
+distributionUrl=https\://services.gradle.org/distributions/gradle-9.8.2-bin.zip
+distributionSha256Sum=21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607
+```
+
+Native Android hosts use AGP's built-in Kotlin integration.
+The root buildscript selects `org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21` on its classpath.
+Do not also apply `org.jetbrains.kotlin.android` to a built-in Kotlin Android module.
+The [native consumer configuration](https://github.com/trainstar/synchro/blob/master/verification/consumers/kotlin/build.gradle.kts) shows this setup.
+
+React Native hosts use the current upstream template's external Kotlin integration.
+Set these properties in `android/gradle.properties`:
+
+```properties
+android.builtInKotlin=false
+android.newDsl=false
+```
+
+Set `kotlinVersion = "2.4.21"`, `compileSdkVersion = 37`, and `targetSdkVersion = 37` in `android/build.gradle`.
+Select `com.android.tools.build:gradle:9.4.1` and `org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21` in its buildscript dependencies.
+Keep the application's external Kotlin plugin application.
+
+For RN 0.82.1, enable `buildFeatures { resValues = true }` in the application `android` block.
+Replace `getDefaultProguardFile("proguard-android.txt")` with `getDefaultProguardFile("proguard-android-optimize.txt")` in that application.
+The current RN 0.88.0 template already contains those application settings.
+
+After each fresh package installation, apply the delivered RNGP correction before the Android build:
+
+```sh
+node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs rngp
+```
+
+The command accepts RN 0.82.1 with RNGP 0.82.1, or RN 0.88.0 with RNGP 0.88.0.
+It verifies exact source hashes and rejects any other pair.
+The package's broader peer-dependency range does not expand this toolchain-correction boundary.
+The support matrix remains RN 0.82.1 and the current 0.88.x track.
+Each new version needs its actual plugin sources and consumer validation before this correction can accept it.
+Do not change package versions or bypass hash checks to apply another version's patch.
+
+The RNGP command changes installed plugin sources only.
+It does not make the required application build-file changes above.
+The [consumer preparation](https://github.com/trainstar/synchro/blob/master/verification/consumers/react-native/test-consumer.sh) contains the complete tested host setup.
 
 ## Kotlin
 

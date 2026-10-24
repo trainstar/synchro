@@ -222,13 +222,17 @@ Direct Go binaries support Linux x64.
 Swift supports iOS 17 and current iOS with Swift 6.
 
 Kotlin supports Android API 24 and current Android.
+Current Kotlin builds use Kotlin 2.4.21, AGP 9.4.1, and Gradle 9.8.2.
+Current Android applications compile and target API 37.
 
 React Native 0.82.1 and 0.88.x support current iOS and Android.
 
 Package checks cover RN 0.82.1 and 0.88.0 on both platforms.
 The representative semantic corpus runs on RN 0.88.0.
 RN 0.82.1 iOS checks apply the upstream fmt 12.1.0 podspec backport.
-React Native iOS and Apple package checks use Xcode 27.0 through the GitHub-hosted `xcode-27` runner.
+Swift source, React Native iOS, and Apple package checks use Xcode 27.1 through the GitHub-hosted `xcode-27` runner.
+Apple SDKs and React Native wrapper targets compile in Swift 6 language mode.
+Current Apple cells use iOS 27.1. Minimum native iOS remains 17.
 The iOS 17 runtime uses an anonymous Apple download when the runner does not contain it.
 
 macOS hosts Apple and Swift validation. It is not a PostgreSQL support cell.
