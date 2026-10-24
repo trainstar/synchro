@@ -14,7 +14,8 @@ Their CocoaPods and Swift Package Manager declarations require Swift 6.
 - iOS `17.0+`
 - Android `minSdk 24`
 - Android development and CI should use JDK `17`
-- Current Android validation uses Kotlin `2.4.21`, AGP `9.4.1`, Gradle `9.8.2`, and API `37`.
+- Android builds require the Kotlin `2.4.21`, AGP `9.4.1`, Gradle `9.8.2`, and API `37` host setup.
+- Follow the complete [Android toolchain upgrade](https://trainstar.github.io/synchro/clients/consumption/#android-toolchain-upgrade), including the minimum-RN application changes.
 
 ## Installation
 
@@ -59,8 +60,11 @@ Apply the exact delivered correction after installation and before an Android bu
 node node_modules/@trainstar/synchro-react-native/tooling-patches/apply.cjs rngp
 ```
 
-The command accepts only the supported React Native and Gradle plugin version
-pairs. It verifies each Kotlin catalog and compiler-options source hash before
+The command accepts exactly RN `0.82.1` with RNGP `0.82.1`, or RN `0.88.0` with RNGP `0.88.0`.
+The broad peer-dependency range does not expand these exact correction pairs.
+Each new version requires its actual source identities and consumer validation.
+The command does not migrate application build files.
+It verifies each Kotlin catalog and compiler-options source hash before
 and after it changes the Kotlin compiler and API modes.
 
 React Native hosts retain the [current upstream Gradle integration settings](https://github.com/react-native-community/template/blob/0.88-stable/template/android/gradle.properties):

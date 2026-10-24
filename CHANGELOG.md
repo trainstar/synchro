@@ -17,7 +17,7 @@ Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro
 ### Changed
 
 - Breaking: Apple clients and the React Native iOS bridge compile in Swift 6 language mode. Native callbacks require Sendable closures. Follow the [callback upgrade procedure](https://trainstar.github.io/synchro/clients/consumption/#swift-6-callback-upgrade). ([#407](https://github.com/trainstar/synchro/issues/407))
-- Android clients use Kotlin 2.4.21, AGP 9.4.1, and Gradle 9.8.2. Current applications compile and target Android API 37. ([#407](https://github.com/trainstar/synchro/issues/407))
+- Breaking: Android clients use Kotlin 2.4.21 metadata, AGP 9.4.1, and Gradle 9.8.2. Applications compile and target Android API 37. Follow the [Android host upgrade procedure](https://trainstar.github.io/synchro/clients/consumption/#android-toolchain-upgrade). ([#407](https://github.com/trainstar/synchro/issues/407))
 
 ### Fixed
 
