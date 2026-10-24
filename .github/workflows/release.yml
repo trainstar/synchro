@@ -348,13 +348,13 @@ jobs:
           from pathlib import Path
           cells = [
               {"id": "SUP-PG-LINUX-X64-001", "environment": {"architecture": "x86_64", "os": "ubuntu-24.04", "postgresql": "18.3"}},
-              {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.0"}},
-              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.0", "xcode": "27.0"}},
+              {"id": "SUP-IOS-MIN-001", "environment": {"ios": "17.0", "xcode": "27.1"}},
+              {"id": "SUP-IOS-CURRENT-001", "environment": {"ios": "27.1", "xcode": "27.1"}},
               {"id": "SUP-ANDROID-MIN-001", "environment": {"android_api": "24", "os": "ubuntu-24.04", "system_image": "system-images;android-24;google_apis;x86_64", "system_image_revision": "27", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
               {"id": "SUP-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
-              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.0", "react_native": "0.88.0", "xcode": "27.0"}},
+              {"id": "SUP-RN-IOS-CURRENT-001", "environment": {"ios": "27.1", "react_native": "0.88.0", "xcode": "27.1"}},
               {"id": "SUP-RN-ANDROID-CURRENT-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.88.0", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
-              {"id": "SUP-RN-IOS-MIN-001", "environment": {"ios": "27.0", "react_native": "0.82.1", "xcode": "27.0"}},
+              {"id": "SUP-RN-IOS-MIN-001", "environment": {"ios": "27.1", "react_native": "0.82.1", "xcode": "27.1"}},
               {"id": "SUP-RN-ANDROID-MIN-001", "environment": {"android_api": "37", "os": "ubuntu-24.04", "react_native": "0.82.1", "system_image": "system-images;android-37.0;google_apis;x86_64", "system_image_revision": "8", "emulator_version": "37.2.12", "emulator_build": "16428233"}},
           ]
           Path("dist/release-inputs/support-environments.json").write_text(json.dumps(cells, indent=2, sort_keys=True) + "\n")
@@ -718,22 +718,22 @@ jobs:
           - cell: SUP-IOS-MIN-001
             ios: '17.0'
             support: '17'
-            xcode: '27.0'
+            xcode: '27.1'
             runner: xcode-27
           - cell: SUP-IOS-CURRENT-001
-            ios: '27.0'
-            support: '27.0'
-            xcode: '27.0'
+            ios: '27.1'
+            support: '27.1'
+            xcode: '27.1'
             runner: xcode-27
           - cell: SUP-RN-IOS-CURRENT-001
-            ios: '27.0'
-            support: '27.0'
-            xcode: '27.0'
+            ios: '27.1'
+            support: '27.1'
+            xcode: '27.1'
             runner: xcode-27
           - cell: SUP-RN-IOS-MIN-001
-            ios: '27.0'
-            support: '27.0'
-            xcode: '27.0'
+            ios: '27.1'
+            support: '27.1'
+            xcode: '27.1'
             runner: xcode-27
     steps:
       - name: Checkout candidate
@@ -817,7 +817,7 @@ jobs:
             fi
           fi
           runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
-          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'd=JSON.parse(STDIN.read).fetch("devicetypes"); x=d.find { |i| i["name"] == "iPhone 14" } || d.find { |i| i["name"].start_with?("iPhone") }; abort "no iPhone simulator type" unless x; puts x.fetch("identifier")')"
+          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'wanted=ARGV.fetch(0) == "17.0" ? "iPhone 14" : "iPhone Duo"; x=JSON.parse(STDIN.read).fetch("devicetypes").find { |i| i["name"] == wanted }; abort "required iPhone simulator type is unavailable" unless x; puts x.fetch("identifier")' "$IOS_VERSION")"
           udid="$(xcrun simctl create "Synchro_${{ matrix.cell }}" "$device" "$runtime")"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
@@ -1467,20 +1467,20 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - uses: ./.github/actions/setup-current-xcode
+
       - name: Verify public React Native iOS and Android consumers
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/public-rn-gradle
           npm_config_cache: ${{ runner.temp }}/public-rn-npm-cache
           SYNCHRO_CONSUMER_RESOLUTION: public
           PACKAGED_SMOKE_TMP_ROOT: ${{ runner.temp }}/public-rn
-          SUPPORT_PLATFORM_VERSION: '27.0'
+          SUPPORT_PLATFORM_VERSION: '27.1'
         run: |
           set -euo pipefail
           mkdir -p "$GRADLE_USER_HOME" "$npm_config_cache"
           test -z "$(find "$GRADLE_USER_HOME" -mindepth 1 -print -quit)"
           test -z "$(find "$npm_config_cache" -mindepth 1 -print -quit)"
-          test -d /Applications/Xcode_27.0.app || { echo "Xcode 27.0 is required" >&2; exit 1; }
-          sudo xcode-select -s /Applications/Xcode_27.0.app
           sdkmanager="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$sdkmanager"
           yes | "$sdkmanager" --licenses >/dev/null || { statuses=("${PIPESTATUS[@]}"); test "${statuses[1]}" = 0; }
@@ -1506,7 +1506,7 @@ jobs:
             test -n "${NPM_DIST_TAG_TOKEN:-}" || { echo "NPM_DIST_TAG_TOKEN is required to move npm latest" >&2; exit 1; }
             # Trusted publishing authenticates npm publish only, so the dist-tag write uses its own scoped credential.
             userconfig="$RUNNER_TEMP/npm-promotion.npmrc"
-            (umask 077 && printf '%s\n' '//registry.npmjs.org/:_authToken=${NPM_DIST_TAG_TOKEN}' > "$userconfig")
+            (umask 077 && printf '%s\n' "//registry.npmjs.org/:_authToken=\${NPM_DIST_TAG_TOKEN}" > "$userconfig")
             status=0
             npm dist-tag add "$package@$version" latest --userconfig "$userconfig" || status=$?
             rm -f "$userconfig"

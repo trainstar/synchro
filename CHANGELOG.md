@@ -9,14 +9,19 @@ Before `0.4.0`, use the [GitHub Releases](https://github.com/trainstar/synchro/r
 
 ## [Unreleased]
 
-## [0.4.0-rc.4] - 2026-10-23
+## [0.4.0-rc.4] - 2026-10-24
 
-This release candidate corrects iOS package integration for Swift 6 applications.
+This release candidate updates native toolchain support and corrects Swift 6 integration.
 Use exact versions. See [Release Candidate](https://github.com/trainstar/synchro/blob/master/RELEASE.md#release-candidate) for registry behavior.
+
+### Changed
+
+- Breaking: Apple clients and the React Native iOS bridge compile in Swift 6 language mode. Native callbacks require Sendable closures. Follow the [callback upgrade procedure](https://trainstar.github.io/synchro/clients/consumption/#swift-6-callback-upgrade). ([#407](https://github.com/trainstar/synchro/issues/407))
+- Android clients use Kotlin 2.4.21, AGP 9.4.1, and Gradle 9.8.2. Current applications compile and target Android API 37. ([#407](https://github.com/trainstar/synchro/issues/407))
 
 ### Fixed
 
-- React Native iOS packages declare Swift 5 language mode for the bridge. Swift 6 applications no longer select an incompatible bridge language mode. ([#369](https://github.com/trainstar/synchro/issues/369))
+- React Native iOS callbacks and transaction sessions preserve synchronized ownership across native queues. ([#369](https://github.com/trainstar/synchro/issues/369), [#407](https://github.com/trainstar/synchro/issues/407))
 
 ## [0.4.0-rc.3] - 2026-10-20
 

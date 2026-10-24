@@ -2551,6 +2551,11 @@ test-rust-pg-all:
 	done
 	@echo "All PG versions passed."
 
+.PHONY: lint-workflows
+lint-workflows:
+	@command -v actionlint >/dev/null || { echo "actionlint is required" >&2; exit 1; }
+	actionlint
+
 lint-go:
 	@test -z "$$(find api/go -name '*.go' -not -path '*/vendor/*' -print0 | xargs -0 gofmt -l)"
 	cd api/go && GOWORK=off go vet ./...

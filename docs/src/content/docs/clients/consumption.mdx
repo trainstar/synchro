@@ -37,7 +37,7 @@ artifacts are the supported pre-release path.
 
 ## Prerequisites
 
-- Swift clients require iOS 17 or later.
+- Swift clients require Swift 6 and iOS 17 or later.
 - Kotlin clients require Android API 24 or later and JDK 17.
 - React Native requires `>=0.82.1 <0.89.0` and React `>=19.1.1 <20.0.0`.
 - React Native 0.88.0 requires React 19.3.0 and Node `^22.13.0 || ^24.3.0 || >=26.0.0`.
@@ -55,6 +55,16 @@ the local development adapter. Android emulators must use
 endpoint, not a host loopback address.
 
 ## Swift
+
+### Swift 6 callback upgrade
+
+The Apple SDK and React Native iOS bridge compile in Swift 6 language mode.
+Native change, query, status, sync-event, and conflict callbacks require `@Sendable` closures.
+
+Capture immutable Sendable values or synchronized Sendable owners in these callbacks.
+Use the owning actor to change actor-isolated state.
+Keep each callback subscription until observation ends, then call `cancel()`.
+Call `close()` when the client is no longer required.
 
 Add the package to `Package.swift` after Synchro `v0.4.0-rc.4` is published:
 
