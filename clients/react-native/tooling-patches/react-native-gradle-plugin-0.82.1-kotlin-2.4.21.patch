@@ -1,0 +1,131 @@
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -7 +7 @@
+-kotlin = "2.1.20"
++kotlin = "2.4.21"
+diff --git a/react-native-gradle-plugin/build.gradle.kts b/react-native-gradle-plugin/build.gradle.kts
+--- a/react-native-gradle-plugin/build.gradle.kts
++++ b/react-native-gradle-plugin/build.gradle.kts
+@@ -67 +67 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_1_8)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/settings-plugin/build.gradle.kts b/settings-plugin/build.gradle.kts
+--- a/settings-plugin/build.gradle.kts
++++ b/settings-plugin/build.gradle.kts
+@@ -57 +57 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_1_8)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/shared-testutil/build.gradle.kts b/shared-testutil/build.gradle.kts
+--- a/shared-testutil/build.gradle.kts
++++ b/shared-testutil/build.gradle.kts
+@@ -30 +30 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_1_8)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/shared/build.gradle.kts b/shared/build.gradle.kts
+--- a/shared/build.gradle.kts
++++ b/shared/build.gradle.kts
+@@ -36 +36 @@
+-    apiVersion.set(KotlinVersion.KOTLIN_1_8)
++    apiVersion.set(KotlinVersion.KOTLIN_2_4)
+diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactPlugin.kt b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactPlugin.kt
+--- a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactPlugin.kt
++++ b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactPlugin.kt
+@@ -100,6 +100,17 @@
+-    // Library Only Configuration
+-    configureBuildConfigFieldsForLibraries(project)
+-    configureNamespaceForLibraries(project)
+-    project.pluginManager.withPlugin("com.android.library") {
+-      configureCodegen(project, extension, rootExtension, isLibrary = true)
+-    }
++    project.pluginManager.withPlugin("com.android.application") {
++      project.rootProject.allprojects { subproject ->
++        subproject.pluginManager.withPlugin("com.android.library") {
++          if (!subproject.state.executed) {
++            configureBuildConfigFieldsForLibraries(subproject)
++            configureNamespaceForLibraries(subproject)
++          }
++        }
++      }
++    }
++
++    // Library Only Configuration
++    project.pluginManager.withPlugin("com.android.library") {
++      configureBuildConfigFieldsForLibraries(project)
++      configureNamespaceForLibraries(project)
++      configureCodegen(project, extension, rootExtension, isLibrary = true)
++    }
+diff --git a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
+--- a/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
++++ b/react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt
+@@ -84,9 +83,9 @@
+-  fun configureBuildConfigFieldsForLibraries(appProject: Project) {
+-    appProject.rootProject.allprojects { subproject ->
+-      subproject.pluginManager.withPlugin("com.android.library") {
+-        subproject.extensions
+-            .getByType(LibraryAndroidComponentsExtension::class.java)
+-            .finalizeDsl { ext -> ext.buildFeatures.buildConfig = true }
+-      }
+-    }
+-  }
++  fun configureBuildConfigFieldsForLibraries(project: Project) {
++    if (project.extensions.extraProperties.has(BUILD_CONFIG_FIELDS_CONFIGURED_PROPERTY)) {
++      return
++    }
++    project.extensions.extraProperties.set(BUILD_CONFIG_FIELDS_CONFIGURED_PROPERTY, true)
++    project.extensions
++        .getByType(LibraryAndroidComponentsExtension::class.java)
++        .finalizeDsl { ext -> ext.buildFeatures.buildConfig = true }
++  }
+@@ -116,22 +116,22 @@
+-  fun configureNamespaceForLibraries(appProject: Project) {
+-    appProject.rootProject.allprojects { subproject ->
+-      subproject.pluginManager.withPlugin("com.android.library") {
+-        subproject.extensions
+-            .getByType(LibraryAndroidComponentsExtension::class.java)
+-            .finalizeDsl { ext ->
+-              if (ext.namespace == null) {
+-                val android = subproject.extensions.getByType(LibraryExtension::class.java)
+-                val manifestFile = android.sourceSets.getByName("main").manifest.srcFile
+-
+-                manifestFile
+-                    .takeIf { it.exists() }
+-                    ?.let { file ->
+-                      getPackageNameFromManifest(file)?.let { packageName ->
+-                        ext.namespace = packageName
+-                      }
+-                    }
+-              }
+-            }
+-      }
+-    }
+-  }
++  fun configureNamespaceForLibraries(project: Project) {
++    if (project.extensions.extraProperties.has(NAMESPACE_CONFIGURED_PROPERTY)) {
++      return
++    }
++    project.extensions.extraProperties.set(NAMESPACE_CONFIGURED_PROPERTY, true)
++    project.extensions
++        .getByType(LibraryAndroidComponentsExtension::class.java)
++        .finalizeDsl { ext ->
++          if (ext.namespace == null) {
++            val android = project.extensions.getByType(LibraryExtension::class.java)
++            val manifestFile = android.sourceSets.getByName("main").manifest.srcFile
++
++            manifestFile
++                .takeIf { it.exists() }
++                ?.let { file ->
++                  getPackageNameFromManifest(file)?.let { packageName ->
++                    ext.namespace = packageName
++                  }
++                }
++          }
++        }
++  }
+@@ -139 +139,5 @@
+-
++
++private const val BUILD_CONFIG_FIELDS_CONFIGURED_PROPERTY =
++    "com.facebook.react.internal.buildConfigFieldsConfigured"
++private const val NAMESPACE_CONFIGURED_PROPERTY = "com.facebook.react.internal.namespaceConfigured"
++

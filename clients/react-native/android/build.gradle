@@ -1,9 +1,9 @@
 buildscript {
   ext.SynchroReactNative = [
-    kotlinVersion: "2.0.21",
+    kotlinVersion: "2.4.21",
     minSdkVersion: 24,
-    compileSdkVersion: 36,
-    targetSdkVersion: 36
+    compileSdkVersion: 37,
+    targetSdkVersion: 37
   ]
 
   ext.getExtOrDefault = { prop ->
@@ -20,15 +20,16 @@ buildscript {
   }
 
   dependencies {
-    classpath "com.android.tools.build:gradle:8.7.2"
-    // noinspection DifferentKotlinGradleVersion
+    classpath "com.android.tools.build:gradle:9.4.1"
     classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${getExtOrDefault('kotlinVersion')}"
   }
 }
 
 
 apply plugin: "com.android.library"
-apply plugin: "kotlin-android"
+if (rootProject.findProperty("android.builtInKotlin")?.toString() == "false") {
+  apply plugin: "kotlin-android"
+}
 
 apply plugin: "com.facebook.react"
 

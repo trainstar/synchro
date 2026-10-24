@@ -406,7 +406,7 @@ func TestInstallSeedReverseKillAndCleanupCommands(t *testing.T) {
 	commands := readADBCommands(t, logPath)
 	for _, suffix := range [][]string{
 		{"get-state"},
-		{"install", "-r", "-t", applicationAPK},
+		{"install", "-r", "-t", "-g", applicationAPK},
 		{"install", "-r", "-t", instrumentationAPK},
 		{"reverse", "tcp:8091", "tcp:8091"},
 		{"push", seedPath, "/data/local/tmp/" + seedName},

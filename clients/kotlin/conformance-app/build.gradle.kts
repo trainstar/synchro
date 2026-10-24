@@ -1,16 +1,15 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.trainstar.synchro.conformance"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.trainstar.synchro.conformance"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -20,9 +19,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
 }
 
 dependencies {

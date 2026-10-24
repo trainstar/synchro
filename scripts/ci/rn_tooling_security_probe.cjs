@@ -211,6 +211,7 @@ function deliveryProof(root, work, rn, example, packageAssets) {
     [configName, example],
     ['@react-native-community/cli-clean', example],
     ['react-native-builder-bob', rn],
+    ['@react-native/gradle-plugin', rn],
   ];
   const bunyaminEntry = createRequire(example.resolve('detox/package.json')).resolve('bunyamin');
   let bunyamin = path.dirname(bunyaminEntry);
@@ -221,11 +222,15 @@ function deliveryProof(root, work, rn, example, packageAssets) {
     const source = path.dirname(consumer.resolve(name + '/package.json'));
     fs.cpSync(source, path.join(modules, name), { recursive: true });
   }
+  const reactNativeManifest = rn.resolve('react-native/package.json');
+  fs.mkdirSync(path.join(modules, 'react-native'), { recursive: true });
+  fs.copyFileSync(reactNativeManifest, path.join(modules, 'react-native/package.json'));
   const repairs = [
     [configName, 'cli-config-android-20.2.0.patch'],
     ['stream-json', 'stream-json-1.9.1.patch'],
     ['react-native-builder-bob', 'react-native-builder-bob-0.40.18.patch'],
     ['@react-native-community/cli-clean', 'cli-clean-20.2.0.patch'],
+    ['@react-native/gradle-plugin', 'react-native-gradle-plugin-0.88.0-kotlin-2.4.21.patch'],
   ];
   for (const [name, patch] of repairs) {
     const result = spawnSync('patch', ['--batch', '--reverse', '--fuzz=0', '-p1', '-d', path.join(modules, name)], {
@@ -239,6 +244,9 @@ function deliveryProof(root, work, rn, example, packageAssets) {
   ], { cwd: app, encoding: 'utf8', timeout: 5000 });
   const target = app => path.join(app, 'node_modules', configName);
   const source = app => path.join(target(app), 'build/config/findComponentDescriptors.js');
+  const rngpName = '@react-native/gradle-plugin';
+  const rngpTarget = app => path.join(app, 'node_modules', rngpName);
+  const rngpSource = app => path.join(rngpTarget(app), 'gradle/libs.versions.toml');
   const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   const baseline = digest(source(base));
   let cases = 0;
@@ -257,6 +265,18 @@ function deliveryProof(root, work, rn, example, packageAssets) {
     if (mode === 'cli') assert.notEqual(digest(source(app)), baseline);
     cases += 2;
   }
+  const rngpApp = path.join(work, 'apply-rngp');
+  fs.cpSync(base, rngpApp, { recursive: true });
+  const firstRngp = invoke(rngpApp, 'rngp');
+  assert.ifError(firstRngp.error);
+  assert.equal(firstRngp.status, 0, firstRngp.stdout + firstRngp.stderr);
+  assert.match(firstRngp.stdout, /applied verified/);
+  const secondRngp = invoke(rngpApp, 'rngp');
+  assert.ifError(secondRngp.error);
+  assert.equal(secondRngp.status, 0, secondRngp.stdout + secondRngp.stderr);
+  assert.match(secondRngp.stdout, /already has the verified patch/);
+  assert.notEqual(digest(rngpSource(rngpApp)), digest(rngpSource(base)));
+  cases += 2;
   const rejected = [
     ['caller-version', app => {
       const file = path.join(app, 'node_modules/@react-native-community/cli-platform-android/package.json');
@@ -304,6 +324,39 @@ function deliveryProof(root, work, rn, example, packageAssets) {
     assert.notEqual(result.status, 0, name);
     assert.match(result.stderr, message, name);
     assert.equal(digest(source(app)), before, name + ' changed the rejected source');
+    cases++;
+  }
+  const rngpRejected = [
+    ['rngp-caller-version', app => {
+      const file = path.join(app, 'node_modules/react-native/package.json');
+      const manifest = JSON.parse(fs.readFileSync(file));
+      manifest.version = '0.88.1';
+      fs.writeFileSync(file, JSON.stringify(manifest));
+    }, /unsupported React Native Gradle Plugin version/],
+    ['rngp-version', app => {
+      const file = path.join(rngpTarget(app), 'package.json');
+      const manifest = JSON.parse(fs.readFileSync(file));
+      manifest.version = '0.88.1';
+      fs.writeFileSync(file, JSON.stringify(manifest));
+    }, /unexpected package version/],
+    ['rngp-hash', app => fs.appendFileSync(rngpSource(app), '\n# changed source\n'), /unexpected source hash/],
+    ['rngp-outside', app => {
+      const outside = path.join(work, 'rngp-outside');
+      fs.cpSync(rngpTarget(app), outside, { recursive: true });
+      fs.rmSync(rngpTarget(app), { recursive: true });
+      fs.symlinkSync(outside, rngpTarget(app), 'dir');
+    }, /outside the caller installation/],
+  ];
+  for (const [name, change, message] of rngpRejected) {
+    const app = path.join(work, 'reject-' + name);
+    fs.cpSync(base, app, { recursive: true });
+    change(app);
+    const before = digest(rngpSource(app));
+    const result = invoke(app, 'rngp');
+    assert.ifError(result.error);
+    assert.notEqual(result.status, 0, name);
+    assert.match(result.stderr, message, name);
+    assert.equal(digest(rngpSource(app)), before, name + ' changed the rejected source');
     cases++;
   }
   for (const mode of ['unknown', '__proto__']) {

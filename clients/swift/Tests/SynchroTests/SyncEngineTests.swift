@@ -3,6 +3,105 @@ import GRDB
 import os
 @testable @_spi(Inspection) import Synchro
 
+private func syncEngineResponse(
+    _ request: URLRequest,
+    statusCode: Int = 200,
+    body: Data,
+    headerFields: [String: String]? = ["Content-Type": "application/json"]
+) -> (HTTPURLResponse, Data) {
+    (
+        HTTPURLResponse(
+            url: request.url!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: headerFields
+        )!,
+        body
+    )
+}
+
+private func syncEngineJSONData(_ value: Any) throws -> Data {
+    try JSONSerialization.data(withJSONObject: value)
+}
+
+private func syncEnginePullData(scopeID: String, cursor: String) throws -> Data {
+    let checksum = protocolEmptyScopeChecksum(scopeID: scopeID)
+    let checksumJSON = try JSONSerialization.jsonObject(
+        with: JSONEncoder.synchroEncoder().encode(checksum)
+    )
+    return try syncEngineJSONData([
+        "changes": [] as [Any],
+        "scope_set_version": 1,
+        "scope_cursors": [scopeID: cursor],
+        "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+        "rebuild": [] as [Any],
+        "has_more": false,
+        "checksums": [scopeID: checksumJSON],
+    ])
+}
+
+private func syncEngineAcceptedPushOutcome(
+    mutation: [String: Any],
+    schema: LocalSchemaTable,
+    updatedAt: String,
+    serverVersion: String
+) throws -> [String: Any] {
+    let pk = mutation["pk"] as! [String: Any]
+    let columns = mutation["columns"] as? [String: Any] ?? [:]
+    var serverRow = columns
+    serverRow["field-id"] = pk["field-id"]
+    serverRow["field-updated-at"] = updatedAt
+    serverRow["field-deleted-at"] = NSNull()
+    let rowChecksum = try Integrity.rowDigest(
+        schemaHash: protocolTestSchemaHash,
+        table: schema,
+        pk: pk.mapValues(AnyCodable.init),
+        row: serverRow.mapValues(AnyCodable.init),
+        serverVersion: serverVersion
+    ).checksum
+    let rowChecksumJSON = try JSONSerialization.jsonObject(
+        with: JSONEncoder.synchroEncoder().encode(rowChecksum)
+    )
+    return [
+        "mutation_id": mutation["mutation_id"]!,
+        "table": mutation["table"]!,
+        "pk": pk,
+        "outcome_schema": ["version": 1, "hash": protocolTestSchemaHash],
+        "status": "applied",
+        "server_row": serverRow,
+        "row_checksum": rowChecksumJSON,
+        "server_version": serverVersion,
+    ]
+}
+
+private func syncEngineAcceptingPushResponse(
+    _ request: URLRequest,
+    schema: LocalSchemaTable,
+    pushedRecordIDs: OSAllocatedUnfairLock<[String]>
+) throws -> (HTTPURLResponse, Data) {
+    let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
+    let mutations = body["mutations"] as! [[String: Any]]
+    let recordIDs = mutations.map { ($0["pk"] as! [String: Any])["field-id"] as! String }
+    pushedRecordIDs.withLock { $0 += recordIDs }
+    let accepted = try mutations.map {
+        try syncEngineAcceptedPushOutcome(
+            mutation: $0,
+            schema: schema,
+            updatedAt: "2026-01-01T14:00:00.000000Z",
+            serverVersion: "2026-01-01T14:00:00.000000Z"
+        )
+    }
+    return try syncEngineResponse(
+        request,
+        body: syncEngineJSONData([
+            "batch_id": body["batch_id"]!,
+            "server_time": "2026-01-01T14:00:00.000Z",
+            "accepted": accepted,
+            "rejected": [] as [Any],
+        ])
+    )
+}
+
 final class SyncEngineTests: XCTestCase {
     func testRecoveryWithoutBlockingFailureRejectsWithoutChangingState() async throws {
         let (engine, database) = try makeSyncEngine()
@@ -34,55 +133,158 @@ final class SyncEngineTests: XCTestCase {
     func testCallbackRegistrationAndCancellation() async throws {
         let (engine, _) = try makeSyncEngine()
 
-        var statusUpdates: [String] = []
+        let statusUpdates = OSAllocatedUnfairLock(initialState: [String]())
         let cancellable1 = engine.onStatusChange { status in
-            statusUpdates.append(status.rawValue)
+            statusUpdates.withLock { $0.append(status.rawValue) }
         }
 
-        var conflictEvents: [String] = []
+        let conflictEvents = OSAllocatedUnfairLock(initialState: [String]())
         let cancellable2 = engine.onConflict { event in
-            conflictEvents.append(event.recordID)
+            conflictEvents.withLock { $0.append(event.recordID) }
         }
 
         // Stop triggers a status update
         await engine.stop()
-        XCTAssertEqual(statusUpdates, ["stopped"])
+        XCTAssertEqual(statusUpdates.withLock { $0 }, ["stopped"])
 
         // Cancel callbacks
         cancellable1.cancel()
         cancellable2.cancel()
 
         // After cancel, no more updates
-        statusUpdates.removeAll()
+        statusUpdates.withLock { $0.removeAll() }
         await engine.stop()
-        XCTAssertTrue(statusUpdates.isEmpty)
+        XCTAssertTrue(statusUpdates.withLock { $0.isEmpty })
+    }
+
+    func testCallbackCancellableConsumesConcurrentAndReentrantCancellationOnce() {
+        assertCancellationIsExactlyOnceOutsideStateLock { callback in
+            CallbackCancellable(onCancel: callback)
+        }
+    }
+
+    func testDatabaseCancellableWrapperConsumesConcurrentAndReentrantCancellationOnce() {
+        assertCancellationIsExactlyOnceOutsideStateLock { callback in
+            DatabaseCancellableWrapper(AnyDatabaseCancellable(cancel: callback))
+        }
+    }
+
+    func testSynchroDateCodingConcurrentlyPreservesDateVectors() {
+        let vectors = [
+            DateCodingVector(
+                input: "2026-04-05T06:07:08.125Z",
+                expectedOutput: "2026-04-05T06:07:08.125Z"
+            ),
+            DateCodingVector(
+                input: "2026-04-05T06:07:08Z",
+                expectedOutput: "2026-04-05T06:07:08.000Z"
+            ),
+            DateCodingVector(input: "not-a-date", expectedOutput: nil),
+        ]
+        let results = OSAllocatedUnfairLock(initialState: [DateCodingResult]())
+
+        DispatchQueue.concurrentPerform(iterations: 128) { iteration in
+            for vector in vectors {
+                let parsed = SynchroDateCoding.parse(vector.input)
+                results.withLock {
+                    $0.append(DateCodingResult(
+                        input: vector.input,
+                        output: parsed.map(SynchroDateCoding.string(from:))
+                    ))
+                }
+            }
+        }
+
+        let concurrentResults = results.withLock { $0 }
+        XCTAssertEqual(concurrentResults.count, 128 * vectors.count)
+        for vector in vectors {
+            let outputs = concurrentResults
+                .filter { $0.input == vector.input }
+                .map(\.output)
+            XCTAssertEqual(outputs, Array(repeating: vector.expectedOutput, count: 128))
+        }
+    }
+
+    private struct CancellationProbeState {
+        var invocationCount = 0
+        var secondCancellationReturnedDuringFirstInvocation = false
+    }
+
+    private struct DateCodingVector: Sendable {
+        let input: String
+        let expectedOutput: String?
+    }
+
+    private struct DateCodingResult: Sendable {
+        let input: String
+        let output: String?
+    }
+
+    private func assertCancellationIsExactlyOnceOutsideStateLock(
+        makeCancellable: (@escaping @Sendable () -> Void) -> any Cancellable
+    ) {
+        let cancellable = OSAllocatedUnfairLock<(any Cancellable)?>(initialState: nil)
+        let state = OSAllocatedUnfairLock(initialState: CancellationProbeState())
+        let callbackStarted = DispatchSemaphore(value: 0)
+        let firstCancellationReturned = DispatchSemaphore(value: 0)
+        let secondCancellationReturned = DispatchSemaphore(value: 0)
+        let probe = makeCancellable {
+            let invocation = state.withLock { state in
+                state.invocationCount += 1
+                return state.invocationCount
+            }
+            guard invocation == 1 else { return }
+
+            callbackStarted.signal()
+            cancellable.withLock { $0 }?.cancel()
+            DispatchQueue.global().async {
+                cancellable.withLock { $0 }?.cancel()
+                secondCancellationReturned.signal()
+            }
+            let secondReturned = secondCancellationReturned.wait(timeout: .now() + 1) == .success
+            state.withLock {
+                $0.secondCancellationReturnedDuringFirstInvocation = secondReturned
+            }
+        }
+        cancellable.withLock { $0 = probe }
+
+        DispatchQueue.global().async {
+            cancellable.withLock { $0 }?.cancel()
+            firstCancellationReturned.signal()
+        }
+
+        XCTAssertEqual(callbackStarted.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(firstCancellationReturned.wait(timeout: .now() + 1), .success)
+        let result = state.withLock { $0 }
+        XCTAssertEqual(result.invocationCount, 1)
+        XCTAssertTrue(result.secondCancellationReturnedDuringFirstInvocation)
     }
 
     func testMultipleCallbacksIndependentCancellation() async throws {
         let (engine, _) = try makeSyncEngine()
 
-        var updates1: [String] = []
-        var updates2: [String] = []
+        let updates1 = OSAllocatedUnfairLock(initialState: [String]())
+        let updates2 = OSAllocatedUnfairLock(initialState: [String]())
 
         let cancellable1 = engine.onStatusChange { _ in
-            updates1.append("hit")
+            updates1.withLock { $0.append("hit") }
         }
         let _ = engine.onStatusChange { _ in
-            updates2.append("hit")
+            updates2.withLock { $0.append("hit") }
         }
 
         await engine.stop()
-        XCTAssertEqual(updates1.count, 1)
-        XCTAssertEqual(updates2.count, 1)
+        XCTAssertEqual(updates1.withLock { $0.count }, 1)
+        XCTAssertEqual(updates2.withLock { $0.count }, 1)
 
         // Cancel only first
         cancellable1.cancel()
-        updates1.removeAll()
-        updates2.removeAll()
+        updates1.withLock { $0.removeAll() }
+        updates2.withLock { $0.removeAll() }
 
         await engine.stop()
-        XCTAssertEqual(updates1.count, 0, "Cancelled callback should not fire")
-        XCTAssertEqual(updates2.count, 0, "An idempotent stop does not publish another transition")
+        XCTAssertEqual(updates1.withLock { $0.count }, 0, "Cancelled callback should not fire")
+        XCTAssertEqual(updates2.withLock { $0.count }, 0, "An idempotent stop does not publish another transition")
     }
 
     func testShutdownCancelsCallerOwnedHTTPWorkBeforeDatabaseClose() async throws {
@@ -93,14 +295,17 @@ final class SyncEngineTests: XCTestCase {
         let closeFinished = OSAllocatedUnfairLock(initialState: false)
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
         let blockPull = OSAllocatedUnfairLock(initialState: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_close"))
+        let scopeID = scopeID
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_close"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
                 let count = pullCount.withLock { count in
@@ -111,9 +316,16 @@ final class SyncEngineTests: XCTestCase {
                     pullStarted.fulfill()
                     _ = releasePull.wait(timeout: .now() + 10)
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_close_\(count)"))
+                return try syncEngineResponse(
+                    request,
+                    body: syncEnginePullData(scopeID: scopeID, cursor: "scope_cursor_close_\(count)")
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(
+                request,
+                statusCode: 500,
+                body: syncEngineJSONData(["error": "unexpected"])
+            )
         }
 
         let (engine, database) = try makeIntegrationEnv()
@@ -143,6 +355,9 @@ final class SyncEngineTests: XCTestCase {
         let oldConnectStarted = XCTestExpectation(description: "old connect started")
         let releaseOldConnect = DispatchSemaphore(value: 0)
         let connectCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_new"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_new"))
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -155,15 +370,15 @@ final class SyncEngineTests: XCTestCase {
                     oldConnectStarted.fulfill()
                     _ = releaseOldConnect.wait(timeout: .now() + 2)
                 }
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_new"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_new"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, _) = try makeIntegrationEnv(transportObservationCollector: collector)
@@ -193,6 +408,9 @@ final class SyncEngineTests: XCTestCase {
         let releaseOldConnect = DispatchSemaphore(value: 0)
         let connectCount = OSAllocatedUnfairLock(initialState: 0)
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_binding"))
+        let scopeID = scopeID
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
@@ -205,19 +423,22 @@ final class SyncEngineTests: XCTestCase {
                     oldConnectStarted.fulfill()
                     _ = releaseOldConnect.wait(timeout: .now() + 2)
                 }
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_binding"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
                 let count = pullCount.withLock { value in
                     value += 1
                     return value
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_binding_\(count)"))
+                return try syncEngineResponse(
+                    request,
+                    body: syncEnginePullData(scopeID: scopeID, cursor: "scope_cursor_binding_\(count)")
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, _) = try makeIntegrationEnv()
@@ -248,21 +469,28 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testStartInitializesAndSyncs() async throws {
-        var callLog: [String] = []
+        let callLog = OSAllocatedUnfairLock(initialState: [String]())
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                callLog.append("connect")
-                return try self.mockResponse(json: self.connectJSON)
+                callLog.withLock { $0.append("connect") }
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                callLog.append("rebuild")
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                callLog.withLock { $0.append("rebuild") }
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                callLog.append("pull")
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                callLog.withLock { $0.append("pull") }
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected: \(path)"])
+            return try syncEngineResponse(
+                request,
+                statusCode: 500,
+                body: syncEngineJSONData(["error": "unexpected: \(path)"])
+            )
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -270,7 +498,7 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "pull"])
+        XCTAssertEqual(callLog.withLock { $0 }, ["connect", "rebuild", "pull"])
 
         let scopeSetVersion = try db.readTransaction { db in
             try SynchroMeta.getInt64(db, key: .scopeSetVersion)
@@ -293,7 +521,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testConnectRebuildLocalReconcilesSchemaAndRebuildsExistingScope() async throws {
-        var callLog: [String] = []
+        let callLog = OSAllocatedUnfairLock(initialState: [String]())
         let schemaHash = connectRebuildLocalSchemaHash
         let rebuiltRecord = try authoritativeRecord(
             id: "w1",
@@ -305,35 +533,36 @@ final class SyncEngineTests: XCTestCase {
             schemaHash: schemaHash
         )
         let rebuiltScopeChecksum = try authoritativeScopeChecksum([rebuiltRecord], schemaHash: schemaHash)
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectRebuildLocalJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuiltRecord.json],
+            finalCursor: "scope_cursor_rebuilt",
+            checksum: rebuiltScopeChecksum
+        ))
+        let pullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 2,
+            "scope_cursors": [scopeID: "scope_cursor_after_rebuild"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [scopeID: try checksumJSONObject(rebuiltScopeChecksum)],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                callLog.append("connect")
-                return try self.mockResponse(json: self.connectRebuildLocalJSON)
+                callLog.withLock { $0.append("connect") }
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                callLog.append("rebuild")
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [rebuiltRecord.json],
-                    finalCursor: "scope_cursor_rebuilt",
-                    checksum: rebuiltScopeChecksum
-                ))
+                callLog.withLock { $0.append("rebuild") }
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                callLog.append("pull")
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 2,
-                    "scope_cursors": [self.scopeID: "scope_cursor_after_rebuild"],
-                    "scope_updates": [
-                        "add": [] as [Any],
-                        "remove": [] as [Any],
-                    ] as [String: Any],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [self.scopeID: try self.checksumJSONObject(rebuiltScopeChecksum)],
-                ])
+                callLog.withLock { $0.append("pull") }
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -363,7 +592,7 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "pull"])
+        XCTAssertEqual(callLog.withLock { $0 }, ["connect", "rebuild", "pull"])
 
         let columns = try db.query("PRAGMA table_info(orders)", params: nil)
         let columnNames = Set(columns.compactMap { $0["name"] as? String })
@@ -447,37 +676,38 @@ final class SyncEngineTests: XCTestCase {
             schemaHash: schemaHash
         )
         let rebuiltScopeChecksum = try authoritativeScopeChecksum([rebuiltRecord], schemaHash: schemaHash)
-        var requests: [(path: String, body: String)] = []
+        let requests = OSAllocatedUnfairLock(initialState: [(path: String, body: String)]())
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectRebuildLocalJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuiltRecord.json],
+            finalCursor: "scope_cursor_rebuilt",
+            checksum: rebuiltScopeChecksum
+        ))
+        let pullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 2,
+            "scope_cursors": [scopeID: "scope_cursor_after_rebuild"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [scopeID: try checksumJSONObject(rebuiltScopeChecksum)],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             let body = request.bodyData().flatMap { String(data: $0, encoding: .utf8) } ?? ""
             if path.hasSuffix("/sync/connect") {
-                requests.append(("connect", body))
-                return try self.mockResponse(json: self.connectRebuildLocalJSON)
+                requests.withLock { $0.append(("connect", body)) }
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                requests.append(("rebuild", body))
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [rebuiltRecord.json],
-                    finalCursor: "scope_cursor_rebuilt",
-                    checksum: rebuiltScopeChecksum
-                ))
+                requests.withLock { $0.append(("rebuild", body)) }
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                requests.append(("pull", body))
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 2,
-                    "scope_cursors": [self.scopeID: "scope_cursor_after_rebuild"],
-                    "scope_updates": [
-                        "add": [] as [Any],
-                        "remove": [] as [Any],
-                    ] as [String: Any],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [self.scopeID: try self.checksumJSONObject(rebuiltScopeChecksum)],
-                ])
+                requests.withLock { $0.append(("pull", body)) }
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -508,13 +738,14 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        XCTAssertEqual(requests.map(\.path), ["connect", "rebuild", "pull"])
-        XCTAssertFalse(requests.contains { $0.body == saved })
+        let recordedRequests = requests.withLock { $0 }
+        XCTAssertEqual(recordedRequests.map(\.path), ["connect", "rebuild", "pull"])
+        XCTAssertFalse(recordedRequests.contains { $0.body == saved })
         let target = SchemaRef(version: 2, hash: schemaHash)
         let decoder = JSONDecoder.synchroDecoder()
-        if requests.count == 3 {
-            XCTAssertEqual(try decoder.decode(RebuildRequest.self, from: Data(requests[1].body.utf8)).schema, target)
-            XCTAssertEqual(try decoder.decode(PullRequest.self, from: Data(requests[2].body.utf8)).schema, target)
+        if recordedRequests.count == 3 {
+            XCTAssertEqual(try decoder.decode(RebuildRequest.self, from: Data(recordedRequests[1].body.utf8)).schema, target)
+            XCTAssertEqual(try decoder.decode(PullRequest.self, from: Data(recordedRequests[2].body.utf8)).schema, target)
         }
         XCTAssertNil(try db.readTransaction { db in try SynchroMeta.getBackoffRecord(db) })
         XCTAssertEqual(engine.getSyncStatus(), .ready)
@@ -524,7 +755,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testScopeRemovalDeletesLocalRowWithoutQueueingPendingDelete() async throws {
-        var pullCallCount = 0
+        let pullCallCount = OSAllocatedUnfairLock(initialState: 0)
         let record = try authoritativeRecord(
             id: "w1",
             shipAddress: "Seeded",
@@ -532,39 +763,41 @@ final class SyncEngineTests: XCTestCase {
             serverVersion: "sv_1"
         )
         let scopeChecksum = try authoritativeScopeChecksum([record])
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [record.json],
+            finalCursor: "scope_cursor_1",
+            checksum: scopeChecksum
+        ))
+        let initialPullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2", checksum: scopeChecksum))
+        let scopeRemovalBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 2,
+            "scope_cursors": [:] as [String: Any],
+            "scope_updates": ["add": [] as [Any], "remove": [scopeID]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [:] as [String: Any],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [record.json],
-                    finalCursor: "scope_cursor_1",
-                    checksum: scopeChecksum
-                ))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                if pullCallCount == 1 {
-                    return try self.mockResponse(json: self.scopePullJSON(
-                        cursor: "scope_cursor_2",
-                        checksum: scopeChecksum
-                    ))
+                let count = pullCallCount.withLock { value in
+                    value += 1
+                    return value
                 }
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 2,
-                    "scope_cursors": [:] as [String: Any],
-                    "scope_updates": [
-                        "add": [] as [Any],
-                        "remove": [self.scopeID]
-                    ] as [String: Any],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [:] as [String: Any]
-                ])
+                if count == 1 {
+                    return syncEngineResponse(request, body: initialPullBody)
+                }
+                return syncEngineResponse(request, body: scopeRemovalBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -581,7 +814,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testPullPagesUntilComplete() async throws {
-        var pullCallCount = 0
+        let pullCallCount = OSAllocatedUnfairLock(initialState: 0)
         let recordOne = try authoritativeRecord(
             id: "w1",
             shipAddress: "Address 1",
@@ -601,43 +834,41 @@ final class SyncEngineTests: XCTestCase {
         var changeTwo = recordTwo.json
         changeTwo["scope"] = scopeID
         changeTwo["op"] = "upsert"
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let firstPullBody = try syncEngineJSONData([
+            "changes": [changeOne],
+            "scope_set_version": 1,
+            "scope_cursors": [scopeID: "scope_cursor_mid"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": true,
+        ])
+        let secondPullBody = try syncEngineJSONData([
+            "changes": [changeTwo],
+            "scope_set_version": 1,
+            "scope_cursors": [scopeID: "scope_cursor_2"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [scopeID: try checksumJSONObject(scopeChecksum)],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                if pullCallCount == 1 {
-                    let json: [String: Any] = [
-                        "changes": [
-                            changeOne
-                        ],
-                        "scope_set_version": 1,
-                        "scope_cursors": [self.scopeID: "scope_cursor_mid"],
-                        "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
-                        "rebuild": [] as [Any],
-                        "has_more": true
-                    ]
-                    return try self.mockResponse(json: json)
-                } else {
-                    let json: [String: Any] = [
-                        "changes": [
-                            changeTwo
-                        ],
-                        "scope_set_version": 1,
-                        "scope_cursors": [self.scopeID: "scope_cursor_2"],
-                        "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
-                        "rebuild": [] as [Any],
-                        "has_more": false,
-                        "checksums": [self.scopeID: try self.checksumJSONObject(scopeChecksum)]
-                    ]
-                    return try self.mockResponse(json: json)
+                let count = pullCallCount.withLock { value in
+                    value += 1
+                    return value
                 }
+                return syncEngineResponse(request, body: count == 1 ? firstPullBody : secondPullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -645,7 +876,7 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.start()
 
-        XCTAssertEqual(pullCallCount, 2)
+        XCTAssertEqual(pullCallCount.withLock { $0 }, 2)
         let count = try db.query("SELECT id FROM orders", params: nil)
         XCTAssertEqual(count.count, 2)
 
@@ -656,8 +887,8 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testTerminalPullChecksumMismatchForcesImmediateRebuild() async throws {
-        var pullCallCount = 0
-        var rebuildCallCount = 0
+        let pullCallCount = OSAllocatedUnfairLock(initialState: 0)
+        let rebuildCallCount = OSAllocatedUnfairLock(initialState: 0)
 
         let scopeRecord = try authoritativeRecord(
             id: "w1",
@@ -666,47 +897,47 @@ final class SyncEngineTests: XCTestCase {
             serverVersion: "sv_1"
         )
         let scopeChecksum = try authoritativeScopeChecksum([scopeRecord])
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let initialRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [scopeRecord.json],
+            finalCursor: "scope_cursor_1",
+            checksum: scopeChecksum
+        ))
+        let repairedRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [scopeRecord.json],
+            finalCursor: "scope_cursor_rebuilt",
+            checksum: scopeChecksum
+        ))
+        let initialPullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2", checksum: scopeChecksum))
+        let checksumOnlyPullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 1,
+            "scope_cursors": [:] as [String: String],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [scopeID: try checksumJSONObject(scopeChecksum)],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                rebuildCallCount += 1
-                if rebuildCallCount == 1 {
-                    return try self.mockResponse(json: self.rebuildJSON(
-                        records: [scopeRecord.json],
-                        finalCursor: "scope_cursor_1",
-                        checksum: scopeChecksum
-                    ))
+                let count = rebuildCallCount.withLock { value in
+                    value += 1
+                    return value
                 }
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [scopeRecord.json],
-                    finalCursor: "scope_cursor_rebuilt",
-                    checksum: scopeChecksum
-                ))
+                return syncEngineResponse(request, body: count == 1 ? initialRebuildBody : repairedRebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                if pullCallCount == 1 {
-                    return try self.mockResponse(json: self.scopePullJSON(
-                        cursor: "scope_cursor_2",
-                        checksum: scopeChecksum
-                    ))
+                let count = pullCallCount.withLock { value in
+                    value += 1
+                    return value
                 }
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 1,
-                    "scope_cursors": [:] as [String: String],
-                    "scope_updates": [
-                        "add": [] as [Any],
-                        "remove": [] as [Any],
-                    ] as [String: Any],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [self.scopeID: try self.checksumJSONObject(scopeChecksum)]
-                ])
+                return syncEngineResponse(request, body: count == 1 ? initialPullBody : checksumOnlyPullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return try syncEngineResponse(request, statusCode: 500, body: syncEngineJSONData(["error": "unexpected"]))
         }
 
         let (engine, db) = try makeIntegrationEnv()
@@ -724,8 +955,8 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.syncNow()
 
-        XCTAssertEqual(pullCallCount, 2)
-        XCTAssertEqual(rebuildCallCount, 2)
+        XCTAssertEqual(pullCallCount.withLock { $0 }, 2)
+        XCTAssertEqual(rebuildCallCount.withLock { $0 }, 2)
 
         let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["ship_address"] as String?, "Recovered Address")
@@ -741,10 +972,6 @@ final class SyncEngineTests: XCTestCase {
     func testPartialRebuildStateSurvivesRestartAndCompletesCleanly() async throws {
         let dbPath = tempDBPath()
         let clientID = "rebuild-restart-device"
-        var connectCallCount = 0
-        var rebuildCallCount = 0
-        var restartedKnownCursor: String?
-
         let rebuildRecordOne = try authoritativeRecord(
             id: "w1",
             shipAddress: "Address 1",
@@ -758,50 +985,70 @@ final class SyncEngineTests: XCTestCase {
             serverVersion: "sv_2"
         )
         let recoveredScopeChecksum = try authoritativeScopeChecksum([rebuildRecordOne, rebuildRecordTwo])
+        let handlerState = OSAllocatedUnfairLock(initialState: (
+            connectCallCount: 0,
+            rebuildCallCount: 0,
+            restartedKnownCursor: Optional<String>.none
+        ))
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let connectResumeBody = try syncEngineJSONData(connectResumeJSON)
+        let firstRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuildRecordOne.json],
+            cursor: "page_1",
+            hasMore: true
+        ))
+        let interruptedRebuildBody = try syncEngineJSONData(["error": "interrupted"])
+        let recoveredRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuildRecordOne.json, rebuildRecordTwo.json],
+            finalCursor: "scope_cursor_recovered",
+            checksum: recoveredScopeChecksum
+        ))
+        let pullBody = try syncEngineJSONData(scopePullJSON(
+            cursor: "scope_cursor_recovered",
+            checksum: recoveredScopeChecksum
+        ))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             switch path {
             case _ where path.hasSuffix("/sync/connect"):
-                connectCallCount += 1
+                let connectCallCount = handlerState.withLock { state in
+                    state.connectCallCount += 1
+                    return state.connectCallCount
+                }
                 if connectCallCount == 1 {
-                    return try self.mockResponse(json: self.connectJSON)
+                    return syncEngineResponse(request, body: connectBody)
                 }
 
                 let json = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: try XCTUnwrap(request.bodyData())) as? [String: Any]
                 )
                 let knownScopes = json["known_scopes"] as? [String: Any]
-                restartedKnownCursor = (knownScopes?[self.scopeID] as? [String: Any])?["cursor"] as? String
-                return try self.mockResponse(json: self.connectResumeJSON)
+                let knownCursor = (knownScopes?[scopeID] as? [String: Any])?["cursor"] as? String
+                handlerState.withLock { $0.restartedKnownCursor = knownCursor }
+                return syncEngineResponse(request, body: connectResumeBody)
 
             case _ where path.hasSuffix("/sync/rebuild"):
-                rebuildCallCount += 1
+                let rebuildCallCount = handlerState.withLock { state in
+                    state.rebuildCallCount += 1
+                    return state.rebuildCallCount
+                }
                 switch rebuildCallCount {
                 case 1:
-                    return try self.mockResponse(json: self.rebuildJSON(
-                        records: [rebuildRecordOne.json],
-                        cursor: "page_1",
-                        hasMore: true
-                    ))
+                    return syncEngineResponse(request, body: firstRebuildBody)
                 case 2:
-                    return try self.mockResponse(statusCode: 500, json: ["error": "interrupted"])
+                    return syncEngineResponse(request, statusCode: 500, body: interruptedRebuildBody)
                 default:
-                    return try self.mockResponse(json: self.rebuildJSON(
-                        records: [rebuildRecordOne.json, rebuildRecordTwo.json],
-                        finalCursor: "scope_cursor_recovered",
-                        checksum: recoveredScopeChecksum
-                    ))
+                    return syncEngineResponse(request, body: recoveredRebuildBody)
                 }
 
             case _ where path.hasSuffix("/sync/pull"):
-                return try self.mockResponse(json: self.scopePullJSON(
-                    cursor: "scope_cursor_recovered",
-                    checksum: recoveredScopeChecksum
-                ))
+                return syncEngineResponse(request, body: pullBody)
 
             default:
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
             }
         }
 
@@ -834,8 +1081,8 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine2.retryAfterError()
 
-        XCTAssertNil(restartedKnownCursor)
-        XCTAssertEqual(rebuildCallCount, 3)
+        XCTAssertNil(handlerState.withLock { $0.restartedKnownCursor })
+        XCTAssertEqual(handlerState.withLock { $0.rebuildCallCount }, 3)
 
         let rows = try db2.query("SELECT id FROM orders ORDER BY id", params: nil)
         XCTAssertEqual(rows.map { $0["id"] as! String }, ["w1", "w2"])
@@ -919,21 +1166,25 @@ final class SyncEngineTests: XCTestCase {
         await engine1.stop()
         try db1.close()
 
-        var rebuildRequestCount = 0
+        let rebuildRequestCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectResumeBody = try syncEngineJSONData(connectResumeJSON)
+        let pullBody = try syncEngineJSONData(scopePullJSON(
+            cursor: finalCursor,
+            checksum: rebuiltChecksum
+        ))
+        let rebuildForbiddenBody = try syncEngineJSONData(["error": "rebuild page must not be requested"])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectResumeJSON)
+                return syncEngineResponse(request, body: connectResumeBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                rebuildRequestCount += 1
-                return try self.mockResponse(statusCode: 500, json: ["error": "rebuild page must not be requested"])
+                rebuildRequestCount.withLock { $0 += 1 }
+                return syncEngineResponse(request, statusCode: 500, body: rebuildForbiddenBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(
-                    cursor: finalCursor,
-                    checksum: rebuiltChecksum
-                ))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine2, db2) = try makeIntegrationEnv(dbPath: dbPath)
@@ -943,7 +1194,7 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine2.start()
 
-        XCTAssertEqual(rebuildRequestCount, 0)
+        XCTAssertEqual(rebuildRequestCount.withLock { $0 }, 0)
         XCTAssertEqual(
             try db2.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])?["ship_address"] as String?,
             "Applied before finality"
@@ -958,80 +1209,99 @@ final class SyncEngineTests: XCTestCase {
 
     func testRebuildRestartRequiredRestartsOnlyAffectedScope() async throws {
         let otherScopeID = "orders:other"
-        var rebuildRequestCount = 0
-        var rebuildIDs: [String] = []
-        var pullRequestCount = 0
-        var databaseForHandler: SynchroDatabase!
+        let requestState = OSAllocatedUnfairLock(initialState: (
+            rebuildRequestCount: 0,
+            rebuildIDs: [String](),
+            pullRequestCount: 0
+        ))
+        let databaseForHandler = OSAllocatedUnfairLock<SynchroDatabase?>(initialState: nil)
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let firstRebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let restartedRebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_restarted"))
+        let restartRequiredBody = try syncEngineJSONData([
+            "error": [
+                "code": "rebuild_restart_required",
+                "message": "stale rebuild",
+                "retryable": false,
+                "scope_id": scopeID,
+            ],
+        ])
+        let firstPullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let secondPullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 1,
+            "scope_cursors": [otherScopeID: "other_scope_cursor_next"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [scopeID],
+            "has_more": false,
+            "checksums": [
+                scopeID: try checksumJSONObject(emptyScopeChecksum),
+                otherScopeID: try checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+            ],
+        ])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                rebuildRequestCount += 1
                 let body = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: try XCTUnwrap(request.bodyData())) as? [String: Any]
                 )
-                rebuildIDs.append(try XCTUnwrap(body["rebuild_id"] as? String))
-                switch rebuildRequestCount {
+                let rebuildID = try XCTUnwrap(body["rebuild_id"] as? String)
+                let requestCount = requestState.withLock { state in
+                    state.rebuildRequestCount += 1
+                    state.rebuildIDs.append(rebuildID)
+                    return state.rebuildRequestCount
+                }
+                switch requestCount {
                 case 1:
-                    return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                    return syncEngineResponse(request, body: firstRebuildBody)
                 case 2:
-                    try databaseForHandler.writeSyncLockedTransaction { connection in
-                        try connection.execute(
-                            sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
-                            arguments: ["preserved", "keep this row", "u1", "2026-01-01T10:00:00.000000Z"]
-                        )
-                        let mutationID = UUID().uuidString.lowercased()
-                        try connection.execute(
-                            sql: """
-                                INSERT INTO _synchro_pending_changes
-                                    (mutation_id, capture_uuid, table_id, table_name, record_id, pk_field_id,
-                                     pk_logical_type, operation, authored_schema_version, authored_schema_hash,
-                                     base_version, client_version, lifecycle_state, source_kind, created_at, updated_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, 'insert', ?, ?, NULL, ?, 'sealed', 'test', ?, ?)
-                                """,
-                            arguments: [
-                                mutationID, mutationID, "table-orders", "orders", "preserved", "field-id", "string",
-                                1, protocolTestSchemaHash, "2026-01-01T10:00:00.000000Z",
-                                "2026-01-01T10:00:00.000000Z", "2026-01-01T10:00:00.000000Z",
-                            ]
-                        )
+                    try databaseForHandler.withLock { database in
+                        try XCTUnwrap(database).writeSyncLockedTransaction { connection in
+                            try connection.execute(
+                                sql: "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                                arguments: ["preserved", "keep this row", "u1", "2026-01-01T10:00:00.000000Z"]
+                            )
+                            let mutationID = UUID().uuidString.lowercased()
+                            try connection.execute(
+                                sql: """
+                                    INSERT INTO _synchro_pending_changes
+                                        (mutation_id, capture_uuid, table_id, table_name, record_id, pk_field_id,
+                                         pk_logical_type, operation, authored_schema_version, authored_schema_hash,
+                                         base_version, client_version, lifecycle_state, source_kind, created_at, updated_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 'insert', ?, ?, NULL, ?, 'sealed', 'test', ?, ?)
+                                    """,
+                                arguments: [
+                                    mutationID, mutationID, "table-orders", "orders", "preserved", "field-id", "string",
+                                    1, protocolTestSchemaHash, "2026-01-01T10:00:00.000000Z",
+                                    "2026-01-01T10:00:00.000000Z", "2026-01-01T10:00:00.000000Z",
+                                ]
+                            )
+                        }
                     }
-                    return try self.mockResponse(statusCode: 409, json: [
-                        "error": [
-                            "code": "rebuild_restart_required",
-                            "message": "stale rebuild",
-                            "retryable": false,
-                            "scope_id": self.scopeID,
-                        ],
-                    ])
+                    return syncEngineResponse(request, statusCode: 409, body: restartRequiredBody)
                 default:
-                    return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_restarted"))
+                    return syncEngineResponse(request, body: restartedRebuildBody)
                 }
             } else if path.hasSuffix("/sync/pull") {
-                pullRequestCount += 1
-                if pullRequestCount == 1 {
-                    return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                let pullRequestCount = requestState.withLock { state in
+                    state.pullRequestCount += 1
+                    return state.pullRequestCount
                 }
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 1,
-                    "scope_cursors": [otherScopeID: "other_scope_cursor_next"],
-                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
-                    "rebuild": [self.scopeID],
-                    "has_more": false,
-                    "checksums": [
-                        self.scopeID: try self.checksumJSONObject(self.emptyScopeChecksum),
-                        otherScopeID: try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
-                    ],
-                ])
+                if pullRequestCount == 1 {
+                    return syncEngineResponse(request, body: firstPullBody)
+                }
+                return syncEngineResponse(request, body: secondPullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv()
-        databaseForHandler = db
+        databaseForHandler.withLock { $0 = db }
         addTeardownBlock { await engine.stop() }
         try await engine.start()
         try db.writeTransaction { connection in
@@ -1045,8 +1315,8 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.syncNow()
 
-        XCTAssertEqual(rebuildRequestCount, 3)
-        XCTAssertNotEqual(rebuildIDs[1], rebuildIDs[2])
+        XCTAssertEqual(requestState.withLock { $0.rebuildRequestCount }, 3)
+        XCTAssertNotEqual(requestState.withLock { $0.rebuildIDs[1] }, requestState.withLock { $0.rebuildIDs[2] })
         XCTAssertEqual(
             try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["preserved"])?["ship_address"] as String?,
             "keep this row"
@@ -1067,54 +1337,72 @@ final class SyncEngineTests: XCTestCase {
             serverVersion: "server-version-checksum"
         )
         let rebuiltChecksum = try authoritativeScopeChecksum([rebuiltRecord])
-        var rebuildRequestCount = 0
-        var rebuildIDs: [String] = []
-        var stateBeforeReplacement: LocalScopeState?
-        var databaseForHandler: SynchroDatabase!
+        let requestState = OSAllocatedUnfairLock(initialState: (
+            rebuildRequestCount: 0,
+            rebuildIDs: [String](),
+            stateBeforeReplacement: Optional<LocalScopeState>.none
+        ))
+        let databaseForHandler = OSAllocatedUnfairLock<SynchroDatabase?>(initialState: nil)
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let firstRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuiltRecord.json],
+            finalCursor: "scope_cursor_bad_checksum",
+            checksum: emptyScopeChecksum
+        ))
+        let recoveredRebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [rebuiltRecord.json],
+            finalCursor: "scope_cursor_recovered",
+            checksum: rebuiltChecksum
+        ))
+        let pullBody = try syncEngineJSONData(scopePullJSON(
+            cursor: "scope_cursor_recovered",
+            checksum: rebuiltChecksum
+        ))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                rebuildRequestCount += 1
                 let body = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: try XCTUnwrap(request.bodyData())) as? [String: Any]
                 )
-                rebuildIDs.append(try XCTUnwrap(body["rebuild_id"] as? String))
+                let rebuildID = try XCTUnwrap(body["rebuild_id"] as? String)
+                let rebuildRequestCount = requestState.withLock { state in
+                    state.rebuildRequestCount += 1
+                    state.rebuildIDs.append(rebuildID)
+                    return state.rebuildRequestCount
+                }
                 if rebuildRequestCount == 1 {
-                    return try self.mockResponse(json: self.rebuildJSON(
-                        records: [rebuiltRecord.json],
-                        finalCursor: "scope_cursor_bad_checksum",
-                        checksum: self.emptyScopeChecksum
-                    ))
+                    return syncEngineResponse(request, body: firstRebuildBody)
                 }
-                stateBeforeReplacement = try databaseForHandler.readTransaction { connection in
-                    try SynchroMeta.getScope(connection, scopeID: self.scopeID)
+                let stateBeforeReplacement = try databaseForHandler.withLock { database in
+                    try XCTUnwrap(database).readTransaction { connection in
+                        try SynchroMeta.getScope(connection, scopeID: scopeID)
+                    }
                 }
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [rebuiltRecord.json],
-                    finalCursor: "scope_cursor_recovered",
-                    checksum: rebuiltChecksum
-                ))
+                requestState.withLock { $0.stateBeforeReplacement = stateBeforeReplacement }
+                return syncEngineResponse(request, body: recoveredRebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(
-                    cursor: "scope_cursor_recovered",
-                    checksum: rebuiltChecksum
-                ))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv()
-        databaseForHandler = db
+        databaseForHandler.withLock { $0 = db }
         addTeardownBlock { await engine.stop() }
         try await engine.start()
 
-        XCTAssertEqual(rebuildRequestCount, 2)
-        XCTAssertNotEqual(rebuildIDs[0], rebuildIDs[1])
-        XCTAssertNil(stateBeforeReplacement?.cursor)
-        XCTAssertNil(stateBeforeReplacement?.checksum)
+        XCTAssertEqual(requestState.withLock { $0.rebuildRequestCount }, 2)
+        XCTAssertNotEqual(requestState.withLock { $0.rebuildIDs[0] }, requestState.withLock { $0.rebuildIDs[1] })
+        let replacementStateWasCleared = requestState.withLock { state in
+            (state.stateBeforeReplacement?.cursor == nil, state.stateBeforeReplacement?.checksum == nil)
+        }
+        XCTAssertTrue(replacementStateWasCleared.0)
+        XCTAssertTrue(replacementStateWasCleared.1)
         let scope = try db.readTransaction { connection in
             try SynchroMeta.getScope(connection, scopeID: scopeID)
         }
@@ -1125,19 +1413,23 @@ final class SyncEngineTests: XCTestCase {
     func testFirstStartBindsClientAndRejectsMismatchBeforeHTTP() async throws {
         let dbPath = tempDBPath()
         let requestCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             requestCount.withLock { $0 += 1 }
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (firstEngine, firstDatabase) = try makeIntegrationEnv(
@@ -1185,27 +1477,26 @@ final class SyncEngineTests: XCTestCase {
         let seedScopeID = "global"
         let seedReceipt = "seed-receipt"
         let scopeSetVersion: Int64 = 7
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
+        let connectBody = try syncEngineJSONData([
+            "server_time": "2026-01-01T12:00:00.000Z",
+            "protocol_version": 3,
+            "client_generation": 1,
+            "scope_set_version": scopeSetVersion,
+            "schema": [
+                "version": 1,
+                "hash": protocolTestSchemaHash,
+                "action": "none",
+            ],
+            "scopes": ["add": [] as [Any], "remove": [] as [Any]],
+            "scope_cursor_updates": [:] as [String: Any],
+        ])
 
         MockURLProtocol.requestHandler = { request in
             guard request.url!.path.hasSuffix("/sync/connect") else {
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
             }
-            return try self.mockResponse(json: [
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "protocol_version": 3,
-                "client_generation": 1,
-                "scope_set_version": scopeSetVersion,
-                "schema": [
-                    "version": 1,
-                    "hash": protocolTestSchemaHash,
-                    "action": "none",
-                ],
-                "scopes": [
-                    "add": [] as [Any],
-                    "remove": [] as [Any],
-                ],
-                "scope_cursor_updates": [:] as [String: Any],
-            ])
+            return syncEngineResponse(request, body: connectBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(clientID: "seed-client")
@@ -1240,13 +1531,15 @@ final class SyncEngineTests: XCTestCase {
         let validReceipt = "valid-seed-receipt"
         let invalidReceipt = "invalid-seed-receipt"
         let requestBody = OSAllocatedUnfairLock(initialState: Data?.none)
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
+        let captureStopBody = try syncEngineJSONData(["error": "stop after request capture"])
 
         MockURLProtocol.requestHandler = { request in
             guard request.url!.path.hasSuffix("/sync/connect") else {
-                return try self.mockResponse(statusCode: 400, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 400, body: unexpectedBody)
             }
             requestBody.withLock { $0 = request.bodyData() }
-            return try self.mockResponse(statusCode: 400, json: ["error": "stop after request capture"])
+            return syncEngineResponse(request, statusCode: 400, body: captureStopBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(clientID: "seed-client", maxRetryAttempts: 0)
@@ -1322,8 +1615,9 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testPortableSeedBootstrapLeavesClientBindingUnset() async throws {
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         let (engine, db) = try makeIntegrationEnv(clientID: "seed-client")
         addTeardownBlock {
@@ -1400,26 +1694,28 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testRetryBackoffPersistsBeforeDelay() async throws {
-        var pullRequestBody: String?
+        let pullRequestBody = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullRequestBody = String(data: request.bodyData()!, encoding: .utf8)
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                pullRequestBody.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "60"]
-                )!
-                return (response, data)
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -1431,7 +1727,7 @@ final class SyncEngineTests: XCTestCase {
             try SynchroMeta.getBackoffRecord(db)
         }
         XCTAssertEqual(backoff?.resumeState, .pulling)
-        XCTAssertEqual(backoff?.workIdentity, pullRequestBody)
+        XCTAssertEqual(backoff?.workIdentity, pullRequestBody.withLock { $0 })
         XCTAssertEqual(backoff?.retryClassification, .http503)
         XCTAssertEqual(backoff?.attemptCount, 1)
         XCTAssertGreaterThan(backoff?.nextRetryAtMS ?? 0, Int64(Date().timeIntervalSince1970 * 1_000))
@@ -1471,6 +1767,10 @@ final class SyncEngineTests: XCTestCase {
 
         let firstConnectAtMS = OSAllocatedUnfairLock<Int64?>(initialState: nil)
         let reconnectStarted = expectation(description: "reconnect begins after the stored deadline")
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
@@ -1481,13 +1781,13 @@ final class SyncEngineTests: XCTestCase {
                     }
                 }
                 reconnectStarted.fulfill()
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, recoveredDatabase) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID)
@@ -1521,17 +1821,22 @@ final class SyncEngineTests: XCTestCase {
         let callLog = OSAllocatedUnfairLock(initialState: [String]())
         let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
         let replayedRequestJSON = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectResumeJSON)
+        let unexpectedRebuildBody = try syncEngineJSONData(["error": "unexpected rebuild"])
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
                 callLog.withLock { $0.append("connect") }
-                return try self.mockResponse(json: self.connectResumeJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/push") {
                 callLog.withLock { $0.append("push") }
-                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+                return try syncEngineAcceptingPushResponse(request, schema: pushSchema, pushedRecordIDs: pushedRecordIDs)
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.withLock { $0.append("rebuild") }
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected rebuild"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedRebuildBody)
             } else if path.hasSuffix("/sync/pull") {
                 let isReplay = callLog.withLock { log -> Bool in
                     log.append("pull")
@@ -1540,9 +1845,9 @@ final class SyncEngineTests: XCTestCase {
                 if isReplay {
                     replayedRequestJSON.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, recoveredDatabase) = try makeIntegrationEnv(
@@ -1582,23 +1887,30 @@ final class SyncEngineTests: XCTestCase {
         }
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
         let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        let handlerDatabase = OSAllocatedUnfairLock<SynchroDatabase?>(initialState: recoveredDatabase)
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectResumeJSON)
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectResumeJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/push") {
-                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+                return try syncEngineAcceptingPushResponse(request, schema: pushSchema, pushedRecordIDs: pushedRecordIDs)
             } else if path.hasSuffix("/sync/pull") {
                 // The pull after the startup push is the last startup step before the observer install.
                 if pullCount.withLock({ count -> Int in count += 1; return count }) == 2 {
-                    _ = try recoveredDatabase.execute(
-                        "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
-                        params: ["w2", "during startup", "u1", "2026-01-01T11:00:00.000Z"]
-                    )
+                    try handlerDatabase.withLock { database in
+                        _ = try XCTUnwrap(database).execute(
+                            "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
+                            params: ["w2", "during startup", "u1", "2026-01-01T11:00:00.000Z"]
+                        )
+                    }
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         try await engine.start()
@@ -1615,18 +1927,23 @@ final class SyncEngineTests: XCTestCase {
 
     func testPendingCountPollingDoesNotDelayTheDebouncedPush() async throws {
         let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             } else if path.hasSuffix("/sync/push") {
-                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+                return try syncEngineAcceptingPushResponse(request, schema: pushSchema, pushedRecordIDs: pushedRecordIDs)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         let pushDebounce: TimeInterval = 0.3
         let (engine, database) = try makeIntegrationEnv(pushDebounce: pushDebounce, syncInterval: 3_600)
@@ -1782,23 +2099,28 @@ final class SyncEngineTests: XCTestCase {
         let callLog = OSAllocatedUnfairLock(initialState: [String]())
         let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
         let replayedRequestJSON = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectResumeJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_2"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_3"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
                 callLog.withLock { $0.append("connect") }
-                return try self.mockResponse(json: self.connectResumeJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/push") {
                 callLog.withLock { $0.append("push") }
-                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+                return try syncEngineAcceptingPushResponse(request, schema: pushSchema, pushedRecordIDs: pushedRecordIDs)
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.withLock { $0.append("rebuild") }
                 replayedRequestJSON.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
                 callLog.withLock { $0.append("pull") }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_3"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, recoveredDatabase) = try makeIntegrationEnv(
@@ -1887,61 +2209,73 @@ final class SyncEngineTests: XCTestCase {
         }
         try database.close()
 
-        var callLog: [String] = []
-        var replayedRequestJSON: String?
+        let handlerState = OSAllocatedUnfairLock(initialState: (
+            callLog: [String](),
+            replayedRequestJSON: Optional<String>.none
+        ))
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let scopeID = scopeID
+        let connectBody = try syncEngineJSONData(connectResumeJSON)
+        let rebuiltScopeBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_2"))
+        let otherRebuildBody = try syncEngineJSONData([
+            "scope": otherScopeID,
+            "records": [] as [Any],
+            "cursor": NSNull(),
+            "has_more": false,
+            "final_scope_cursor": "other_scope_cursor_1",
+            "checksum": try checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+        ])
+        let pullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 1,
+            "scope_cursors": [scopeID: "scope_cursor_3", otherScopeID: "other_scope_cursor_2"],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [
+                scopeID: try checksumJSONObject(emptyScopeChecksum),
+                otherScopeID: try checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
+            ],
+        ])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                callLog.append("connect")
-                return try self.mockResponse(json: self.connectResumeJSON)
+                handlerState.withLock { $0.callLog.append("connect") }
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/push") {
-                callLog.append("push")
+                handlerState.withLock { $0.callLog.append("push") }
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let accepted = try (body["mutations"] as! [[String: Any]]).map {
-                    try self.acceptedPushOutcome(
+                    try syncEngineAcceptedPushOutcome(
                         mutation: $0,
+                        schema: pushSchema,
                         updatedAt: "2026-01-01T14:00:00.000000Z",
                         serverVersion: "2026-01-01T14:00:00.000000Z"
                     )
                 }
-                return try self.mockResponse(json: [
+                return try syncEngineResponse(request, body: syncEngineJSONData([
                     "batch_id": body["batch_id"]!,
                     "server_time": "2026-01-01T14:00:00.000Z",
                     "accepted": accepted,
                     "rejected": [] as [Any],
-                ])
+                ]))
             } else if path.hasSuffix("/sync/rebuild") {
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 if body["scope"] as? String == otherScopeID {
-                    callLog.append("rebuild other")
-                    return try self.mockResponse(json: [
-                        "scope": otherScopeID,
-                        "records": [] as [Any],
-                        "cursor": NSNull(),
-                        "has_more": false,
-                        "final_scope_cursor": "other_scope_cursor_1",
-                        "checksum": try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
-                    ])
+                    handlerState.withLock { $0.callLog.append("rebuild other") }
+                    return syncEngineResponse(request, body: otherRebuildBody)
                 }
-                callLog.append("rebuild")
-                replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_2"))
+                handlerState.withLock { state in
+                    state.callLog.append("rebuild")
+                    state.replayedRequestJSON = String(data: request.bodyData()!, encoding: .utf8)
+                }
+                return syncEngineResponse(request, body: rebuiltScopeBody)
             } else if path.hasSuffix("/sync/pull") {
-                callLog.append("pull")
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 1,
-                    "scope_cursors": [self.scopeID: "scope_cursor_3", otherScopeID: "other_scope_cursor_2"],
-                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [
-                        self.scopeID: try self.checksumJSONObject(self.emptyScopeChecksum),
-                        otherScopeID: try self.checksumJSONObject(protocolEmptyScopeChecksum(scopeID: otherScopeID)),
-                    ],
-                ])
+                handlerState.withLock { $0.callLog.append("pull") }
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, recoveredDatabase) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID)
@@ -1951,8 +2285,8 @@ final class SyncEngineTests: XCTestCase {
         }
         try await engine.start()
 
-        XCTAssertEqual(callLog, ["connect", "rebuild", "push", "rebuild other", "pull"])
-        XCTAssertEqual(replayedRequestJSON, requestJSON)
+        XCTAssertEqual(handlerState.withLock { $0.callLog }, ["connect", "rebuild", "push", "rebuild other", "pull"])
+        XCTAssertEqual(handlerState.withLock { $0.replayedRequestJSON }, requestJSON)
         XCTAssertFalse(try ChangeTracker(database: recoveredDatabase).hasPendingChanges())
         XCTAssertNil(try recoveredDatabase.readTransaction { db in
             try SynchroMeta.getBackoffRecord(db)
@@ -1960,26 +2294,28 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testStopRetainsDurableBackoffRecord() async throws {
-        var pullCallCount = 0
+        let pullCallCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                pullCallCount.withLock { $0 += 1 }
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "60"]
-                )!
-                return (response, data)
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -1994,50 +2330,57 @@ final class SyncEngineTests: XCTestCase {
             try SynchroMeta.getBackoffRecord(db)
         }
         XCTAssertEqual(afterStop, beforeStop)
-        XCTAssertEqual(pullCallCount, 1)
+        XCTAssertEqual(pullCallCount.withLock { $0 }, 1)
     }
 
     func testPushBackoffStoresSealedBatchIdentity() async throws {
-        var failPush = false
-        var failedPushRequest: String?
+        let pushState = OSAllocatedUnfairLock(initialState: (
+            failPush: false,
+            failedPushRequest: Optional<String>.none
+        ))
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-                if failPush {
-                    failedPushRequest = String(data: request.bodyData()!, encoding: .utf8)
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
+                if pushState.withLock({ $0.failPush }) {
+                    pushState.withLock { $0.failedPushRequest = String(data: request.bodyData()!, encoding: .utf8) }
+                    return syncEngineResponse(
+                        request,
                         statusCode: 503,
-                        httpVersion: nil,
+                        body: temporaryUnavailableBody,
                         headerFields: ["Retry-After": "60"]
-                    )!
-                    return (response, data)
+                    )
                 }
                 let mutations = body["mutations"] as! [[String: Any]]
                 let accepted = try mutations.map {
-                    try self.acceptedPushOutcome(
+                    try syncEngineAcceptedPushOutcome(
                         mutation: $0,
+                        schema: pushSchema,
                         updatedAt: "2026-01-01T14:00:00.000000Z",
                         serverVersion: "2026-01-01T14:00:00.000000Z"
                     )
                 }
-                return try self.mockResponse(json: [
+                return try syncEngineResponse(request, body: syncEngineJSONData([
                     "batch_id": body["batch_id"]!,
                     "server_time": "2026-01-01T14:00:00.000Z",
                     "accepted": accepted,
                     "rejected": [] as [Any],
-                ])
+                ]))
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -2047,7 +2390,7 @@ final class SyncEngineTests: XCTestCase {
             "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
             params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
         )
-        failPush = true
+        pushState.withLock { $0.failPush = true }
 
         do {
             try await engine.syncNow()
@@ -2064,7 +2407,7 @@ final class SyncEngineTests: XCTestCase {
         )
         XCTAssertEqual(backoff?.resumeState, .pushing)
         XCTAssertEqual(backoff?.workIdentity, sealedBatch?["batch_id"] as String?)
-        XCTAssertEqual(sealedBatch?["request_json"] as String?, failedPushRequest)
+        XCTAssertEqual(sealedBatch?["request_json"] as String?, pushState.withLock { $0.failedPushRequest })
     }
 
     // A pending intent that no push can send still makes a normal cycle enter its push stage.
@@ -2074,34 +2417,37 @@ final class SyncEngineTests: XCTestCase {
         let resumeConnect = OSAllocatedUnfairLock(initialState: false)
         let callLog = OSAllocatedUnfairLock(initialState: [String]())
         let pushedRecordIDs = OSAllocatedUnfairLock(initialState: [String]())
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let resumeConnectBody = try syncEngineJSONData(connectResumeJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
                 callLog.withLock { $0.append("connect") }
-                return try self.mockResponse(
-                    json: resumeConnect.withLock { $0 } ? self.connectResumeJSON : self.connectJSON
-                )
+                return syncEngineResponse(request, body: resumeConnect.withLock { $0 } ? resumeConnectBody : connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
                 callLog.withLock { $0.append("rebuild") }
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
                 callLog.withLock { $0.append("push") }
                 if failPush.withLock({ $0 }) {
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
+                    return syncEngineResponse(
+                        request,
                         statusCode: 503,
-                        httpVersion: nil,
+                        body: temporaryUnavailableBody,
                         headerFields: ["Retry-After": "60"]
-                    )!
-                    return (response, data)
+                    )
                 }
-                return try self.acceptingPushResponse(request, pushedRecordIDs: pushedRecordIDs)
+                return try syncEngineAcceptingPushResponse(request, schema: pushSchema, pushedRecordIDs: pushedRecordIDs)
             } else if path.hasSuffix("/sync/pull") {
                 callLog.withLock { $0.append("pull") }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (failingEngine, failingDatabase) = try makeIntegrationEnv(dbPath: dbPath, maxRetryAttempts: 0)
@@ -2168,24 +2514,25 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testRebuildBackoffStoresExactRequestJSON() async throws {
-        var rebuildRequestBody: String?
+        let rebuildRequestBody = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                rebuildRequestBody = String(data: request.bodyData()!, encoding: .utf8)
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                rebuildRequestBody.withLock { $0 = String(data: request.bodyData()!, encoding: .utf8) }
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "60"]
-                )!
-                return (response, data)
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -2196,7 +2543,7 @@ final class SyncEngineTests: XCTestCase {
             try SynchroMeta.getBackoffRecord(db)
         }
         XCTAssertEqual(backoff?.resumeState, .rebuilding)
-        XCTAssertEqual(backoff?.workIdentity, rebuildRequestBody)
+        XCTAssertEqual(backoff?.workIdentity, rebuildRequestBody.withLock { $0 })
         XCTAssertEqual(backoff?.retryClassification, .http503)
     }
 
@@ -2204,13 +2551,19 @@ final class SyncEngineTests: XCTestCase {
         let pushRequestBodies = OSAllocatedUnfairLock(initialState: [Data]())
         let retryStartedAtMS = OSAllocatedUnfairLock(initialState: Int64?.none)
         let resumed = expectation(description: "durable push retry resumed")
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
                 let requestBody = try XCTUnwrap(request.bodyData())
                 let pushCallCount = pushRequestBodies.withLock { requestBodies in
@@ -2218,10 +2571,12 @@ final class SyncEngineTests: XCTestCase {
                     return requestBodies.count
                 }
                 if pushCallCount == 1 {
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
-                                                   headerFields: ["Retry-After": "1"])!
-                    return (response, data)
+                    return syncEngineResponse(
+                        request,
+                        statusCode: 503,
+                        body: temporaryUnavailableBody,
+                        headerFields: ["Retry-After": "1"]
+                    )
                 } else {
                     retryStartedAtMS.withLock {
                         $0 = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
@@ -2230,8 +2585,9 @@ final class SyncEngineTests: XCTestCase {
                     let body = try JSONSerialization.jsonObject(with: requestBody) as! [String: Any]
                     let mutations = body["mutations"] as! [[String: Any]]
                     let accepted: [[String: Any]] = try mutations.map {
-                        try self.acceptedPushOutcome(
+                        try syncEngineAcceptedPushOutcome(
                             mutation: $0,
+                            schema: pushSchema,
                             updatedAt: "2026-01-01T14:00:00.000000Z",
                             serverVersion: "2026-01-01T14:00:00.000000Z"
                         )
@@ -2242,12 +2598,12 @@ final class SyncEngineTests: XCTestCase {
                         "accepted": accepted,
                         "rejected": [] as [Any],
                     ]
-                    return try self.mockResponse(json: json)
+                    return try syncEngineResponse(request, body: syncEngineJSONData(json))
                 }
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(syncInterval: 3_600)
@@ -2287,27 +2643,30 @@ final class SyncEngineTests: XCTestCase {
 
     func testStopCancelsWokenSyncNowRetryAndRetainsDurableBackoff() async throws {
         let pushCallCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
                 pushCallCount.withLock { $0 += 1 }
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "1"]
-                )!
-                return (response, data)
+                )
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(syncInterval: 3_600)
@@ -2339,34 +2698,40 @@ final class SyncEngineTests: XCTestCase {
     func testPeriodicRetryExhaustionResumesDurableWorkWithoutIllegalTransition() async throws {
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
         let resumed = expectation(description: "durable periodic retry resumed")
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
+        let scopeID = scopeID
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
                 let count = pullCount.withLock { value -> Int in
                     value += 1
                     return value
                 }
                 if count == 2 {
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
+                    return syncEngineResponse(
+                        request,
                         statusCode: 503,
-                        httpVersion: nil,
+                        body: temporaryUnavailableBody,
                         headerFields: ["Retry-After": "0"]
-                    )!
-                    return (response, data)
+                    )
                 }
                 if count == 3 {
                     resumed.fulfill()
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_\(count + 1)"))
+                return try syncEngineResponse(
+                    request,
+                    body: syncEnginePullData(scopeID: scopeID, cursor: "scope_cursor_\(count + 1)")
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, database) = try makeIntegrationEnv(
@@ -2386,10 +2751,6 @@ final class SyncEngineTests: XCTestCase {
     func testRetryablePushFailurePreservesQueueAcrossRestart() async throws {
         let dbPath = tempDBPath()
         let clientID = "retryable-push-restart-device"
-        var pushCallCount = 0
-        var connectCallCount = 0
-        var shouldFailNextPush = false
-
         var initialConnect = connectJSON
         initialConnect["schema"] = [
             "version": 1,
@@ -2397,33 +2758,53 @@ final class SyncEngineTests: XCTestCase {
             "action": "none",
         ] as [String: Any]
         initialConnect.removeValue(forKey: "schema_definition")
+        let handlerState = OSAllocatedUnfairLock(initialState: (
+            pushCallCount: 0,
+            connectCallCount: 0,
+            shouldFailNextPush: false
+        ))
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let initialConnectBody = try syncEngineJSONData(initialConnect)
+        let resumeConnectBody = try syncEngineJSONData(connectResumeJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                connectCallCount += 1
-                return try self.mockResponse(json: connectCallCount == 1 ? initialConnect : self.connectResumeJSON)
+                let connectCallCount = handlerState.withLock { state in
+                    state.connectCallCount += 1
+                    return state.connectCallCount
+                }
+                return syncEngineResponse(
+                    request,
+                    body: connectCallCount == 1 ? initialConnectBody : resumeConnectBody
+                )
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
-                pushCallCount += 1
-                if shouldFailNextPush {
-                    shouldFailNextPush = false
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
+                let shouldFail = handlerState.withLock { state in
+                    state.pushCallCount += 1
+                    defer { state.shouldFailNextPush = false }
+                    return state.shouldFailNextPush
+                }
+                if shouldFail {
+                    return syncEngineResponse(
+                        request,
                         statusCode: 503,
-                        httpVersion: nil,
+                        body: temporaryUnavailableBody,
                         headerFields: ["Retry-After": "0.01"]
-                    )!
-                    return (response, data)
+                    )
                 }
 
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let mutations = body["mutations"] as! [[String: Any]]
                 let accepted: [[String: Any]] = try mutations.map {
-                    try self.acceptedPushOutcome(
+                    try syncEngineAcceptedPushOutcome(
                         mutation: $0,
+                        schema: pushSchema,
                         updatedAt: "2026-01-01T14:00:00.000000Z",
                         serverVersion: "2026-01-01T14:00:00.000000Z"
                     )
@@ -2434,11 +2815,11 @@ final class SyncEngineTests: XCTestCase {
                     "accepted": accepted,
                     "rejected": [] as [Any],
                 ]
-                return try self.mockResponse(json: json)
+                return try syncEngineResponse(request, body: syncEngineJSONData(json))
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine1, db1) = try makeIntegrationEnv(dbPath: dbPath, clientID: clientID, maxRetryAttempts: 0)
@@ -2454,7 +2835,7 @@ final class SyncEngineTests: XCTestCase {
                 "INSERT INTO orders (id, ship_address, user_id, updated_at) VALUES (?, ?, ?, ?)",
                 params: ["w1", "123 Main St", "u1", "2026-01-01T10:00:00.000Z"]
             )
-            shouldFailNextPush = true
+            handlerState.withLock { $0.shouldFailNextPush = true }
             try await engine1.syncNow()
             XCTFail("expected retryable push failure to abort the first sync")
         } catch {
@@ -2487,7 +2868,7 @@ final class SyncEngineTests: XCTestCase {
 
         let tracker2 = ChangeTracker(database: db2)
         XCTAssertFalse(try tracker2.hasPendingChanges())
-        XCTAssertEqual(pushCallCount, 2)
+        XCTAssertEqual(handlerState.withLock { $0.pushCallCount }, 2)
 
         let localRow = try db2.queryOne(
             "SELECT ship_address, updated_at FROM orders WHERE id = ?",
@@ -2503,65 +2884,74 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testRenewalRequiredBatchSurvivesRetryableReconnectFailure() async throws {
-        var connectCallCount = 0
-        var pushCallCount = 0
+        let callCounts = OSAllocatedUnfairLock(initialState: (connect: 0, push: 0))
         let resumed = expectation(description: "renewal retry resumed")
+        let pushSchema = ordersLocalSchemaTable(includeNotes: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let renewedConnectBody = try syncEngineJSONData(connectGenerationRenewedJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let generationExpiredBody = try syncEngineJSONData([
+            "error": [
+                "code": "client_generation_expired",
+                "message": "generation expired",
+                "retryable": false,
+                "current_client_generation": 2,
+            ] as [String: Any],
+        ])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                connectCallCount += 1
+                let connectCallCount = callCounts.withLock { state in
+                    state.connect += 1
+                    return state.connect
+                }
                 if connectCallCount == 1 {
-                    return try self.mockResponse(json: self.connectJSON)
+                    return syncEngineResponse(request, body: connectBody)
                 }
                 if connectCallCount == 2 {
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
+                    return syncEngineResponse(
+                        request,
                         statusCode: 503,
-                        httpVersion: nil,
+                        body: temporaryUnavailableBody,
                         headerFields: ["Retry-After": "0.01"]
-                    )!
-                    return (response, data)
+                    )
                 }
-                return try self.mockResponse(json: self.connectGenerationRenewedJSON)
+                return syncEngineResponse(request, body: renewedConnectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
-                pushCallCount += 1
+                let pushCallCount = callCounts.withLock { state in
+                    state.push += 1
+                    return state.push
+                }
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 if pushCallCount == 1 {
-                    return try self.mockResponse(
-                        statusCode: 409,
-                        json: [
-                            "error": [
-                                "code": "client_generation_expired",
-                                "message": "generation expired",
-                                "retryable": false,
-                                "current_client_generation": 2,
-                            ] as [String: Any]
-                        ]
-                    )
+                    return syncEngineResponse(request, statusCode: 409, body: generationExpiredBody)
                 }
                 resumed.fulfill()
                 let mutations = body["mutations"] as! [[String: Any]]
                 let accepted = try mutations.map {
-                    try self.acceptedPushOutcome(
+                    try syncEngineAcceptedPushOutcome(
                         mutation: $0,
+                        schema: pushSchema,
                         updatedAt: "2026-01-01T14:00:00.000000Z",
                         serverVersion: "server-generation-2"
                     )
                 }
-                return try self.mockResponse(json: [
+                return try syncEngineResponse(request, body: syncEngineJSONData([
                     "batch_id": body["batch_id"]!,
                     "server_time": "2026-01-01T14:00:00.000Z",
                     "accepted": accepted,
                     "rejected": [] as [Any],
-                ])
+                ]))
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 1, syncInterval: 0.2)
@@ -2584,8 +2974,8 @@ final class SyncEngineTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
 
-        XCTAssertEqual(connectCallCount, 3)
-        XCTAssertEqual(pushCallCount, 2)
+        XCTAssertEqual(callCounts.withLock { $0.connect }, 3)
+        XCTAssertEqual(callCounts.withLock { $0.push }, 2)
         XCTAssertFalse(try ChangeTracker(database: db).hasPendingChanges())
         let states = try db.query("SELECT state FROM _synchro_push_batches ORDER BY created_at, batch_id", params: nil)
             .compactMap { $0["state"] as String? }
@@ -2594,37 +2984,43 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testRetryableStartupFailureDoesNotRequireAppRestart() async throws {
-        var pullCallCount = 0
+        let pullCallCount = OSAllocatedUnfairLock(initialState: 0)
+        let statuses = OSAllocatedUnfairLock(initialState: [String]())
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                pullCallCount += 1
-                if pullCallCount == 1 {
-                    let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                    let response = HTTPURLResponse(
-                        url: request.url!,
-                        statusCode: 503,
-                        httpVersion: nil,
-                        headerFields: ["Retry-After": "0.01"]
-                    )!
-                    return (response, data)
+                let pullRequestCount = pullCallCount.withLock { count in
+                    count += 1
+                    return count
                 }
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                if pullRequestCount == 1 {
+                    return syncEngineResponse(
+                        request,
+                        statusCode: 503,
+                        body: temporaryUnavailableBody,
+                        headerFields: ["Retry-After": "0.01"]
+                    )
+                }
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv(maxRetryAttempts: 0)
         addTeardownBlock { await engine.stop() }
 
-        var statuses: [String] = []
         let _ = engine.onStatusChange { status in
-            statuses.append(status.rawValue)
+            statuses.withLock { $0.append(status.rawValue) }
         }
 
         let initialSyncCompleted = expectation(description: "initial sync completed after internal retry")
@@ -2642,9 +3038,9 @@ final class SyncEngineTests: XCTestCase {
 
         await fulfillment(of: [initialSyncCompleted], timeout: 3.0)
 
-        XCTAssertEqual(pullCallCount, 2)
-        XCTAssertTrue(statuses.contains("backoff"))
-        XCTAssertEqual(statuses.last, "ready")
+        XCTAssertEqual(pullCallCount.withLock { $0 }, 2)
+        XCTAssertTrue(statuses.withLock { $0.contains("backoff") })
+        XCTAssertEqual(statuses.withLock { $0.last }, "ready")
 
         let scope = try db.readTransaction { db in
             try SynchroMeta.getAllScopes(db).first
@@ -2653,21 +3049,26 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testNonRetryableStartupFailureStillThrowsAndAllowsRestart() async throws {
-        var returnSuccess = false
+        let returnSuccess = OSAllocatedUnfairLock(initialState: false)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let fatalBootstrapBody = try syncEngineJSONData(["error": "fatal bootstrap"])
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                if returnSuccess {
-                    return try self.mockResponse(json: self.connectJSON)
+                if returnSuccess.withLock({ $0 }) {
+                    return syncEngineResponse(request, body: connectBody)
                 }
-                return try self.mockResponse(statusCode: 500, json: ["error": "fatal bootstrap"])
+                return syncEngineResponse(request, statusCode: 500, body: fatalBootstrapBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, _) = try makeIntegrationEnv()
@@ -2680,33 +3081,32 @@ final class SyncEngineTests: XCTestCase {
             XCTAssertFalse(error is RetryableError)
         }
 
-        returnSuccess = true
+        returnSuccess.withLock { $0 = true }
         try await engine.retryAfterError()
     }
 
     func testConnectUnsupportedFailsExplicitly() async throws {
+        let unsupportedBody = try syncEngineJSONData([
+            "server_time": "2026-01-01T12:00:00.000Z",
+            "protocol_version": 3,
+            "client_generation": 1,
+            "scope_set_version": 1,
+            "schema": [
+                "version": 2,
+                "hash": String(repeating: "f", count: 64),
+                "action": "unsupported",
+                "reason": "unknown_schema_lineage",
+            ],
+            "scopes": ["add": [] as [Any], "remove": [] as [Any]],
+            "scope_cursor_updates": [:] as [String: Any],
+        ])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: [
-                    "server_time": "2026-01-01T12:00:00.000Z",
-                    "protocol_version": 3,
-                    "client_generation": 1,
-                    "scope_set_version": 1,
-                    "schema": [
-                        "version": 2,
-                        "hash": String(repeating: "f", count: 64),
-                        "action": "unsupported",
-                        "reason": "unknown_schema_lineage",
-                    ],
-                    "scopes": [
-                        "add": [] as [Any],
-                        "remove": [] as [Any],
-                    ] as [String: Any],
-                    "scope_cursor_updates": [:] as [String: Any],
-                ])
+                return syncEngineResponse(request, body: unsupportedBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, _) = try makeIntegrationEnv()
@@ -2774,63 +3174,72 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testStatusTransitionsDuringSyncCycle() async throws {
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, _) = try makeIntegrationEnv()
         addTeardownBlock { await engine.stop() }
 
-        var statuses: [String] = []
+        let statuses = OSAllocatedUnfairLock(initialState: [String]())
         let _ = engine.onStatusChange { status in
-            statuses.append(status.rawValue)
+            statuses.withLock { $0.append(status.rawValue) }
         }
 
         try await engine.start()
 
-        XCTAssertEqual(statuses.last, "ready")
-        XCTAssertTrue(statuses.contains("connecting"))
-        XCTAssertTrue(statuses.contains("rebuilding"))
-        XCTAssertTrue(statuses.contains("pulling"))
+        XCTAssertEqual(statuses.withLock { $0.last }, "ready")
+        XCTAssertTrue(statuses.withLock { $0.contains("connecting") })
+        XCTAssertTrue(statuses.withLock { $0.contains("rebuilding") })
+        XCTAssertTrue(statuses.withLock { $0.contains("pulling") })
 
-        statuses.removeAll()
+        statuses.withLock { $0.removeAll() }
         try await engine.syncNow()
-        XCTAssertEqual(statuses, ["pulling", "ready"])
+        XCTAssertEqual(statuses.withLock { $0 }, ["pulling", "ready"])
 
-        statuses.removeAll()
+        statuses.withLock { $0.removeAll() }
         await engine.stop()
-        XCTAssertEqual(statuses, ["stopped"])
+        XCTAssertEqual(statuses.withLock { $0 }, ["stopped"])
     }
 
     func testConflictCallbackFiresDuringSyncCycle() async throws {
-        var receivedConflicts: [ConflictEvent] = []
+        let receivedConflicts = OSAllocatedUnfairLock(initialState: [ConflictEvent]())
+        let conflictRecord = try authoritativeRecord(
+            id: "w1",
+            shipAddress: "Server Wins",
+            updatedAt: "2026-01-01T15:00:00.000000Z",
+            serverVersion: "2026-01-01T15:00:00.000000Z"
+        )
+        let conflictRowData = try JSONSerialization.data(withJSONObject: conflictRecord.json["row"]!)
+        let conflictChecksumData = try JSONSerialization.data(withJSONObject: conflictRecord.json["row_checksum"]!)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             } else if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             } else if path.hasSuffix("/sync/push") {
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let mutations = body["mutations"] as! [[String: Any]]
                 let rejected: [[String: Any]] = try mutations.map { mutation in
                     let pk = mutation["pk"] as! [String: Any]
-                    let id = pk["field-id"] as! String
-                    let record = try self.authoritativeRecord(
-                        id: id,
-                        shipAddress: "Server Wins",
-                        updatedAt: "2026-01-01T15:00:00.000000Z",
-                        serverVersion: "2026-01-01T15:00:00.000000Z"
-                    )
                     return [
                         "mutation_id": mutation["mutation_id"]!,
                         "table": mutation["table"]!,
@@ -2839,8 +3248,8 @@ final class SyncEngineTests: XCTestCase {
                         "status": "conflict",
                         "code": "version_conflict",
                         "message": "server version is newer",
-                        "server_row": record.json["row"]!,
-                        "row_checksum": record.json["row_checksum"]!,
+                        "server_row": try JSONSerialization.jsonObject(with: conflictRowData),
+                        "row_checksum": try JSONSerialization.jsonObject(with: conflictChecksumData),
                         "server_version": "2026-01-01T15:00:00.000000Z",
                     ] as [String: Any]
                 }
@@ -2850,18 +3259,18 @@ final class SyncEngineTests: XCTestCase {
                     "accepted": [] as [Any],
                     "rejected": rejected,
                 ]
-                return try self.mockResponse(json: json)
+                return try syncEngineResponse(request, body: syncEngineJSONData(json))
             } else if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, db) = try makeIntegrationEnv()
         addTeardownBlock { await engine.stop() }
 
         let _ = engine.onConflict { event in
-            receivedConflicts.append(event)
+            receivedConflicts.withLock { $0.append(event) }
         }
 
         try await engine.start()
@@ -2873,10 +3282,11 @@ final class SyncEngineTests: XCTestCase {
 
         try await engine.syncNow()
 
-        XCTAssertEqual(receivedConflicts.count, 1)
-        XCTAssertEqual(receivedConflicts[0].table, "orders")
-        XCTAssertEqual(receivedConflicts[0].recordID, "w1")
-        XCTAssertEqual(receivedConflicts[0].serverData?["ship_address"], AnyCodable("Server Wins"))
+        let conflicts = receivedConflicts.withLock { $0 }
+        XCTAssertEqual(conflicts.count, 1)
+        XCTAssertEqual(conflicts[0].table, "orders")
+        XCTAssertEqual(conflicts[0].recordID, "w1")
+        XCTAssertEqual(conflicts[0].serverData?["ship_address"], AnyCodable("Server Wins"))
 
         let row = try db.queryOne("SELECT ship_address FROM orders WHERE id = ?", params: ["w1"])
         XCTAssertEqual(row?["ship_address"] as String?, "Server Wins")
@@ -2888,16 +3298,24 @@ final class SyncEngineTests: XCTestCase {
     func testRejectedMutationsRemainInspectableAcrossRestart() async throws {
         let dbPath = tempDBPath()
         let clientID = "rejection-persistence-device"
-        var connectCallCount = 0
+        let connectCallCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let resumeConnectBody = try syncEngineJSONData(connectResumeJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
 
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             switch path {
             case _ where path.hasSuffix("/sync/connect"):
-                connectCallCount += 1
-                return try self.mockResponse(json: connectCallCount == 1 ? self.connectJSON : self.connectResumeJSON)
+                let connectCount = connectCallCount.withLock { count in
+                    count += 1
+                    return count
+                }
+                return syncEngineResponse(request, body: connectCount == 1 ? connectBody : resumeConnectBody)
             case _ where path.hasSuffix("/sync/rebuild"):
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             case _ where path.hasSuffix("/sync/push"):
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let mutations = body["mutations"] as! [[String: Any]]
@@ -2913,16 +3331,16 @@ final class SyncEngineTests: XCTestCase {
                         "message": "explicit rejection for inspection",
                     ] as [String: Any]
                 }
-                return try self.mockResponse(json: [
+                return try syncEngineResponse(request, body: syncEngineJSONData([
                     "batch_id": body["batch_id"]!,
                     "server_time": "2026-01-01T15:00:00.000Z",
                     "accepted": [] as [Any],
                     "rejected": rejected,
-                ])
+                ]))
             case _ where path.hasSuffix("/sync/pull"):
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             default:
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
             }
         }
 
@@ -2969,26 +3387,28 @@ final class SyncEngineTests: XCTestCase {
 
     func testSyncNowDuringBackoffRejectsWithoutEnteringError() async throws {
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_backoff"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_backoff"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
                 pullCount.withLock { $0 += 1 }
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "60"]
-                )!
-                return (response, data)
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, database) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -3011,25 +3431,27 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testHugeFiniteRetryAfterSaturatesDurableBackoff() async throws {
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_huge_backoff"))
+        let temporaryUnavailableBody = try syncEngineJSONData(retryableTemporaryUnavailableError())
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_huge_backoff"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
-                let data = try JSONSerialization.data(withJSONObject: self.retryableTemporaryUnavailableError())
-                let response = HTTPURLResponse(
-                    url: request.url!,
+                return syncEngineResponse(
+                    request,
                     statusCode: 503,
-                    httpVersion: nil,
+                    body: temporaryUnavailableBody,
                     headerFields: ["Retry-After": "1" + String(repeating: "0", count: 308)]
-                )!
-                return (response, data)
+                )
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
 
         let (engine, database) = try makeIntegrationEnv(maxRetryAttempts: 0)
@@ -3055,14 +3477,15 @@ final class SyncEngineTests: XCTestCase {
         ]
 
         for (status, protocolCode, failureCode, recoveryAction) in cases {
+            let errorBody = try syncEngineJSONData([
+                "error": [
+                    "code": protocolCode.rawValue,
+                    "message": "canonical protocol failure",
+                    "retryable": false,
+                ] as [String: Any],
+            ])
             MockURLProtocol.requestHandler = { request in
-                try self.mockResponse(statusCode: status, json: [
-                    "error": [
-                        "code": protocolCode.rawValue,
-                        "message": "canonical protocol failure",
-                        "retryable": false,
-                    ] as [String: Any],
-                ])
+                syncEngineResponse(request, statusCode: status, body: errorBody)
             }
             let (engine, database) = try makeIntegrationEnv()
 
@@ -3090,20 +3513,25 @@ final class SyncEngineTests: XCTestCase {
 
     func testOversizedPushEnvelopeRecordsLocalInvalidRequestAndKeepsEveryAction() async throws {
         let pushCount = OSAllocatedUnfairLock(initialState: 0)
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_1"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_2"))
+        let unexpectedPushBody = try syncEngineJSONData(["error": "unexpected push"])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             switch path {
             case _ where path.hasSuffix("/sync/connect"):
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             case _ where path.hasSuffix("/sync/rebuild"):
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_1"))
+                return syncEngineResponse(request, body: rebuildBody)
             case _ where path.hasSuffix("/sync/pull"):
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_2"))
+                return syncEngineResponse(request, body: pullBody)
             case _ where path.hasSuffix("/sync/push"):
                 pushCount.withLock { $0 += 1 }
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected push"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedPushBody)
             default:
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
             }
         }
         // Only the client identity varies. The complete empty reserved envelope is one octet above the limit.
@@ -3168,9 +3596,10 @@ final class SyncEngineTests: XCTestCase {
 
     func testMalformedDurableFailureBecomesPublicErrorState() async throws {
         let requestCount = OSAllocatedUnfairLock(initialState: 0)
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             requestCount.withLock { $0 += 1 }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         let (engine, database) = try makeIntegrationEnv()
         addTeardownBlock { await engine.stop() }
@@ -3230,9 +3659,10 @@ final class SyncEngineTests: XCTestCase {
         await engine.stop()
 
         let requestCount = OSAllocatedUnfairLock(initialState: 0)
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             requestCount.withLock { $0 += 1 }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         let writerEntered = expectation(description: "writer blocks migration recovery")
         let writerFinished = expectation(description: "writer releases migration recovery")
@@ -3320,50 +3750,59 @@ final class SyncEngineTests: XCTestCase {
             try? originalDatabase.close()
         }
         let connectObservedTarget = OSAllocatedUnfairLock(initialState: false)
+        let handlerDatabase = OSAllocatedUnfairLock<SynchroDatabase?>(initialState: recoveredDatabase)
+        let pullBody = try syncEngineJSONData([
+            "changes": [] as [Any],
+            "scope_set_version": 0,
+            "scope_cursors": [:] as [String: Any],
+            "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
+            "rebuild": [] as [Any],
+            "has_more": false,
+            "checksums": [:] as [String: Any],
+        ])
+        let connectBody = try syncEngineJSONData([
+            "server_time": "2026-01-01T12:00:00.000Z",
+            "protocol_version": 3,
+            "client_generation": 1,
+            "scope_set_version": 0,
+            "schema": [
+                "version": targetVersion,
+                "hash": targetHash,
+                "action": "none",
+            ] as [String: Any],
+            "scopes": ["add": [] as [Any], "remove": [] as [Any]],
+            "scope_cursor_updates": [:] as [String: Any],
+        ])
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             if request.url!.path.hasSuffix("/sync/pull") {
                 // The connect assigns no scope, and a normal cycle still pulls to reconcile assignment.
-                return try self.mockResponse(json: [
-                    "changes": [] as [Any],
-                    "scope_set_version": 0,
-                    "scope_cursors": [:] as [String: Any],
-                    "scope_updates": ["add": [] as [Any], "remove": [] as [Any]],
-                    "rebuild": [] as [Any],
-                    "has_more": false,
-                    "checksums": [:] as [String: Any],
-                ])
+                return syncEngineResponse(request, body: pullBody)
             }
             guard request.url!.path.hasSuffix("/sync/connect") else {
-                return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+                return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
             }
-            let schemaState = try recoveredDatabase.readTransaction { connection in
-                (
-                    try SynchroMeta.getInt64(connection, key: .schemaVersion),
-                    try SynchroMeta.get(connection, key: .schemaHash),
-                    try SynchroMeta.getSchemaMigrationJournal(connection)
-                )
+            let schemaState = try handlerDatabase.withLock { database in
+                let database = try XCTUnwrap(database)
+                return try database.readTransaction { connection in
+                    (
+                        try SynchroMeta.getInt64(connection, key: .schemaVersion),
+                        try SynchroMeta.get(connection, key: .schemaHash),
+                        try SynchroMeta.getSchemaMigrationJournal(connection)
+                    )
+                }
             }
-            let hasTargetColumn = try recoveredDatabase.query("PRAGMA table_info(orders)", params: nil)
-                .contains { ($0["name"] as String?) == "notes" }
+            let hasTargetColumn = try handlerDatabase.withLock { database in
+                try XCTUnwrap(database).query("PRAGMA table_info(orders)", params: nil)
+                    .contains { ($0["name"] as String?) == "notes" }
+            }
             connectObservedTarget.withLock {
                 $0 = schemaState.0 == targetVersion
                     && schemaState.1 == targetHash
                     && schemaState.2 == nil
                     && hasTargetColumn
             }
-            return try self.mockResponse(json: [
-                "server_time": "2026-01-01T12:00:00.000Z",
-                "protocol_version": 3,
-                "client_generation": 1,
-                "scope_set_version": 0,
-                "schema": [
-                    "version": targetVersion,
-                    "hash": targetHash,
-                    "action": "none",
-                ] as [String: Any],
-                "scopes": ["add": [] as [Any], "remove": [] as [Any]],
-                "scope_cursor_updates": [:] as [String: Any],
-            ])
+            return syncEngineResponse(request, body: connectBody)
         }
 
         try await engine.start()
@@ -3464,18 +3903,22 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testTypedEventsFollowCommittedSchemaAndRebuildOrder() async throws {
+        let connectBody = try syncEngineJSONData(connectJSON)
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(finalCursor: "scope_cursor_events"))
+        let pullBody = try syncEngineJSONData(scopePullJSON(cursor: "scope_cursor_events_final"))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
-                return try self.mockResponse(json: self.connectJSON)
+                return syncEngineResponse(request, body: connectBody)
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(finalCursor: "scope_cursor_events"))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
-                return try self.mockResponse(json: self.scopePullJSON(cursor: "scope_cursor_events_final"))
+                return syncEngineResponse(request, body: pullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         let (engine, _) = try makeIntegrationEnv()
         addTeardownBlock { await engine.stop() }
@@ -3572,6 +4015,66 @@ final class SyncEngineTests: XCTestCase {
         let connectCount = OSAllocatedUnfairLock(initialState: 0)
         let pushCount = OSAllocatedUnfairLock(initialState: 0)
         let pullCount = OSAllocatedUnfairLock(initialState: 0)
+        let scopeID = scopeID
+        let sourceSchemaVersion = sourceSchema.version
+        let sourceSchemaHash = sourceSchema.hash
+        let targetSchemaVersion = targetSchema.version
+        let targetSchemaHash = targetSchema.hash
+        let targetRowData = try JSONSerialization.data(withJSONObject: targetRecord.json["row"]!)
+        let targetChecksumData = try JSONSerialization.data(withJSONObject: targetRecord.json["row_checksum"]!)
+        let resumeConnectBody = try syncEngineJSONData(connectResumeJSON)
+        let unsupportedConnectBody = try syncEngineJSONData([
+            "server_time": "2026-01-01T12:00:00.000Z",
+            "protocol_version": 3,
+            "client_generation": 1,
+            "scope_set_version": 1,
+            "schema": [
+                "version": targetSchemaVersion,
+                "hash": targetSchemaHash,
+                "action": "unsupported",
+                "reason": "unknown_schema_lineage",
+            ] as [String: Any],
+            "scopes": ["add": [] as [Any], "remove": [] as [Any]],
+            "scope_cursor_updates": [:] as [String: Any],
+        ])
+        let resetConnectBody = try syncEngineJSONData([
+            "server_time": "2026-01-01T12:00:00.000Z",
+            "protocol_version": 3,
+            "client_generation": 1,
+            "scope_set_version": 1,
+            "schema": [
+                "version": targetSchemaVersion,
+                "hash": targetSchemaHash,
+                "action": "rebuild_local",
+            ] as [String: Any],
+            "scopes": ["add": [] as [Any], "remove": [] as [Any]],
+            "scope_cursor_updates": [scopeID: NSNull()],
+            "schema_definition": targetManifestJSON,
+            "affected_scopes": [scopeID],
+        ])
+        let schemaMismatchBody = try syncEngineJSONData([
+            "error": [
+                "code": "schema_mismatch",
+                "message": "schema changed",
+                "retryable": false,
+                "current_schema": ["version": targetSchemaVersion, "hash": targetSchemaHash],
+                "received_schema": ["version": sourceSchemaVersion, "hash": sourceSchemaHash],
+            ] as [String: Any],
+        ])
+        let rebuildBody = try syncEngineJSONData(rebuildJSON(
+            records: [targetRecord.json],
+            finalCursor: "scope_cursor_after_reset_rebuild",
+            checksum: targetScopeChecksum
+        ))
+        let firstPullBody = try syncEngineJSONData(scopePullJSON(
+            cursor: "scope_cursor_reset_pull_1",
+            checksum: emptyScopeChecksum
+        ))
+        let nextPullBody = try syncEngineJSONData(scopePullJSON(
+            cursor: "scope_cursor_reset_pull_2",
+            checksum: targetScopeChecksum
+        ))
+        let unexpectedBody = try syncEngineJSONData(["error": "unexpected"])
         MockURLProtocol.requestHandler = { request in
             let path = request.url!.path
             if path.hasSuffix("/sync/connect") {
@@ -3580,44 +4083,17 @@ final class SyncEngineTests: XCTestCase {
                     return count
                 }
                 if count == 1 {
-                    return try self.mockResponse(json: self.connectResumeJSON)
+                    return syncEngineResponse(request, body: resumeConnectBody)
                 }
                 if count == 2 {
-                    return try self.mockResponse(json: [
-                        "server_time": "2026-01-01T12:00:00.000Z",
-                        "protocol_version": 3,
-                        "client_generation": 1,
-                        "scope_set_version": 1,
-                        "schema": [
-                            "version": targetSchema.version,
-                            "hash": targetSchema.hash,
-                            "action": "unsupported",
-                            "reason": "unknown_schema_lineage",
-                        ] as [String: Any],
-                        "scopes": ["add": [] as [Any], "remove": [] as [Any]],
-                        "scope_cursor_updates": [:] as [String: Any],
-                    ])
+                    return syncEngineResponse(request, body: unsupportedConnectBody)
                 }
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 XCTAssertEqual(body["schema_reset"] as? Bool, true)
                 let installed = body["schema"] as? [String: Any]
-                XCTAssertEqual(installed?["version"] as? Int64, sourceSchema.version)
-                XCTAssertEqual(installed?["hash"] as? String, sourceSchema.hash)
-                return try self.mockResponse(json: [
-                    "server_time": "2026-01-01T12:00:00.000Z",
-                    "protocol_version": 3,
-                    "client_generation": 1,
-                    "scope_set_version": 1,
-                    "schema": [
-                        "version": targetSchema.version,
-                        "hash": targetSchema.hash,
-                        "action": "rebuild_local",
-                    ] as [String: Any],
-                    "scopes": ["add": [] as [Any], "remove": [] as [Any]],
-                    "scope_cursor_updates": [self.scopeID: NSNull()],
-                    "schema_definition": targetManifestJSON,
-                    "affected_scopes": [self.scopeID],
-                ])
+                XCTAssertEqual(installed?["version"] as? Int64, sourceSchemaVersion)
+                XCTAssertEqual(installed?["hash"] as? String, sourceSchemaHash)
+                return syncEngineResponse(request, body: resetConnectBody)
             }
             if path.hasSuffix("/sync/push") {
                 let count = pushCount.withLock { count in
@@ -3625,53 +4101,37 @@ final class SyncEngineTests: XCTestCase {
                     return count
                 }
                 if count == 1 {
-                    return try self.mockResponse(statusCode: 422, json: [
-                        "error": [
-                            "code": "schema_mismatch",
-                            "message": "schema changed",
-                            "retryable": false,
-                            "current_schema": ["version": targetSchema.version, "hash": targetSchema.hash],
-                            "received_schema": ["version": sourceSchema.version, "hash": sourceSchema.hash],
-                        ] as [String: Any],
-                    ])
+                    return syncEngineResponse(request, statusCode: 422, body: schemaMismatchBody)
                 }
                 let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
                 let mutation = try XCTUnwrap((body["mutations"] as? [[String: Any]])?.first)
-                return try self.mockResponse(json: [
+                return try syncEngineResponse(request, body: syncEngineJSONData([
                     "batch_id": body["batch_id"]!,
                     "server_time": "2026-01-01T14:00:00.000Z",
                     "accepted": [[
                         "mutation_id": mutation["mutation_id"]!,
                         "table": mutation["table"]!,
                         "pk": mutation["pk"]!,
-                        "outcome_schema": ["version": targetSchema.version, "hash": targetSchema.hash],
+                        "outcome_schema": ["version": targetSchemaVersion, "hash": targetSchemaHash],
                         "status": "applied",
-                        "server_row": targetRecord.json["row"]!,
-                        "row_checksum": targetRecord.json["row_checksum"]!,
+                        "server_row": try JSONSerialization.jsonObject(with: targetRowData),
+                        "row_checksum": try JSONSerialization.jsonObject(with: targetChecksumData),
                         "server_version": "reset-server-version",
                     ] as [String: Any]],
                     "rejected": [] as [Any],
-                ])
+                ]))
             }
             if path.hasSuffix("/sync/rebuild") {
-                return try self.mockResponse(json: self.rebuildJSON(
-                    records: [targetRecord.json],
-                    finalCursor: "scope_cursor_after_reset_rebuild",
-                    checksum: targetScopeChecksum
-                ))
+                return syncEngineResponse(request, body: rebuildBody)
             }
             if path.hasSuffix("/sync/pull") {
                 let count = pullCount.withLock { count in
                     count += 1
                     return count
                 }
-                let checksum = count == 1 ? self.emptyScopeChecksum : targetScopeChecksum
-                return try self.mockResponse(json: self.scopePullJSON(
-                    cursor: "scope_cursor_reset_pull_\(count)",
-                    checksum: checksum
-                ))
+                return syncEngineResponse(request, body: count == 1 ? firstPullBody : nextPullBody)
             }
-            return try self.mockResponse(statusCode: 500, json: ["error": "unexpected"])
+            return syncEngineResponse(request, statusCode: 500, body: unexpectedBody)
         }
         addTeardownBlock { await engine.stop() }
 
@@ -4148,61 +4608,6 @@ final class SyncEngineTests: XCTestCase {
         )
     }
 
-    /// Accepts every pushed mutation and records its primary key.
-    private func acceptingPushResponse(
-        _ request: URLRequest,
-        pushedRecordIDs: OSAllocatedUnfairLock<[String]>
-    ) throws -> (HTTPURLResponse, Data) {
-        let body = try JSONSerialization.jsonObject(with: request.bodyData()!) as! [String: Any]
-        let mutations = body["mutations"] as! [[String: Any]]
-        pushedRecordIDs.withLock { recordIDs in
-            recordIDs += mutations.map { ($0["pk"] as! [String: Any])["field-id"] as! String }
-        }
-        let accepted = try mutations.map {
-            try acceptedPushOutcome(
-                mutation: $0,
-                updatedAt: "2026-01-01T14:00:00.000000Z",
-                serverVersion: "2026-01-01T14:00:00.000000Z"
-            )
-        }
-        return try mockResponse(json: [
-            "batch_id": body["batch_id"]!,
-            "server_time": "2026-01-01T14:00:00.000Z",
-            "accepted": accepted,
-            "rejected": [] as [Any],
-        ])
-    }
-
-    private func acceptedPushOutcome(
-        mutation: [String: Any],
-        updatedAt: String,
-        serverVersion: String
-    ) throws -> [String: Any] {
-        let pk = mutation["pk"] as! [String: Any]
-        let columns = mutation["columns"] as? [String: Any] ?? [:]
-        var serverRow = columns
-        serverRow["field-id"] = pk["field-id"]
-        serverRow["field-updated-at"] = updatedAt
-        serverRow["field-deleted-at"] = NSNull()
-        let rowChecksum = try Integrity.rowDigest(
-            schemaHash: protocolTestSchemaHash,
-            table: ordersLocalSchemaTable(includeNotes: false),
-            pk: anyCodableMap(pk),
-            row: anyCodableMap(serverRow),
-            serverVersion: serverVersion
-        ).checksum
-        return [
-            "mutation_id": mutation["mutation_id"]!,
-            "table": mutation["table"]!,
-            "pk": pk,
-            "outcome_schema": ["version": 1, "hash": protocolTestSchemaHash],
-            "status": "applied",
-            "server_row": serverRow,
-            "row_checksum": try checksumJSONObject(rowChecksum),
-            "server_version": serverVersion,
-        ]
-    }
-
     private func checksumJSONObject(_ checksum: ChecksumObject) throws -> [String: Any] {
         let data = try JSONEncoder.synchroEncoder().encode(checksum)
         return try JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -4242,12 +4647,6 @@ final class SyncEngineTests: XCTestCase {
                 "retryable": true,
             ] as [String: Any],
         ]
-    }
-
-    private func mockResponse(statusCode: Int = 200, json: [String: Any]) throws -> (HTTPURLResponse, Data) {
-        let data = try JSONSerialization.data(withJSONObject: json)
-        let response = HTTPURLResponse(url: URL(string: "http://test.local")!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
-        return (response, data)
     }
 
     private func ordersLocalSchemaTable(includeNotes: Bool) -> LocalSchemaTable {

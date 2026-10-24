@@ -64,7 +64,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Run source-quality tests
@@ -73,9 +73,11 @@ jobs:
   pull-request-swift:
     name: pull-request Swift unit
     if: github.event_name == 'pull_request'
-    runs-on: macos-15
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/setup-current-xcode
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -179,12 +181,14 @@ jobs:
   candidate-swift:
     name: candidate Swift
     if: github.event_name == 'push'
-    runs-on: macos-15
+    runs-on: xcode-27
     env:
       ANDROID_HOME: /Users/runner/Library/Android/sdk
       ANDROID_SDK_ROOT: /Users/runner/Library/Android/sdk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: ./.github/actions/setup-current-xcode
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
@@ -283,7 +287,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$SDKMANAGER" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
           echo "ANDROID_JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
 
       - name: Start local PostgreSQL
@@ -305,7 +309,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           python3 scripts/ci/run_android_emulator.py \
             --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
-            --api 34 --image-api 34 --avd-name Synchro_Kotlin_API_34 --profile pixel_2 \
+            --api 37 --image-api 37.0 --avd-name Synchro_Kotlin_API_37 --profile pixel_2 \
             --log-dir "$RUNNER_TEMP/synchro-kotlin-emulator" -- make ci-candidate-kotlin
 
   candidate-rn-ios:
@@ -339,13 +343,17 @@ jobs:
             brew install wix/brew/applesimutils
           fi
 
-      - name: Select Xcode 27 and current iOS simulator
+      - uses: ./.github/actions/setup-current-xcode
+
+      - name: Select current iOS simulator
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_27.0.app
-          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = '27.0'
-          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == "27.0" }; abort "iOS 27.0 runtime is required" unless r; puts r.fetch("identifier")')"
-          udid="$(xcrun simctl create Synchro_RN_Current com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro "$runtime")"
+          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == "27.1" } ? 0 : 1)'; then
+            xcodebuild -downloadPlatform iOS -buildVersion 27.1
+          fi
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == "27.1" }; abort "iOS 27.1 runtime is required" unless r; puts r.fetch("identifier")')"
+          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'd=JSON.parse(STDIN.read).fetch("devicetypes").find { |x| x["name"] == "iPhone Duo" }; abort "current iPhone simulator type is unavailable" unless d; puts d.fetch("identifier")')"
+          udid="$(xcrun simctl create Synchro_RN_Current "$device" "$runtime")"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
@@ -475,7 +483,7 @@ jobs:
           SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort | tail -n 1)"
           python3 scripts/ci/run_android_emulator.py \
             --sdk-root "$ANDROID_SDK_ROOT" --sdkmanager "$SDKMANAGER" \
-            --api 34 --image-api 34 --avd-name Pixel_7_API_34 --profile pixel_7 --memory 6144 \
+            --api 37 --image-api 37.0 --avd-name Synchro_RN_API_37 --profile pixel_7 --memory 6144 \
             --log-dir "$RUNNER_TEMP/synchro-rn-emulator" -- make test-rn-e2e-android-build ci-candidate-rn-android
 
   pull-request:

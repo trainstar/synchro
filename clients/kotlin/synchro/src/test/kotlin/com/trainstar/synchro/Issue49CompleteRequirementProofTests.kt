@@ -859,7 +859,7 @@ class Issue49CompleteRequirementProofTests {
         var database = environment.database
         database.execute(
             "INSERT INTO projection_orders (id, legacy_title, legacy_enabled, updated_at) VALUES (?, ?, ?, ?)",
-            arrayOf("history-row", "authored", 0L, "2026-04-08T00:00:00.000000Z"),
+            arrayOf<Any?>("history-row", "authored", 0L, "2026-04-08T00:00:00.000000Z"),
         )
         var processor = PushProcessor(database, ChangeTracker(database))
         val responseIndex = AtomicInteger()

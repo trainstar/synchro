@@ -39,5 +39,30 @@ target 'SynchroReactNativeExample' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    targets = installer.pods_project.targets.to_h { |target| [target.name, target] }
+    host = targets['SynchroReactNative-TestHost']
+    tests = targets['SynchroReactNative-Unit-Tests']
+    raise Pod::Informative, 'SynchroReactNative test host target is missing' unless host
+    raise Pod::Informative, 'SynchroReactNative unit test target is missing' unless tests
+
+    tests.build_configurations.each do |build_configuration|
+      path = build_configuration.base_configuration_reference&.real_path
+      raise Pod::Informative, 'SynchroReactNative unit test xcconfig is missing' unless path&.file?
+
+      settings = Xcodeproj::Config.new(path)
+      unless settings.other_linker_flags[:libraries].include?('SynchroReactNative')
+        raise Pod::Informative, 'SynchroReactNative unit tests must link the production module'
+      end
+    end
+
+    host.build_configurations.each do |build_configuration|
+      path = build_configuration.base_configuration_reference&.real_path
+      raise Pod::Informative, 'SynchroReactNative test host xcconfig is missing' unless path&.file?
+
+      settings = Xcodeproj::Config.new(path)
+      settings.other_linker_flags[:libraries].delete('SynchroReactNative')
+      settings.save_as(path)
+    end
   end
 end

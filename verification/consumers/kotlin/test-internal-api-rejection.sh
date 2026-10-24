@@ -47,25 +47,33 @@ rootProject.name = "synchro-internal-api-rejection"
 include(":app")
 EOF
     cat > "$project/build.gradle.kts" <<'EOF'
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21")
+    }
+}
+
 plugins {
-    id("com.android.application") version "8.2.2" apply false
-    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+    id("com.android.application") version "9.4.1" apply false
 }
 EOF
     cat > "$project/app/build.gradle.kts" <<EOF
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.trainstar.synchro.internalprobe"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.trainstar.synchro.internalprobe"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
     }
@@ -76,9 +84,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
 }
 
 dependencies {

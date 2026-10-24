@@ -58,6 +58,69 @@ const repairs = {
       preimage: '451fe8050e20bc1c4724564b2c33fb819f815848f5ad2eb529be5915bf62f2bb',
       postimage: 'd22c16e9d4ebe97b15a3b734b70e1060a5526b907cad2b1ec3bb1004d4ed0675'
     }]
+  }],
+  rngp: [{
+    caller: 'react-native',
+    callerVersion: '0.88.0',
+    packageName: '@react-native/gradle-plugin',
+    version: '0.88.0',
+    patch: 'react-native-gradle-plugin-0.88.0-kotlin-2.4.21.patch',
+    sources: [{
+      path: 'gradle/libs.versions.toml',
+      preimage: 'c7a028cdee90f490de9493ca9de92b61b994844836161871091c340c568f109e',
+      postimage: '44a27d41062a7c01889fac1bc7666f8235ee14060de8588d66660830f8484c7d'
+    }, {
+      path: 'react-native-gradle-plugin/build.gradle.kts',
+      preimage: '44bcf53d885c52ef9988b7147e8e522563eaf519144109f40390fc7601a6469e',
+      postimage: 'cced8bd5897896d6f00149e4704b51130e8b9468f39ab4247f9aca0f2ddcc864'
+    }, {
+      path: 'settings-plugin/build.gradle.kts',
+      preimage: '326cc1d071e500711a12134d0577059929ae3e6960e2d1bfb10e0cffea8832f2',
+      postimage: '3af9b7ea340523e24e3492db32da30943dd840c3f2e656ffdc72b7a37129a3d5'
+    }, {
+      path: 'shared-testutil/build.gradle.kts',
+      preimage: '40950ae3b3bf68b35515f022f2819c98def11f0aee67ade7ed64f04c6f033cca',
+      postimage: '2db5af783296917c76c1f410ead33ed555310917a79b3b005ee996f1ac23a6d6'
+    }, {
+      path: 'shared/build.gradle.kts',
+      preimage: '7069a997b96e4c8a733a62e00d557730ab32bde6a5dc54dbd18d86d2bc302d09',
+      postimage: '5d8d113c7849a448d1abafb8fcdb545f389133fcd3fb6c68c12089de53e24c6c'
+    }]
+  }, {
+    caller: 'react-native',
+    callerVersion: '0.82.1',
+    packageName: '@react-native/gradle-plugin',
+    version: '0.82.1',
+    patch: 'react-native-gradle-plugin-0.82.1-kotlin-2.4.21.patch',
+    sources: [{
+      path: 'gradle/libs.versions.toml',
+      preimage: 'eea932505dd9efd2d660d8d10efddbe84b74ed47456d995099af7ab5d97d6802',
+      postimage: '8a30e112ad18be9bc95f509d1cc42affd09e23dd2cfe22677cd7c7703628247f'
+    }, {
+      path: 'react-native-gradle-plugin/build.gradle.kts',
+      preimage: 'b45b3f39996d9db2b54c68cca073063c605d313aae548f633b6a00fc6df556b0',
+      postimage: 'f0b609f0c29dbd6e90de935d3d6690b5cc6dd61f314345ccb662a0baf11a5fcc'
+    }, {
+      path: 'settings-plugin/build.gradle.kts',
+      preimage: '18d28065072ad8c93656deadfbcff095a05fd6a58e25d047eb69d839e347aa97',
+      postimage: '95b2086c29bd771fd9e52d23c931897852d6669138f0939a1b26a14f67c9a41e'
+    }, {
+      path: 'shared-testutil/build.gradle.kts',
+      preimage: '8cb397c7d640a836c2edce904cf2fbf90c069a2b228b539c0243e3d7997854bf',
+      postimage: '9af52f0cdf6f76a713598db2da6c7679390625028a23a0946c27d9df580d4bdc'
+    }, {
+      path: 'shared/build.gradle.kts',
+      preimage: 'fd66179022462615f054ccf03af25bc8b9399dc6b492d75b022bf2961f0f034e',
+      postimage: '00a4789ebba1fea4cfd6e0d3ef298fda7af7a462306ede91081d01c94cd74a92'
+    }, {
+      path: 'react-native-gradle-plugin/src/main/kotlin/com/facebook/react/ReactPlugin.kt',
+      preimage: '0d8511fc8c814b40a910b894986665784ef36a977c139923e92bfc62ef4cb845',
+      postimage: '8d47cc51b9759d19a400fc015a455cd137b867c8db69b06f19e7ed4e50d30151'
+    }, {
+      path: 'react-native-gradle-plugin/src/main/kotlin/com/facebook/react/utils/AgpConfiguratorUtils.kt',
+      preimage: 'd25dbfc8d9ee685269e22cddff9f4e86691fe922074dde32e1c5662d9a406309',
+      postimage: 'd1e7e31b236484cf06521e64eadff3c85502e822c08351de7caf7a78ed51bea0'
+    }]
   }]
 };
 
@@ -154,10 +217,28 @@ function applyRepair(repair) {
   process.stdout.write(`applied verified ${repair.packageName} ${repair.version} patch\n`);
 }
 
+function hasCallerIdentity(repair) {
+  try {
+    const caller = callerRoot(repair);
+    const manifest = JSON.parse(fs.readFileSync(path.join(caller, 'package.json'), 'utf8'));
+    return manifest.name === repair.caller && manifest.version === repair.callerVersion;
+  } catch {
+    return false;
+  }
+}
+
+function selectedRepairs(name) {
+  const candidates = repairs[name];
+  if (name !== 'rngp') return candidates;
+  const selected = candidates.filter(hasCallerIdentity);
+  if (selected.length !== 1) fail('unsupported React Native Gradle Plugin version');
+  return selected;
+}
+
 const name = process.argv[2] || 'cli';
 if (!Object.prototype.hasOwnProperty.call(repairs, name)) {
   fail('unsupported repair');
 }
-for (const repair of repairs[name]) {
+for (const repair of selectedRepairs(name)) {
   applyRepair(repair);
 }

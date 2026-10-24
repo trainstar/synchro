@@ -162,7 +162,7 @@ func (s *Session) prepareDevice(ctx context.Context) error {
 	if s.config.ApplicationAPKPath == "" {
 		return nil
 	}
-	if _, err := s.adb(ctx, "install", "-r", "-t", s.config.ApplicationAPKPath); err != nil {
+	if _, err := s.adb(ctx, "install", "-r", "-t", "-g", s.config.ApplicationAPKPath); err != nil {
 		return errors.New("install Kotlin application APK failed")
 	}
 	if _, err := s.adb(ctx, "install", "-r", "-t", s.config.InstrumentationAPKPath); err != nil {

@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.source = { :git => "https://github.com/trainstar/synchro.git", :tag => "v#{s.version}" }
   s.ios.deployment_target = "17.0"
   s.osx.deployment_target = "13.0"
-  s.swift_version = "5.9"
+  s.swift_version = "6.0"
   s.source_files = "clients/swift/Sources/Synchro/**/*.swift"
   s.pod_target_xcconfig = { "OTHER_SWIFT_FLAGS" => "$(inherited) -package-name Synchro" }
   s.dependency "GRDB.swift", "~> 7.8"

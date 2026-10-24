@@ -28,5 +28,5 @@ let package = Package(
             path: "clients/swift/Tests/SynchroTests"
         ),
     ],
-    swiftLanguageModes: [.v5]
+    swiftLanguageModes: [.v6]
 )

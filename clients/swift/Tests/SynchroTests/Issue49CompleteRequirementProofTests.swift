@@ -4,6 +4,56 @@ import os
 @preconcurrency import GRDB
 @testable @_spi(Inspection) import Synchro
 
+private func issue49SuccessResponse<Value: Encodable>(
+    request: URLRequest,
+    value: Value
+) throws -> (HTTPURLResponse, Data) {
+    (
+        HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!,
+        try JSONEncoder.synchroEncoder().encode(value)
+    )
+}
+
+private func issue49RetryResponse(
+    request: URLRequest,
+    status: Int,
+    code: String
+) throws -> (HTTPURLResponse, Data) {
+    (
+        HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json", "Retry-After": "1"]
+        )!,
+        try JSONSerialization.data(withJSONObject: [
+            "error": ["code": code, "message": "retry", "retryable": true],
+        ])
+    )
+}
+
+private func issue49ErrorResponse(
+    request: URLRequest,
+    status: Int
+) throws -> (HTTPURLResponse, Data) {
+    (
+        HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!,
+        try JSONSerialization.data(withJSONObject: [
+            "error": ["code": "internal_error", "message": "unexpected request", "retryable": false],
+        ])
+    )
+}
+
 final class Issue49CompleteRequirementProofTests: XCTestCase {
     private struct Environment {
         let path: String
@@ -54,7 +104,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             address: "server-canonical",
             updatedAt: "2026-04-01T01:00:00.000000Z"
         )
-        let accepted = try makeAcceptedMutation(
+        let accepted = try Self.makeAcceptedMutation(
             mutationID: pending.mutationID,
             schema: environment.table,
             pk: orderPK("echo-row"),
@@ -557,6 +607,12 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         let requestBodies = OSAllocatedUnfairLock(initialState: [Data]())
         let responseIndex = OSAllocatedUnfairLock(initialState: 0)
         let acceptedOutcome = OSAllocatedUnfairLock(initialState: Optional<AcceptedMutation>.none)
+        let acceptedRow = orderRow(
+            recordID: "queue-row",
+            address: "normalized",
+            updatedAt: "2026-04-04T01:00:00.000000Z"
+        )
+        let acceptedPK = orderPK("queue-row")
         let http = makeHTTPClient(path: environment.path)
         MockURLProtocol.requestHandler = { request in
             let body = try XCTUnwrap(request.bodyData())
@@ -566,25 +622,20 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 return value
             }
             if index == 0 {
-                return try self.retryResponse(request: request, status: 429, code: "retry_later")
+                return try issue49RetryResponse(request: request, status: 429, code: "retry_later")
             }
             if index == 1 {
-                return try self.retryResponse(request: request, status: 503, code: "temporary_unavailable")
+                return try issue49RetryResponse(request: request, status: 503, code: "temporary_unavailable")
             }
             if index == 2 {
                 throw URLError(.networkConnectionLost)
             }
             let push = try JSONDecoder.synchroDecoder().decode(PushRequest.self, from: body)
-            let row = self.orderRow(
-                recordID: "queue-row",
-                address: "normalized",
-                updatedAt: "2026-04-04T01:00:00.000000Z"
-            )
-            let accepted = try self.makeAcceptedMutation(
+            let accepted = try Self.makeAcceptedMutation(
                 mutationID: try XCTUnwrap(push.mutations.only?.mutationID),
                 schema: environment.table,
-                pk: self.orderPK("queue-row"),
-                serverRow: row,
+                pk: acceptedPK,
+                serverRow: acceptedRow,
                 serverVersion: "queue-server-version"
             )
             acceptedOutcome.withLock { $0 = accepted }
@@ -594,7 +645,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 accepted: [accepted],
                 rejected: []
             )
-            return try self.successResponse(request: request, value: response)
+            return try issue49SuccessResponse(request: request, value: response)
         }
 
         let firstFailure = await pushFailure(processor, http: http, table: environment.table)
@@ -907,7 +958,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             let body = try XCTUnwrap(request.bodyData())
             requests.withLock { $0.append((request.url!.path, body)) }
             if request.url!.path.hasSuffix("/sync/connect") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
                     value: ConnectResponse(
                         serverTime: "2026-04-06T00:00:00.000000Z",
@@ -923,7 +974,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 )
             }
             if request.url!.path.hasSuffix("/sync/pull") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
                     value: PullResponse(
                         changes: [continued],
@@ -936,7 +987,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                     )
                 )
             }
-            return try self.errorResponse(request: request, status: 500)
+            return try issue49ErrorResponse(request: request, status: 500)
         }
         let engine = makeEngine(database: database, path: destination)
         try await engine.start()
@@ -969,6 +1020,10 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
     func testMembershipInvalidationAutomaticallyRebuildsOnlyAffectedScope() async throws {
         let targetScope = "orders:auto-rebuild"
         let otherScope = "orders:stable"
+        let invalidConnect = connectNone(
+            scopeSetVersion: 0,
+            cursorUpdates: Dictionary(uniqueKeysWithValues: [(targetScope, Optional<String>.none)])
+        )
         let failing = try makeEnvironment("automatic-rebuild-failure")
         try failing.database.writeTransaction { connection in
             try SynchroMeta.upsertScope(connection, scopeID: targetScope, cursor: "stale-target", checksum: nil, generation: 4)
@@ -976,16 +1031,13 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         }
         MockURLProtocol.requestHandler = { request in
             if request.url!.path.hasSuffix("/sync/connect") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
-                    value: self.connectNone(
-                        scopeSetVersion: 0,
-                        cursorUpdates: Dictionary(uniqueKeysWithValues: [(targetScope, Optional<String>.none)])
-                    )
+                    value: invalidConnect
                 )
             }
             if request.url!.path.hasSuffix("/sync/rebuild") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
                     value: RebuildResponse(
                         scope: "orders:wrong-scope",
@@ -997,7 +1049,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                     )
                 )
             }
-            return try self.errorResponse(request: request, status: 500)
+            return try issue49ErrorResponse(request: request, status: 500)
         }
         let failingEngine = makeEngine(database: failing.database, path: failing.path)
         do {
@@ -1022,15 +1074,16 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             try SynchroMeta.upsertScope(connection, scopeID: otherScope, cursor: "stable-cursor", checksum: nil, generation: 9)
         }
         let paths = OSAllocatedUnfairLock(initialState: [String]())
+        let successConnect = connectNone(
+            scopeSetVersion: 0,
+            cursorUpdates: Dictionary(uniqueKeysWithValues: [(targetScope, Optional<String>.none)])
+        )
         MockURLProtocol.requestHandler = { request in
             paths.withLock { $0.append(request.url!.path) }
             if request.url!.path.hasSuffix("/sync/connect") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
-                    value: self.connectNone(
-                        scopeSetVersion: 0,
-                        cursorUpdates: Dictionary(uniqueKeysWithValues: [(targetScope, Optional<String>.none)])
-                    )
+                    value: successConnect
                 )
             }
             if request.url!.path.hasSuffix("/sync/rebuild") {
@@ -1039,7 +1092,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                     from: try XCTUnwrap(request.bodyData())
                 )
                 XCTAssertEqual(rebuild.scope, targetScope)
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
                     value: RebuildResponse(
                         scope: targetScope,
@@ -1052,7 +1105,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 )
             }
             if request.url!.path.hasSuffix("/sync/pull") {
-                return try self.successResponse(
+                return try issue49SuccessResponse(
                     request: request,
                     value: PullResponse(
                         changes: [],
@@ -1068,7 +1121,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                     )
                 )
             }
-            return try self.errorResponse(request: request, status: 500)
+            return try issue49ErrorResponse(request: request, status: 500)
         }
         let successEngine = makeEngine(database: success.database, path: success.path)
         try await successEngine.start()
@@ -1111,6 +1164,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         var processor = PushProcessor(database: database, changeTracker: ChangeTracker(database: database))
         let responseIndex = OSAllocatedUnfairLock(initialState: 0)
         let validOutcome = OSAllocatedUnfairLock(initialState: Optional<AcceptedMutation>.none)
+        let acceptedRow = projectionRow(table: oldTable, recordID: "history-row", title: "server", enabled: true)
         let http = makeHTTPClient(path: environment.path)
         MockURLProtocol.requestHandler = { request in
             let body = try XCTUnwrap(request.bodyData())
@@ -1120,15 +1174,14 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                 return value
             }
             if index == 0 {
-                return try self.retryResponse(request: request, status: 503, code: "temporary_unavailable")
+                return try issue49RetryResponse(request: request, status: 503, code: "temporary_unavailable")
             }
-            let row = self.projectionRow(table: oldTable, recordID: "history-row", title: "server", enabled: true)
-            let accepted = try self.makeAcceptedMutation(
+            let accepted = try Self.makeAcceptedMutation(
                 mutationID: try XCTUnwrap(push.mutations.only?.mutationID),
                 schema: oldTable,
                 schemaRef: SchemaRef(version: 1, hash: oldHash),
                 pk: ["field-id": AnyCodable("history-row")],
-                serverRow: row,
+                serverRow: acceptedRow,
                 serverVersion: "historical-version"
             )
             validOutcome.withLock { $0 = accepted }
@@ -1141,7 +1194,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
                     digest: String(repeating: "f", count: 64)
                 )
             }
-            return try self.successResponse(
+            return try issue49SuccessResponse(
                 request: request,
                 value: PushResponse(
                     batchID: push.batchID,
@@ -1310,7 +1363,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         )
     }
 
-    private func makeAcceptedMutation(
+    private static func makeAcceptedMutation(
         mutationID: String,
         schema: LocalSchemaTable,
         schemaRef: SchemaRef = SchemaRef(version: 1, hash: protocolTestSchemaHash),
@@ -1555,7 +1608,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
             params: ["push-row", "local", "u1", "2026-04-03T00:00:00.000000Z"]
         )
         let pending = try XCTUnwrap(try tracker.pendingChanges().only)
-        var accepted = try makeAcceptedMutation(
+        var accepted = try Self.makeAcceptedMutation(
             mutationID: pending.mutationID,
             schema: environment.table,
             pk: orderPK("push-row"),
@@ -1811,7 +1864,7 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         let http = makeHTTPClient(path: environment.path)
         MockURLProtocol.requestHandler = { request in
             requestCount.withLock { $0 += 1 }
-            return try self.retryResponse(request: request, status: 503, code: "temporary_unavailable")
+            return try issue49RetryResponse(request: request, status: 503, code: "temporary_unavailable")
         }
         let sealFailure = await pushFailure(processor, http: http, table: environment.table)
         XCTAssertTrue(sealFailure is RetryableError)
@@ -2120,67 +2173,6 @@ final class Issue49CompleteRequirementProofTests: XCTestCase {
         let session = URLSession(configuration: sessionConfiguration)
         sessions.append(session)
         return HttpClient(config: config, session: session)
-    }
-
-    private func successResponse<Value: Encodable>(
-        request: URLRequest,
-        value: Value
-    ) throws -> (HTTPURLResponse, Data) {
-        (
-            HTTPURLResponse(
-                url: request.url!,
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!,
-            try JSONEncoder.synchroEncoder().encode(value)
-        )
-    }
-
-    private func retryResponse(
-        request: URLRequest,
-        status: Int,
-        code: String
-    ) throws -> (HTTPURLResponse, Data) {
-        (
-            HTTPURLResponse(
-                url: request.url!,
-                statusCode: status,
-                httpVersion: nil,
-                headerFields: [
-                    "Content-Type": "application/json",
-                    "Retry-After": "1",
-                ]
-            )!,
-            try JSONSerialization.data(withJSONObject: [
-                "error": [
-                    "code": code,
-                    "message": "retry",
-                    "retryable": true,
-                ],
-            ])
-        )
-    }
-
-    private func errorResponse(
-        request: URLRequest,
-        status: Int
-    ) throws -> (HTTPURLResponse, Data) {
-        (
-            HTTPURLResponse(
-                url: request.url!,
-                statusCode: status,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )!,
-            try JSONSerialization.data(withJSONObject: [
-                "error": [
-                    "code": "internal_error",
-                    "message": "unexpected request",
-                    "retryable": false,
-                ],
-            ])
-        )
     }
 
     private func jsonString<Value: Encodable>(_ value: Value) throws -> String {

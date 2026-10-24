@@ -332,7 +332,7 @@ class SynchroClientTests {
                     (scope_id, receipt, schema_version, schema_hash, cardinality, checksum)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf(scopeID, "sc1.producer-like-receipt.signature", 1L, PROTOCOL_TEST_SCHEMA_HASH, 1L, checksumJSON),
+                arrayOf<Any?>(scopeID, "sc1.producer-like-receipt.signature", 1L, PROTOCOL_TEST_SCHEMA_HASH, 1L, checksumJSON),
             )
             SynchroMeta.set(db, MetaKey.SCHEMA_MANIFEST, Json.encodeToString(SchemaManifest.serializer(), manifest))
             SynchroMeta.setInt64(db, MetaKey.SCOPE_SET_VERSION, 7L)
@@ -836,8 +836,8 @@ class SynchroClientTests {
         ))
 
         val total = client.executeBatch(listOf(
-            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("a", 1)),
-            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("b", 2)),
+            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf<Any?>("a", 1)),
+            SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf<Any?>("b", 2)),
             SQLStatement("INSERT INTO orders (id, value) VALUES (?, ?)", arrayOf("c", null)),
         ))
         assertEquals(3, total)
@@ -901,7 +901,7 @@ class SynchroClientTests {
             ColumnDef(name = "value", type = "INTEGER"),
         ))
 
-        client.execute("INSERT INTO counters (id, value) VALUES (?, ?)", arrayOf("c1", 0))
+        client.execute("INSERT INTO counters (id, value) VALUES (?, ?)", arrayOf<Any?>("c1", 0))
 
         val latch = CountDownLatch(2) // initial + after update
         val receivedRows = mutableListOf<List<Row>>()
@@ -918,7 +918,7 @@ class SynchroClientTests {
         // Trigger an update
         Thread {
             Thread.sleep(300)
-            client.execute("UPDATE counters SET value = ? WHERE id = ?", arrayOf(42, "c1"))
+            client.execute("UPDATE counters SET value = ? WHERE id = ?", arrayOf<Any?>(42, "c1"))
         }.start()
 
         assertTrue(latch.await(3, TimeUnit.SECONDS))
@@ -979,7 +979,7 @@ class SynchroClientTests {
             ColumnDef(name = "age", type = "INTEGER"),
         ))
 
-        client.execute("INSERT INTO people (id, name, age) VALUES (?, ?, ?)", arrayOf("p1", "Alice", 30))
+        client.execute("INSERT INTO people (id, name, age) VALUES (?, ?, ?)", arrayOf<Any?>("p1", "Alice", 30))
         val row = client.queryOne("SELECT age FROM people WHERE id = ?", arrayOf("p1"))
         assertEquals(30L, row?.get("age"))
 

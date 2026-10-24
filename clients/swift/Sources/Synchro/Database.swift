@@ -75,7 +75,7 @@ final class SynchroDatabase: @unchecked Sendable {
     private let applicationPolicy = ApplicationSQLPolicy()
     private let provenanceMaintenanceWorkObserver: ProvenanceMaintenanceWorkObserver
     private var applicationDatabase: ApplicationDatabase!
-    private let changeObservers = OSAllocatedUnfairLock(initialState: [UUID: () -> Void]())
+    private let changeObservers = OSAllocatedUnfairLock(initialState: [UUID: @Sendable () -> Void]())
 
     init(path: String) throws {
         self.path = path
@@ -309,7 +309,7 @@ final class SynchroDatabase: @unchecked Sendable {
 
     // MARK: - Observation
 
-    func onChange(tables: [String], callback: @escaping () -> Void) -> DatabaseCancellable {
+    func onChange(tables: [String], callback: @escaping @Sendable () -> Void) -> DatabaseCancellable {
         _ = tables
         let id = UUID()
         changeObservers.withLock { $0[id] = callback }
@@ -318,7 +318,7 @@ final class SynchroDatabase: @unchecked Sendable {
         }
     }
 
-    func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]?, tables: [String], callback: @escaping ([Row]) -> Void) -> DatabaseCancellable {
+    func watch(_ sql: String, params: [(any DatabaseValueConvertible)?]?, tables: [String], callback: @escaping @Sendable ([Row]) -> Void) -> DatabaseCancellable {
         _ = tables
         let parameters = ObservedQueryParams(values: params)
         return ValueObservation.tracking { db in

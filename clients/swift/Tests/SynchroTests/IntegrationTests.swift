@@ -137,7 +137,7 @@ final class IntegrationTests: XCTestCase {
     }
 
 
-    private func stopAndClose(_ client: SynchroClient?) async {
+    private static func stopAndClose(_ client: SynchroClient?) async {
         await client?.stop()
         try? await client?.close()
     }
@@ -219,7 +219,7 @@ final class IntegrationTests: XCTestCase {
             userID: UUID().uuidString.lowercased(),
             dbPath: tempDBPath()
         ))
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try await client.start()
         await client.stop()
@@ -245,8 +245,8 @@ final class IntegrationTests: XCTestCase {
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
         addTeardownBlock {
-            await self.stopAndClose(clientA)
-            await self.stopAndClose(clientB)
+            await Self.stopAndClose(clientA)
+            await Self.stopAndClose(clientB)
         }
 
         try await clientA.start()
@@ -269,7 +269,7 @@ final class IntegrationTests: XCTestCase {
         let orderID = UUID().uuidString.lowercased()
 
         let writer = try SynchroClient(config: writerConfig)
-        addTeardownBlock { await self.stopAndClose(writer) }
+        addTeardownBlock { await Self.stopAndClose(writer) }
 
         try await writer.start()
         try seedOrder(writer, userID: userID, customerID: customerID, orderID: orderID, shipAddress: #"{"street":"Bootstrap Ave"}"#, updatedAt: "2026-01-02T00:00:00.000Z")
@@ -278,7 +278,7 @@ final class IntegrationTests: XCTestCase {
         try await writer.close()
 
         let reader = try SynchroClient(config: readerConfig)
-        addTeardownBlock { await self.stopAndClose(reader) }
+        addTeardownBlock { await Self.stopAndClose(reader) }
         try await reader.start()
         try await waitForCondition {
             try await self.syncAndWaitForScheduledRetry(reader)
@@ -297,8 +297,8 @@ final class IntegrationTests: XCTestCase {
         let clientA = try SynchroClient(config: clientAConfig)
         let clientB = try SynchroClient(config: clientBConfig)
         addTeardownBlock {
-            await self.stopAndClose(clientA)
-            await self.stopAndClose(clientB)
+            await Self.stopAndClose(clientA)
+            await Self.stopAndClose(clientB)
         }
 
         try await clientA.start()
@@ -395,7 +395,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try await client.start()
         let checkpoint = collector.snapshot().sequenceCheckpoint
@@ -424,7 +424,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try await client.start()
         let checkpoint = collector.snapshot().sequenceCheckpoint
@@ -453,7 +453,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try await client.start()
         let checkpoint = collector.snapshot().sequenceCheckpoint
@@ -489,7 +489,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try await client.start()
         await client.enterBackground()
@@ -532,7 +532,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try collector.armPause(for: .rebuild)
         let start = Task { try await client.start() }
@@ -557,7 +557,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try collector.armPause(for: .connect)
         let start = Task { try await client.start() }
@@ -581,7 +581,7 @@ final class IntegrationTests: XCTestCase {
             transportObservationCollector: collector
         )
         let client = try SynchroClient(config: config)
-        addTeardownBlock { await self.stopAndClose(client) }
+        addTeardownBlock { await Self.stopAndClose(client) }
 
         try collector.armPause(for: .connect)
         let start = Task { try await client.start() }
@@ -598,8 +598,8 @@ final class IntegrationTests: XCTestCase {
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
-            await self.stopAndClose(reader)
+            await Self.stopAndClose(writer)
+            await Self.stopAndClose(reader)
         }
         try await writer.start()
         await writer.enterBackground()
@@ -641,8 +641,8 @@ final class IntegrationTests: XCTestCase {
         ))
         let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
-            await self.stopAndClose(reader)
+            await Self.stopAndClose(writer)
+            await Self.stopAndClose(reader)
         }
         try await writer.start()
         try await syncAndWaitForScheduledRetry(writer)
@@ -718,8 +718,8 @@ final class IntegrationTests: XCTestCase {
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
-            await self.stopAndClose(reader)
+            await Self.stopAndClose(writer)
+            await Self.stopAndClose(reader)
         }
         try await writer.start()
         await writer.enterBackground()
@@ -990,8 +990,8 @@ final class IntegrationTests: XCTestCase {
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
-            await self.stopAndClose(reader)
+            await Self.stopAndClose(writer)
+            await Self.stopAndClose(reader)
         }
         try await writer.start()
         await writer.enterBackground()
@@ -1034,9 +1034,9 @@ final class IntegrationTests: XCTestCase {
         let other = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         let reader = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
-            await self.stopAndClose(other)
-            await self.stopAndClose(reader)
+            await Self.stopAndClose(writer)
+            await Self.stopAndClose(other)
+            await Self.stopAndClose(reader)
         }
         let conflictedID = UUID().uuidString.lowercased()
         let localID = UUID().uuidString.lowercased()
@@ -1098,7 +1098,7 @@ final class IntegrationTests: XCTestCase {
         let userID = UUID().uuidString.lowercased()
         let writer = try SynchroClient(config: makeConfig(userID: userID, dbPath: tempDBPath()))
         addTeardownBlock {
-            await self.stopAndClose(writer)
+            await Self.stopAndClose(writer)
         }
         let rowID = UUID().uuidString.lowercased()
         let updatedAt = "2026-01-11T00:00:00.000Z"

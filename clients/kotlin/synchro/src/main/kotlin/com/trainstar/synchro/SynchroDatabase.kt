@@ -724,7 +724,7 @@ internal class SynchroDatabase private constructor(context: Context, dbPath: Str
             INSERT OR IGNORE INTO _synchro_schema_archives (schema_version, schema_hash, manifest_json, created_at)
             VALUES (?, ?, ?, substr(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1, 23) || '000Z')
             """.trimIndent(),
-            arrayOf(schemaVersion, schemaHash, encoded),
+            arrayOf<Any?>(schemaVersion, schemaHash, encoded),
         )
         tables.forEach { table ->
             SQLiteSchema.generateCDCTriggers(table).forEach { trigger -> db.execSQL(trigger) }
