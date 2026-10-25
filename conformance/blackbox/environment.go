@@ -466,10 +466,6 @@ func verifyExecutable(path string) error {
 	return nil
 }
 
-func postgresBinaryVersion(path string) (string, error) {
-	return postgresBinaryVersionForPostgreSQLVersion(path, postgresqlRuntimeVersion)
-}
-
 func postgresBinaryVersionForPostgreSQLVersion(path, requiredVersion string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), environmentCommandTimeout)
 	defer cancel()
