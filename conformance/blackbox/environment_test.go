@@ -43,6 +43,90 @@ func TestVerifyPG18BinariesRequiresExactRuntimeVersion(t *testing.T) {
 	}
 }
 
+func TestVerifyPG18BinariesReportsBoundedVersionDiagnostics(t *testing.T) {
+	const pathMarker = "postgres-version-path-marker"
+	tests := []struct {
+		name          string
+		initdb        string
+		wantError     string
+		forbiddenText []string
+	}{
+		{
+			name:      "timeout",
+			initdb:    "#!/bin/sh\nexec sleep 6\n",
+			wantError: "PostgreSQL binary initdb: version command timed out",
+			forbiddenText: []string{
+				"signal: killed",
+			},
+		},
+		{
+			name:      "execution failure",
+			initdb:    "#!/bin/sh\nprintf '%s\\n' 'version-stdout-marker'\nprintf '%s\\n' 'version-stderr-marker' >&2\nexit 17\n",
+			wantError: "PostgreSQL binary initdb: version command failed",
+			forbiddenText: []string{
+				"version-stdout-marker",
+				"version-stderr-marker",
+				"exit status 17",
+			},
+		},
+		{
+			name:      "malformed output",
+			initdb:    "#!/bin/sh\nprintf '%s\\n' 'version-output-marker'\n",
+			wantError: "PostgreSQL binary initdb: version output is invalid",
+			forbiddenText: []string{
+				"version-output-marker",
+			},
+		},
+		{
+			name:      "version mismatch",
+			initdb:    "#!/bin/sh\nprintf '%s\\n' 'initdb (PostgreSQL) 18.2 version-output-marker'\n",
+			wantError: "PostgreSQL binary initdb: PostgreSQL version is not 18.3",
+			forbiddenText: []string{
+				"18.2",
+				"version-output-marker",
+			},
+		},
+		{
+			name: "valid PostgreSQL 18 control",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := writePostgresVersionFixtures(t, nil)
+			binDir := filepath.Join(t.TempDir(), pathMarker)
+			if err := os.Rename(fixture, binDir); err != nil {
+				t.Fatal(err)
+			}
+			if test.initdb != "" {
+				if err := os.WriteFile(filepath.Join(binDir, "initdb"), []byte(test.initdb), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, version, err := verifyPG18Binaries(binDir)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("valid PostgreSQL 18 binaries rejected: %v", err)
+				}
+				if version != postgresqlRuntimeVersion {
+					t.Fatalf("PostgreSQL version = %q, want %q", version, postgresqlRuntimeVersion)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("invalid PostgreSQL binary was accepted")
+			}
+			if err.Error() != test.wantError {
+				t.Fatalf("diagnostic = %q, want %q", err, test.wantError)
+			}
+			for _, forbidden := range append(test.forbiddenText, pathMarker) {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("diagnostic exposed %q: %q", forbidden, err)
+				}
+			}
+		})
+	}
+}
+
 func TestVerifyAdapterArtifactRejectsTampering(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "synchrod-pg")

@@ -442,10 +442,7 @@ func verifyPG18BinariesForPostgreSQLVersion(path, requiredVersion string) (strin
 		}
 		version, err := postgresBinaryVersionForPostgreSQLVersion(candidate, requiredVersion)
 		if err != nil {
-			if requiredVersion == "" {
-				return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL 18", program)
-			}
-			return "", "", fmt.Errorf("PostgreSQL binary %s is not PostgreSQL %s", program, requiredVersion)
+			return "", "", fmt.Errorf("PostgreSQL binary %s: %w", program, err)
 		}
 		versions[program] = version
 	}
@@ -478,7 +475,10 @@ func postgresBinaryVersionForPostgreSQLVersion(path, requiredVersion string) (st
 	defer cancel()
 	command := exec.CommandContext(ctx, path, "--version")
 	output, err := command.Output()
-	if err != nil || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		return "", errors.New("version command timed out")
+	}
+	if err != nil {
 		return "", errors.New("version command failed")
 	}
 	match := postgresVersionPattern.FindStringSubmatch(string(output))
