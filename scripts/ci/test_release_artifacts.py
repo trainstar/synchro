@@ -41,6 +41,14 @@ def elf_x64() -> bytes:
     return bytes(value)
 
 
+def macho_arm64() -> bytes:
+    value = bytearray(32)
+    value[:4] = b"\xcf\xfa\xed\xfe"
+    value[4:8] = (0x0100000C).to_bytes(4, "little")
+    value[12:16] = (2).to_bytes(4, "little")
+    return bytes(value)
+
+
 class ReleaseArtifactsTests(unittest.TestCase):
     def test_apple_startup_retains_only_sanitized_failure_diagnostic(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -233,6 +241,224 @@ class ReleaseArtifactsTests(unittest.TestCase):
                 )
                 self.assertIn(f'-o "{output}"', result.stdout)
                 self.assertNotIn(f"../../{output}", result.stdout)
+
+    def test_local_postgres_start_requires_verified_prebuilt_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            witness = root / "provisioner-witness"
+            go_witness = root / "go-witness"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            go = bin_dir / "go"
+            go.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$GO_WITNESS\"\n"
+                "exit 47\n",
+                encoding="utf-8",
+            )
+            go.chmod(0o700)
+            provisioner = root / "synchro-local-postgres"
+            provisioner.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "arguments = dict(zip(sys.argv[2::2], sys.argv[3::2]))\n"
+                "if sys.argv[1:] and sys.argv[1] == 'start':\n"
+                "    Path(arguments['--url-file']).write_text('postgres://fixture\\n', encoding='utf-8')\n"
+                "    Path(arguments['--attach-environment-file']).write_text('', encoding='utf-8')\n"
+                f"    Path({str(witness)!r}).write_text('start\\n', encoding='utf-8')\n"
+                "    raise SystemExit(0)\n"
+                "if sys.argv[1:] and sys.argv[1] == 'prepare':\n"
+                f"    Path({str(witness)!r}).write_text('prepare\\n', encoding='utf-8')\n"
+                "    raise SystemExit(47)\n"
+                "raise SystemExit(99)\n",
+                encoding="utf-8",
+            )
+            provisioner.chmod(0o700)
+            original_provisioner = provisioner.read_bytes()
+            adapter = root / "adapter/synchrod-pg"
+            adapter.parent.mkdir()
+            adapter.write_text("adapter\n", encoding="utf-8")
+            adapter.chmod(0o700)
+            extension = root / "extension"
+            extension.mkdir()
+            pg_bin = root / "pg-bin"
+            pg_bin.mkdir()
+            initdb = pg_bin / "initdb"
+            initdb.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            initdb.chmod(0o700)
+            state = root / "state"
+            common = [
+                "make", "--no-print-directory", "local-postgres-start",
+                f"LOCAL_POSTGRES_BINARY={provisioner}",
+                f"CONFORMANCE_ADAPTER_ARTIFACT_DIR={adapter.parent}",
+                f"CONFORMANCE_EXTENSION_ARTIFACT={extension}",
+                f"PGRX_PG_BIN_DIR={pg_bin}",
+                f"LOCAL_POSTGRES_STATE_DIR={state}",
+                f"LOCAL_POSTGRES_PID_FILE={state / 'postgres.pid'}",
+                f"LOCAL_POSTGRES_LOG_FILE={state / 'postgres.log'}",
+                f"LOCAL_POSTGRES_URL_FILE={state / 'postgres.url'}",
+                f"LOCAL_POSTGRES_ATTACH_ENV_FILE={state / 'attach.env'}",
+            ]
+            environment = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "GO_WITNESS": str(go_witness),
+            }
+            expected = hashlib.sha256(provisioner.read_bytes()).hexdigest()
+            default = subprocess.run(
+                common, cwd=REPO_ROOT, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(default.returncode, 0)
+            self.assertIn("build", go_witness.read_text(encoding="utf-8"))
+            self.assertFalse(witness.exists())
+
+            go_witness.unlink()
+            valid = subprocess.run(
+                [*common, f"LOCAL_POSTGRES_BINARY_SHA256={expected}"], cwd=REPO_ROOT, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(witness.read_text(encoding="utf-8"), "start\n")
+            self.assertFalse(go_witness.exists())
+
+            witness.unlink()
+            provisioner.write_bytes(provisioner.read_bytes() + b"# changed\n")
+            changed = subprocess.run(
+                [*common, f"LOCAL_POSTGRES_BINARY_SHA256={expected}"], cwd=REPO_ROOT, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertIn("checksum mismatch", changed.stderr)
+            self.assertFalse(witness.exists())
+            self.assertFalse(go_witness.exists())
+
+            provisioner.write_bytes(original_provisioner)
+            provisioner.chmod(0o700)
+
+            missing = subprocess.run(
+                [*common, f"LOCAL_POSTGRES_BINARY={root / 'missing'}", f"LOCAL_POSTGRES_BINARY_SHA256={expected}"],
+                cwd=REPO_ROOT, env=environment, capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("is unavailable", missing.stderr)
+            self.assertFalse(witness.exists())
+            self.assertFalse(go_witness.exists())
+
+            overlay = root / "Makefile"
+            build_witness = root / "build-witness"
+            overlay.write_text(
+                ".PHONY: build build-seed verify-rn-seed\n"
+                "build build-seed verify-rn-seed:\n\t@printf '%s\\n' build > \"$(BUILD_WITNESS)\"\n",
+                encoding="utf-8",
+            )
+            client = [
+                "make", "--no-print-directory", "-f", "Makefile", "-f", str(overlay), "synchrod-pg-test-start",
+                f"LOCAL_POSTGRES_BINARY={provisioner}", f"LOCAL_POSTGRES_BINARY_SHA256={expected}",
+                f"SYNCHROD_PG_PID_FILE={root / 'adapter.pid'}", f"SYNCHROD_PG_LOG_FILE={root / 'adapter.log'}",
+                f"BUILD_WITNESS={build_witness}",
+                "ADAPTER_TEST_URL=postgres://fixture",
+            ]
+            prepared = subprocess.run(
+                client, cwd=REPO_ROOT, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(prepared.returncode, 0)
+            self.assertTrue(build_witness.exists())
+            self.assertEqual(witness.read_text(encoding="utf-8"), "prepare\n")
+            self.assertFalse(go_witness.exists())
+
+            witness.unlink()
+            build_witness.unlink()
+            invalid = subprocess.run(
+                [*client, "LOCAL_POSTGRES_BINARY_SHA256=not-a-digest"], cwd=REPO_ROOT, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("must be a lowercase SHA-256 digest", invalid.stderr)
+            self.assertFalse(witness.exists())
+            self.assertFalse(build_witness.exists())
+            self.assertFalse(go_witness.exists())
+
+    def test_apple_provisioner_verifies_artifact_identity_before_start(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        build = workflow.split("      - name: Build exact server payloads and provisioners\n        run: |\n", 1)[1].split(
+            "\n      - uses:", 1,
+        )[0]
+        self.assertIn("GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 make build-local-postgres", build)
+        self.assertIn("git rev-parse HEAD > dist/release-provisioner-darwin-arm64/source.commit", build)
+        self.assertIn("synchro-local-postgres.sha256", build)
+        apple = workflow.split("  package-apple:\n", 1)[1]
+        self.assertIn("name: release-provisioner-darwin-arm64", apple)
+        self.assertIn("run-id: ${{ needs.seal.outputs.artifact_run_id }}", apple)
+        verification = textwrap.dedent(apple.split(
+            "      - name: Verify Darwin provisioner\n        env:\n", 1,
+        )[1].split("\n      - name:", 1)[0].split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tracked").write_text("candidate\n", encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True, timeout=10)
+            subprocess.run(["git", "add", "tracked"], cwd=root, check=True, timeout=10)
+            subprocess.run(
+                ["git", "-c", "user.name=release-test", "-c", "user.email=release-test@example.invalid", "commit", "--quiet", "-m", "candidate"],
+                cwd=root, check=True, timeout=10,
+            )
+            source = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            artifact = root / "dist/release-provisioner-darwin-arm64"
+            artifact.mkdir(parents=True)
+            provisioner = artifact / "synchro-local-postgres"
+            provisioner.write_bytes(macho_arm64())
+            provisioner.chmod(0o700)
+            (artifact / "source.commit").write_text(source + "\n", encoding="ascii")
+            checksum = artifact / "synchro-local-postgres.sha256"
+            checksum.write_text(hashlib.sha256(provisioner.read_bytes()).hexdigest() + "\n", encoding="ascii")
+            environment = {
+                **os.environ,
+                "GITHUB_WORKSPACE": str(root),
+                "GITHUB_ENV": str(root / "github.env"),
+                "EXPECTED_SOURCE_COMMIT": source,
+            }
+            valid = subprocess.run(
+                ["bash", "-c", verification], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            selected = (root / "github.env").read_text(encoding="utf-8")
+            self.assertIn(f"LOCAL_POSTGRES_BINARY={provisioner}", selected)
+            self.assertIn("LOCAL_POSTGRES_BINARY_SHA256=", selected)
+
+            provisioner.write_bytes(macho_arm64() + b"changed")
+            changed = subprocess.run(
+                ["bash", "-c", verification], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertIn("checksum mismatch", changed.stderr)
+
+            provisioner.write_bytes(macho_arm64())
+            checksum.write_text(hashlib.sha256(provisioner.read_bytes()).hexdigest() + "\n", encoding="ascii")
+            (artifact / "source.commit").write_text("f" * 40 + "\n", encoding="ascii")
+            wrong_source = subprocess.run(
+                ["bash", "-c", verification], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(wrong_source.returncode, 0)
+            self.assertIn("does not match the candidate", wrong_source.stderr)
+
+            (artifact / "source.commit").write_text(source + "\n", encoding="ascii")
+            wrong_platform = bytearray(macho_arm64())
+            wrong_platform[4:8] = (0x01000007).to_bytes(4, "little")
+            provisioner.write_bytes(wrong_platform)
+            checksum.write_text(hashlib.sha256(provisioner.read_bytes()).hexdigest() + "\n", encoding="ascii")
+            invalid_platform = subprocess.run(
+                ["bash", "-c", verification], cwd=root, env=environment,
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            self.assertNotEqual(invalid_platform.returncode, 0)
+            self.assertIn("not a Mach-O arm64 executable", invalid_platform.stderr)
 
     def write_inventory(self, root: Path) -> Path:
         artifacts = [
