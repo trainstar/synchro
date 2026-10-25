@@ -61,6 +61,7 @@
 	test-consumer-server \
 	test-consumer-go \
 	lint-go \
+	audit-rn \
 	lint-rn \
 	lint-rust-core \
 	lint-rust-pg \
@@ -408,6 +409,7 @@ help:
 	@echo "  test-consumer-server  - Run the SUP-PG-LINUX-X64-001 lifecycle with locally built server artifacts"
 	@echo "  test-consumer-go      - Resolve and compile the public Go module consumer"
 	@echo "  lint-go               - Run Go formatting checks and go vet"
+	@echo "  audit-rn              - Run the full recursive React Native workspace audit"
 	@echo "  lint-rn               - Run React Native typecheck and ESLint"
 	@echo "  lint-rust-core        - Run Rust fmt and clippy for the shared core"
 	@echo "  lint-rust-pg          - Run Rust fmt and clippy for the PostgreSQL extension"
@@ -1137,6 +1139,9 @@ test-consumer-go:
 lint-rn:
 	cd clients/react-native && yarn typecheck
 	cd clients/react-native && yarn lint
+
+audit-rn:
+	cd clients/react-native && node .yarn/releases/yarn-4.11.0.cjs npm audit --all --recursive --json
 
 test: test-rust-core test-adapter test-swift-unit test-kotlin-unit test-rn-unit verify-contract docs-build
 
