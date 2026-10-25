@@ -216,10 +216,23 @@ jobs:
           cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
           cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 
-      - name: Build exact server payloads and provisioner
+      - name: Build exact server payloads and provisioners
         run: |
+          set -euo pipefail
           make release-stage-server VERSION="${{ needs.candidate.outputs.version }}" PGRX_PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
           make build-local-postgres LOCAL_POSTGRES_BINARY=dist/release-provisioner/synchro-local-postgres
+          darwin_provisioner=dist/release-provisioner-darwin-arm64/synchro-local-postgres
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 make build-local-postgres LOCAL_POSTGRES_BINARY="$darwin_provisioner"
+          python3 - "$darwin_provisioner" <<'PY'
+          from pathlib import Path
+          import sys
+
+          data = Path(sys.argv[1]).read_bytes()
+          if data[:8] != b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" or data[12:16] != b"\x02\x00\x00\x00":
+              raise SystemExit("Darwin provisioner is not a Mach-O arm64 executable")
+          PY
+          git rev-parse HEAD > dist/release-provisioner-darwin-arm64/source.commit
+          shasum -a 256 "$darwin_provisioner" | cut -d ' ' -f 1 > dist/release-provisioner-darwin-arm64/synchro-local-postgres.sha256
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -231,6 +244,16 @@ jobs:
         with:
           name: release-provisioner
           path: dist/release-provisioner/synchro-local-postgres
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-provisioner-darwin-arm64
+          path: |
+            dist/release-provisioner-darwin-arm64/synchro-local-postgres
+            dist/release-provisioner-darwin-arm64/synchro-local-postgres.sha256
+            dist/release-provisioner-darwin-arm64/source.commit
           if-no-files-found: error
           retention-days: 90
 
@@ -787,6 +810,41 @@ jobs:
           run-id: ${{ needs.seal.outputs.artifact_run_id }}
           github-token: ${{ github.token }}
           path: dist/releases/${{ needs.candidate.outputs.release_dir_name }}
+
+      - name: Download Darwin provisioner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-provisioner-darwin-arm64
+          run-id: ${{ needs.seal.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          path: dist/release-provisioner-darwin-arm64
+
+      - name: Verify Darwin provisioner
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.candidate.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          provisioner=dist/release-provisioner-darwin-arm64/synchro-local-postgres
+          expected_hash="$(cat dist/release-provisioner-darwin-arm64/synchro-local-postgres.sha256)"
+          artifact_source="$(cat dist/release-provisioner-darwin-arm64/source.commit)"
+          case "$expected_hash" in *[!0123456789abcdef]*|'') echo "Darwin provisioner checksum is invalid" >&2; exit 1 ;; esac
+          test "${#expected_hash}" = 64 || { echo "Darwin provisioner checksum is invalid" >&2; exit 1; }
+          test "$artifact_source" = "$EXPECTED_SOURCE_COMMIT" || { echo "Darwin provisioner source does not match the candidate" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT" || { echo "Apple checkout does not match the candidate" >&2; exit 1; }
+          test "$(shasum -a 256 "$provisioner" | cut -d ' ' -f 1)" = "$expected_hash" || { echo "Darwin provisioner checksum mismatch" >&2; exit 1; }
+          python3 - "$provisioner" <<'PY'
+          from pathlib import Path
+          import sys
+
+          data = Path(sys.argv[1]).read_bytes()
+          if data[:8] != b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" or data[12:16] != b"\x02\x00\x00\x00":
+              raise SystemExit("Darwin provisioner is not a Mach-O arm64 executable")
+          PY
+          chmod 700 "$provisioner"
+          {
+            echo "LOCAL_POSTGRES_BINARY=$GITHUB_WORKSPACE/$provisioner"
+            echo "LOCAL_POSTGRES_BINARY_SHA256=$expected_hash"
+          } >> "$GITHUB_ENV"
 
       - name: Select required Xcode and simulator
         env:

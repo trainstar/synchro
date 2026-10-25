@@ -265,6 +265,7 @@ LOCAL_POSTGRES_URL_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/postgres.url
 LOCAL_POSTGRES_ATTACH_ENV_FILE ?= $(LOCAL_POSTGRES_STATE_DIR)/attach.env
 LOCAL_POSTGRES_LISTEN ?= 127.0.0.1
 LOCAL_POSTGRES_BINARY ?= $(CURDIR)/bin/synchro-local-postgres
+LOCAL_POSTGRES_BINARY_SHA256 ?=
 # One warm-connect gate run consumes one freshly started provisioner
 # instance. Restart local-postgres-start before each run.
 WARM_CONNECT_ENV_FILE ?=
@@ -2587,7 +2588,21 @@ build-local-postgres:
 	@mkdir -p "$(dir $(LOCAL_POSTGRES_BINARY))"
 	cd conformance && GOFLAGS= GOWORK=off go build -o "$(abspath $(LOCAL_POSTGRES_BINARY))" ./cmd/synchro-local-postgres
 
-local-postgres-start: build-local-postgres
+.PHONY: local-postgres-provisioner
+local-postgres-provisioner:
+	@set -eu; \
+		expected="$(LOCAL_POSTGRES_BINARY_SHA256)"; \
+		if [ -z "$$expected" ]; then \
+			$(MAKE) build-local-postgres LOCAL_POSTGRES_BINARY="$(LOCAL_POSTGRES_BINARY)"; \
+		else \
+			case "$$expected" in *[!0123456789abcdef]*|'') echo "LOCAL_POSTGRES_BINARY_SHA256 must be a lowercase SHA-256 digest" >&2; exit 1 ;; esac; \
+			test "$${#expected}" = 64 || { echo "LOCAL_POSTGRES_BINARY_SHA256 must be a lowercase SHA-256 digest" >&2; exit 1; }; \
+			test -f "$(LOCAL_POSTGRES_BINARY)" && test ! -L "$(LOCAL_POSTGRES_BINARY)" && test -x "$(LOCAL_POSTGRES_BINARY)" || { echo "prebuilt local PostgreSQL provisioner is unavailable" >&2; exit 1; }; \
+			actual="$$(shasum -a 256 "$(LOCAL_POSTGRES_BINARY)" | cut -d ' ' -f 1)"; \
+			test "$$actual" = "$$expected" || { echo "prebuilt local PostgreSQL provisioner checksum mismatch" >&2; exit 1; }; \
+		fi
+
+local-postgres-start: local-postgres-provisioner
 	@test -x "$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)/synchrod-pg" || $(MAKE) conformance-adapter-artifact
 	@test -d "$(CONFORMANCE_EXTENSION_ARTIFACT)" || $(MAKE) conformance-pg18-extension-test-artifact
 	@test -n "$(PGRX_PG_BIN_DIR)" || { echo "PGRX_PG_BIN_DIR is required" >&2; exit 1; }
@@ -2692,7 +2707,7 @@ local-postgres-run: build-local-postgres
 		--attach-environment-file "$(LOCAL_POSTGRES_ATTACH_ENV_FILE)" \
 		--listen "$(LOCAL_POSTGRES_LISTEN)"
 
-synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
+synchrod-pg-test-start synchrod-pg-test-serve: local-postgres-provisioner build build-seed verify-rn-seed
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@set -eu; \
 	export MIN_CLIENT_VERSION="$(MIN_CLIENT_VERSION)" \
@@ -2709,7 +2724,7 @@ synchrod-pg-test-start synchrod-pg-test-serve: build build-seed verify-rn-seed
 		status=$$?; test "$$status" -eq 3 || exit "$$status"; \
 	fi; \
 	echo "Preparing client integration database..."; \
-	(cd conformance && GOFLAGS= GOWORK=off go run ./cmd/synchro-local-postgres prepare --repo-root .. $(if $(filter 1,$(CLIENT_DATASET)),--dataset)); \
+	(cd conformance && "$(abspath $(LOCAL_POSTGRES_BINARY))" prepare --repo-root .. $(if $(filter 1,$(CLIENT_DATASET)),--dataset)); \
 	if [ "$(REFRESH_RN_SEED)" = "1" ]; then \
 		seed_output="$(REFRESH_RN_SEED_OUTPUT)"; \
 		echo "Refreshing client seed database..."; \
