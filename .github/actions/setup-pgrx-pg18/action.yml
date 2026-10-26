@@ -6,7 +6,8 @@ inputs:
     description: >-
       Source for the PostgreSQL 18 runtime. Use certified, download, brew, or artifact.
       certified installs the certified PGDG PostgreSQL 18.3 packages on Linux.
-      download installs the current PostgreSQL 18 minor release.
+      download accepts only PostgreSQL 18.6 with cargo-pgrx 0.17.0.
+      brew requires the installed PostgreSQL 18.6 formula.
     required: true
   cache-runtime:
     description: Cache the pgrx runtime directory. The certified source never uses this cache.
@@ -20,6 +21,25 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Select exact PostgreSQL runtime
+      id: runtime
+      shell: bash
+      env:
+        RUNTIME_SOURCE: ${{ inputs.runtime-source }}
+        PGRX_VERSION: ${{ inputs.pgrx-version }}
+      run: |
+        set -euo pipefail
+        case "$RUNTIME_SOURCE:$RUNNER_OS:$RUNNER_ARCH" in
+          certified:Linux:X64) version=18.3 ;;
+          download:Linux:X64|brew:macOS:ARM64|artifact:Linux:X64) version=18.6 ;;
+          *) echo "Unsupported PostgreSQL runtime source, OS, or architecture" >&2; exit 1 ;;
+        esac
+        if [ "$RUNTIME_SOURCE" = download ] && [ "$PGRX_VERSION" != 0.17.0 ]; then
+          echo "The PostgreSQL download requires cargo-pgrx 0.17.0" >&2
+          exit 1
+        fi
+        echo "postgresql_version=$version" >> "$GITHUB_OUTPUT"
+
     - name: Install PostgreSQL extension build dependencies
       if: runner.os == 'Linux'
       shell: bash
@@ -63,10 +83,10 @@ runs:
         sudo chmod -R a+w "$(/usr/lib/postgresql/18/bin/pg_config --sharedir)/extension" "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)"
 
     - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-      if: inputs.cache-runtime == 'true' && inputs.runtime-source != 'certified'
+      if: inputs.cache-runtime == 'true' && (inputs.runtime-source == 'download' || inputs.runtime-source == 'brew')
       with:
         path: ~/.pgrx
-        key: pgrx-${{ runner.os }}-${{ inputs.pgrx-version }}-pg18
+        key: pgrx-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runtime-source }}-pg${{ steps.runtime.outputs.postgresql_version }}-pgrx${{ inputs.pgrx-version }}
 
     - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
       with:
@@ -74,7 +94,7 @@ runs:
           ~/.cargo/bin/cargo-pgrx
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-        key: cargo-pgrx-${{ runner.os }}-${{ inputs.pgrx-version }}
+        key: cargo-pgrx-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runtime-source }}-pg${{ steps.runtime.outputs.postgresql_version }}-pgrx${{ inputs.pgrx-version }}
 
     - name: Install cargo-pgrx
       shell: bash
@@ -86,20 +106,42 @@ runs:
     - name: Initialize PostgreSQL 18 for pgrx
       if: inputs.runtime-source != 'artifact'
       shell: bash
+      env:
+        RUNTIME_SOURCE: ${{ inputs.runtime-source }}
+        EXPECTED_POSTGRESQL_VERSION: ${{ steps.runtime.outputs.postgresql_version }}
       run: |
-        if [ "${{ inputs.runtime-source }}" = 'certified' ]; then
+        set -euo pipefail
+        if [ "$RUNTIME_SOURCE" = certified ]; then
           cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
         elif [ -f "$HOME/.pgrx/config.toml" ] && grep -q '^pg18' "$HOME/.pgrx/config.toml"; then
           echo "Using cached PG18 pgrx runtime"
-        elif [ "${{ inputs.runtime-source }}" = 'brew' ]; then
+        elif [ "$RUNTIME_SOURCE" = brew ]; then
           cargo pgrx init --pg18 "$(brew --prefix postgresql@18)/bin/pg_config" || {
-            echo "cargo pgrx init failed; reporting pgrx logs" >&2
-            find "$HOME/.pgrx" -maxdepth 2 -name '*.log' -exec cat {} + >&2 2>/dev/null || true
+            echo "cargo pgrx init failed" >&2
             exit 1
           }
-        elif [ "${{ inputs.runtime-source }}" = 'download' ]; then
+        elif [ "$RUNTIME_SOURCE" = download ]; then
           cargo pgrx init --pg18 download
         else
-          echo "Unsupported PostgreSQL 18 runtime source: ${{ inputs.runtime-source }}" >&2
+          echo "Unsupported PostgreSQL 18 runtime source" >&2
           exit 1
         fi
+        config="$HOME/.pgrx/config.toml"
+        test -f "$config"
+        pg_config="$(awk -F'"' '/^pg18[[:space:]]*=/ { print $2 }' "$config")"
+        test -x "$pg_config"
+        case "$RUNTIME_SOURCE" in
+          certified) test "$pg_config" = /usr/lib/postgresql/18/bin/pg_config ;;
+          brew) test "$pg_config" = "$(brew --prefix postgresql@18)/bin/pg_config" ;;
+          download) test "$pg_config" = "$HOME/.pgrx/$EXPECTED_POSTGRESQL_VERSION/pgrx-install/bin/pg_config" ;;
+        esac
+        pg_bindir="$(dirname "$pg_config")"
+        for program in initdb pg_ctl postgres psql pg_isready pg_config; do
+          test -x "$pg_bindir/$program"
+          output="$("$pg_bindir/$program" --version)"
+          version="$(printf '%s\n' "$output" | grep -oE '[0-9]+[.][0-9]+' | head -n 1)"
+          if [ "$version" != "$EXPECTED_POSTGRESQL_VERSION" ]; then
+            echo "PostgreSQL runtime version mismatch" >&2
+            exit 1
+          fi
+        done

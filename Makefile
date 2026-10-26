@@ -52,6 +52,7 @@
 	release-stage \
 	release-verify \
 	release-consumer-artifacts \
+	release-test-upgrade \
 	release-run-support-cell \
 	test-conformance \
 	test-blackbox \
@@ -404,6 +405,7 @@ help:
 	@echo "  release-stage         - Assemble and seal already built release components"
 	@echo "  release-verify        - Verify one sealed release without building"
 	@echo "  release-consumer-artifacts - Prepare sealed payloads for package consumers"
+	@echo "  release-test-upgrade - Run one current client upgrade against sealed package inputs"
 	@echo "  test-release-publish  - Test publication identity and recovery state"
 	@echo "  test-server-consumer-helper - Run server packaged-consumer helper unit tests"
 	@echo "  test-consumer-server  - Run the SUP-PG-LINUX-X64-001 lifecycle with locally built server artifacts"
@@ -524,15 +526,18 @@ set-version:
 # The adapter owner fingerprint hashes this binary. VCS stamping would change
 # the hash when a later step dirties a tracked file, such as Podfile.lock.
 build:
+	@python3 scripts/ci/download_go_modules.py --module-dir api/go
 	@mkdir -p "$(dir $(BINARY))"
-	cd api/go && GOWORK=off go build -buildvcs=false -o "$(abspath $(BINARY))" ./cmd/synchrod-pg
+	cd api/go && GOPROXY=off GOWORK=off go build -buildvcs=false -o "$(abspath $(BINARY))" ./cmd/synchrod-pg
 
 build-seed:
+	@python3 scripts/ci/download_go_modules.py --module-dir api/go
 	@mkdir -p "$(dir $(SEED_BINARY))"
-	cd api/go && GOWORK=off go build -o "$(abspath $(SEED_BINARY))" ./cmd/synchro-seed
+	cd api/go && GOPROXY=off GOWORK=off go build -o "$(abspath $(SEED_BINARY))" ./cmd/synchro-seed
 
 build-check:
-	cd api/go && GOWORK=off go build ./...
+	@python3 scripts/ci/download_go_modules.py --module-dir api/go
+	cd api/go && GOPROXY=off GOWORK=off go build ./...
 
 run:
 	cd api/go && GOWORK=off go run ./cmd/synchrod-pg
@@ -567,10 +572,10 @@ test-docs-contract:
 	cd docs && npm run verify:contract
 
 conformance-mod-download:
-	cd conformance && GOFLAGS= GOWORK=off go mod download
+	@python3 scripts/ci/download_go_modules.py --module-dir conformance
 
 build-conformance: conformance-mod-download
-	cd conformance && GOFLAGS= GOWORK=off go build ./...
+	cd conformance && GOFLAGS= GOPROXY=off GOWORK=off go build ./...
 
 lint-conformance: conformance-mod-download
 	@test -z "$$(find conformance -name '*.go' -print0 | xargs -0 gofmt -l)"
@@ -777,6 +782,7 @@ parse-testresult:
 	@cd conformance && GOFLAGS= GOWORK=off go run ./cmd/testresult --test "$(TESTRESULT_TEST_NAME)"
 
 conformance-adapter-artifact:
+	@python3 scripts/ci/download_go_modules.py --module-dir api/go
 	@set -eu; \
 		final="$(CONFORMANCE_ADAPTER_ARTIFACT_DIR)"; \
 		parent="$$(dirname "$$final")"; \
@@ -788,7 +794,7 @@ conformance-adapter-artifact:
 		trap cleanup EXIT HUP INT TERM; \
 		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
 		mkdir "$$stage"; \
-		(cd api/go && GOWORK=off go build -o "$$stage/synchrod-pg" ./cmd/synchrod-pg); \
+		(cd api/go && GOPROXY=off GOWORK=off go build -o "$$stage/synchrod-pg" ./cmd/synchrod-pg); \
 		test -x "$$stage/synchrod-pg"; \
 		digest="$$(shasum -a 256 "$$stage/synchrod-pg" | cut -d ' ' -f 1)"; \
 		test -n "$$digest"; \
@@ -799,6 +805,7 @@ conformance-adapter-artifact:
 		trap - EXIT HUP INT TERM
 
 conformance-seed-artifact:
+	@python3 scripts/ci/download_go_modules.py --module-dir api/go
 	@set -eu; \
 		final="$(CONFORMANCE_SEED_ARTIFACT)"; \
 		parent="$$(dirname "$$final")"; \
@@ -809,7 +816,7 @@ conformance-seed-artifact:
 		cleanup() { rm -f "$$stage" "$$stage.sha256.tmp"; rmdir "$$lock" 2>/dev/null || true; }; \
 		trap cleanup EXIT HUP INT TERM; \
 		test ! -e "$$final" || { echo "$$final already exists" >&2; exit 1; }; \
-		(cd api/go && GOWORK=off go build -o "$$stage" ./cmd/synchro-seed); \
+		(cd api/go && GOPROXY=off GOWORK=off go build -o "$$stage" ./cmd/synchro-seed); \
 		test -x "$$stage"; \
 		digest="$$(shasum -a 256 "$$stage" | cut -d ' ' -f 1)"; \
 		test -n "$$digest"; \
@@ -1029,6 +1036,43 @@ release-consumer-artifacts: release-verify
 		--inventory "$(RELEASE_INVENTORY)" --support-matrix "$(RELEASE_SUPPORT_MATRIX)" \
 		--repo-root "$(CURDIR)" --output "$(abspath $(RELEASE_CONSUMER_DIR))"
 
+# The Package stage extracts RELEASE_CONSUMER_DIR once with release-consumer-artifacts.
+release-test-upgrade:
+	@test "$(VERSION)" = "$(CURRENT_VERSION)" && test -n "$(RELEASE_DIR)" || { echo "VERSION and RELEASE_DIR are required" >&2; exit 1; }
+	@test -d "$(RELEASE_CONSUMER_DIR)" || { echo "Run release-consumer-artifacts before release-test-upgrade" >&2; exit 1; }
+	@case "$(SUPPORT_CELL_ID)" in \
+		SUP-IOS-CURRENT-001) upgrade=test-swift-upgrade ;; \
+		SUP-ANDROID-CURRENT-001) upgrade=test-kotlin-upgrade ;; \
+		SUP-RN-IOS-CURRENT-001) upgrade=test-rn-upgrade-ios ;; \
+		SUP-RN-ANDROID-CURRENT-001) upgrade=test-rn-upgrade-android ;; \
+		*) echo "Unsupported upgrade cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
+		esac; \
+		set -eu; \
+		result="$(abspath $(RELEASE_EVIDENCE_DIR))/upgrades/$(SUPPORT_CELL_ID).json"; \
+		rm -f "$$result"; \
+		$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"; \
+		python3 scripts/ci/download_go_modules.py --module-dir api/go; \
+		$(MAKE) --no-print-directory conformance-mod-download; \
+		mkdir -p "$(UPGRADE_WORK_DIR)"; \
+		tmp="$$(mktemp -d "$(UPGRADE_WORK_DIR)/sealed-result.XXXXXX")"; \
+		trap 'rm -rf "$$tmp"' EXIT HUP INT TERM; \
+		set -- --cell "$(SUPPORT_CELL_ID)" --work-dir "$(abspath $(UPGRADE_WORK_DIR))" \
+			--release-dir "$(abspath $(RELEASE_DIR))" --consumer-dir "$(abspath $(RELEASE_CONSUMER_DIR))" \
+			--version "$(VERSION)" --predecessor-version "$(UPGRADE_PREDECESSOR_VERSION)" \
+			--predecessor-swift-revision "$(UPGRADE_PREDECESSOR_SWIFT_REVISION)"; \
+		python3 verification/consumers/upgrade/sealed_result.py snapshot "$$@" --output "$$tmp/sealed.json"; \
+		if $(MAKE) --no-print-directory "$$upgrade" \
+			CLIENT_ARTIFACT_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" CLIENT_ARTIFACTS_PREPARED=1 \
+			UPGRADE_PACKAGE_SNAPSHOT="$$tmp/packages.json" SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" > "$$tmp/test.log" 2>&1; then \
+			cat "$$tmp/test.log"; \
+		else \
+			cat "$$tmp/test.log"; exit 1; \
+		fi; \
+		$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"; \
+		python3 verification/consumers/upgrade/sealed_result.py record "$$@" \
+			--before "$$tmp/sealed.json" --runtime-before "$$tmp/packages.json" \
+			--test-log "$$tmp/test.log" --output "$$result"
+
 release-run-support-cell:
 	@test -n "$(SUPPORT_CELL_ID)" || { echo "SUPPORT_CELL_ID is required" >&2; exit 1; }
 	@$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"
@@ -1075,7 +1119,17 @@ release-run-support-cell:
 				PACKAGED_SMOKE_RELEASE_MANIFEST="$$release/release-manifest.json" \
 				PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$$artifacts" PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$$hashes" \
 				SYNCHRO_CONSUMER_RESOLUTION=prepublication \
-				SYNCHRO_PREPUBLICATION_GIT_URL="file://$(abspath $(RELEASE_CONSUMER_DIR))/source.git" ;; \
+				SYNCHRO_PREPUBLICATION_GIT_URL="file://$(abspath $(RELEASE_CONSUMER_DIR))/source.git"; \
+			case "$(SUPPORT_CELL_ID)" in \
+			SUP-IOS-CURRENT-001|SUP-ANDROID-CURRENT-001|SUP-RN-IOS-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+				serial=""; \
+				case "$(SUPPORT_CELL_ID)" in SUP-ANDROID-CURRENT-001|SUP-RN-ANDROID-CURRENT-001) \
+					serial="$$(python3 verification/probe_support_environment.py resolve-android-serial --sdk-root "$(ANDROID_HOME)")" ;; esac; \
+				$(MAKE) --no-print-directory release-test-upgrade VERSION="$(VERSION)" RELEASE_DIR="$$release" \
+					RELEASE_CONSUMER_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" \
+					RELEASE_EVIDENCE_DIR="$(abspath $(RELEASE_EVIDENCE_DIR))" SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" \
+					KOTLIN_ANDROID_SERIAL="$$serial" ANDROID_SERIAL="$$serial" ;; \
+			esac ;; \
 		*) echo "unsupported required release support cell: $(SUPPORT_CELL_ID)" >&2; exit 1 ;; \
 		esac
 	@$(MAKE) --no-print-directory release-verify VERSION="$(VERSION)" RELEASE_DIR="$(abspath $(RELEASE_DIR))"
@@ -1085,10 +1139,10 @@ test-python-runner:
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_run_python_tests
 
 test-release-artifacts: test-python-runner
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts verification.test_support_environments verification.test_probe_support_environment
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_artifacts scripts.ci.test_sealed_upgrades verification.test_support_environments verification.test_probe_support_environment
 
 test-release-publish: test-python-runner
-	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish
+	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_release_publish scripts.ci.test_download_go_modules
 
 test-android-emulator-prepare: test-python-runner
 	@PYTHONPYCACHEPREFIX="$(PACKAGED_SMOKE_TMP_ROOT)/python-cache" python3 -m scripts.ci.run_python_tests scripts.ci.test_android_emulator_prepare scripts.ci.test_run_android_emulator
@@ -1215,31 +1269,22 @@ ci-candidate-swift:
 	$(MAKE) test-swift
 	$(MAKE) test-client-schema-identity
 	$(MAKE) test-consumer-swift
-	$(MAKE) test-swift-upgrade
 
 ci-candidate-kotlin:
 	$(MAKE) test-kotlin-instrumentation
 	$(MAKE) test-kotlin
 	$(MAKE) test-consumer-kotlin-device
-	$(MAKE) test-kotlin-upgrade
-	$(MAKE) test-consumer-kotlin
 
 # The scenario corpus resets the server state, so it runs last.
 ci-candidate-rn-ios:
 	$(MAKE) test-rn-e2e-ios-build
 	$(MAKE) test-rn-e2e-ios-smoke
 	$(MAKE) test-rn-bridge-transactions-ios
-	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.88.0
-	$(MAKE) test-consumer-rn-ios SYNCHRO_RN_VERSION=0.82.1
-	$(MAKE) test-rn-upgrade-ios
 	$(MAKE) test-rn-scenarios-ios
 
 ci-candidate-rn-android:
 	$(MAKE) test-rn-e2e-android-smoke
 	$(MAKE) test-rn-bridge-transactions-android
-	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.88.0
-	$(MAKE) test-consumer-rn-android SYNCHRO_RN_VERSION=0.82.1
-	$(MAKE) test-rn-upgrade-android
 	$(MAKE) test-rn-scenarios-android
 
 build-swift-native-runner:
@@ -1441,7 +1486,7 @@ UPGRADE_ENV = \
 	SYNCHRO_UPGRADE_CONTROL_ADDRESS="$(UPGRADE_CONTROL_ADDRESS)" \
 	SYNCHRO_UPGRADE_PREDECESSOR_VERSION="$(UPGRADE_PREDECESSOR_VERSION)" \
 	SYNCHRO_UPGRADE_CANDIDATE_VERSION="$(CURRENT_VERSION)"
-UPGRADE_TEST = GOFLAGS= GOWORK=off go run ./cmd/testresult exact \
+UPGRADE_TEST = GOFLAGS= GOPROXY=off GOWORK=off go run ./cmd/testresult exact \
 	-test TestNativePackageUpgrade \
 	-expect target_pass \
 	-- go test -tags nativeupgrade -json ./upgrade -count=1 -timeout=60m -run '^TestNativePackageUpgrade$$'
@@ -1469,6 +1514,8 @@ test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
 		if grep -F trainstar/synchro "$$work/candidate/Package.resolved" >/dev/null 2>&1; then \
 			echo "Swift candidate resolved a published Synchro package" >&2; exit 1; \
 		fi; \
+		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
+			--cell "$(SUPPORT_CELL_ID)" --work-dir "$(abspath $(UPGRADE_WORK_DIR))" --output "$(UPGRADE_PACKAGE_SNAPSHOT)"; fi; \
 		cd conformance; \
 		SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/swift/run-phase.sh" \
 		SYNCHRO_UPGRADE_SWIFT_PREDECESSOR="$$work/predecessor/.build/debug/SynchroUpgrade" \
@@ -1504,6 +1551,8 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 				{ cat "$$work/$$side.log" >&2; echo "Kotlin $$side did not resolve Synchro $$version" >&2; exit 1; }; \
 			echo "Kotlin $$side resolved fit.trainstar:synchro:$$version from $$repository"; \
 		done; \
+		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
+			--cell "$(SUPPORT_CELL_ID)" --work-dir "$(abspath $(UPGRADE_WORK_DIR))" --output "$(UPGRADE_PACKAGE_SNAPSHOT)"; fi; \
 		status=0; \
 		(cd conformance && \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
@@ -1537,6 +1586,8 @@ test-rn-upgrade-android: build-rn-upgrade-android
 	@$(MAKE) --no-print-directory synchrod-pg-test-start
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-android"; \
+		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
+			--cell "$(SUPPORT_CELL_ID)" --work-dir "$(abspath $(UPGRADE_WORK_DIR))" --output "$(UPGRADE_PACKAGE_SNAPSHOT)"; fi; \
 		status=0; \
 		(cd conformance && \
 			ANDROID_HOME="$(ANDROID_HOME)" ANDROID_SERIAL="$(KOTLIN_ANDROID_SERIAL)" \
@@ -1563,6 +1614,8 @@ test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact cli
 			SYNCHRO_UPGRADE_ARTIFACT_DIR="$(abspath $(CLIENT_ARTIFACT_DIR))" \
 				sh verification/consumers/upgrade/react-native/build-app.sh ios "$$work" "$$side" "$$version" "$$control_url"; \
 		done; \
+		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
+			--cell "$(SUPPORT_CELL_ID)" --work-dir "$(abspath $(UPGRADE_WORK_DIR))" --output "$(UPGRADE_PACKAGE_SNAPSHOT)"; fi; \
 		status=0; \
 		(cd conformance && \
 			SYNCHRO_UPGRADE_RUNNER="$(CURDIR)/verification/consumers/upgrade/react-native/run-ios-phase.sh" \
@@ -2589,9 +2642,9 @@ lint-rust-pg:
 
 lint-rust: lint-rust-core lint-rust-pg
 
-build-local-postgres:
+build-local-postgres: conformance-mod-download
 	@mkdir -p "$(dir $(LOCAL_POSTGRES_BINARY))"
-	cd conformance && GOFLAGS= GOWORK=off go build -o "$(abspath $(LOCAL_POSTGRES_BINARY))" ./cmd/synchro-local-postgres
+	cd conformance && GOFLAGS= GOPROXY=off GOWORK=off go build -o "$(abspath $(LOCAL_POSTGRES_BINARY))" ./cmd/synchro-local-postgres
 
 .PHONY: local-postgres-provisioner
 local-postgres-provisioner:

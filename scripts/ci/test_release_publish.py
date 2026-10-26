@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import base64
+import copy
 import importlib.util
 import hashlib
+import io
 import json
 import os
 import re
@@ -26,6 +28,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import mock
+
+from verification.test_support_environments import valid_records
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -117,12 +121,17 @@ class PublicationStateTests(unittest.TestCase):
                 with self.assertRaisesRegex(release_publish.PublicationError, "source commit"):
                     release_publish.validate_candidate_identity(commit, self.version)
 
-    def test_recovery_requires_successful_candidate_for_dispatch_commit(self) -> None:
+    def test_recovery_requires_successful_tooling_for_dispatch_commit(self) -> None:
         command = release_step_command("Verify recovery workflow Candidate")
-        successful = {
+        self.assertIn("--tooling-only", command)
+        dispatch = {
             "id": 7, "head_sha": self.commit, "event": "push", "head_branch": "master",
-            "path": ".github/workflows/ci.yml", "status": "completed", "conclusion": "success", "run_attempt": 1,
+            "path": ".github/workflows/ci.yml", "status": "in_progress", "conclusion": None, "run_attempt": 1,
         }
+        required_jobs = [
+            {"name": name, "conclusion": "success"}
+            for name in ("source quality", "CodeQL / result", "dependency scan / result")
+        ]
         with tempfile.TemporaryDirectory(prefix="synchro-dispatch-candidate-") as directory:
             tools = Path(directory) / "tools"
             tools.mkdir()
@@ -137,9 +146,12 @@ class PublicationStateTests(unittest.TestCase):
                 publisher = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(publisher)
                 responses = json.loads(os.environ["TEST_CI_RESPONSES"])
+                jobs = json.loads(os.environ["TEST_CI_JOBS"])
                 requests = []
                 def request_json(url, token=None):
                     assert token == "fixture-token"
+                    if url.endswith("/runs/7/jobs?per_page=100"):
+                        return {"jobs": jobs}
                     assert url == (
                         "https://api.github.com/repos/trainstar/synchro/actions/workflows/ci.yml/runs"
                         f"?branch=master&event=push&head_sha={os.environ['GITHUB_SHA']}&per_page=100"
@@ -148,6 +160,7 @@ class PublicationStateTests(unittest.TestCase):
                     return {"workflow_runs": responses[min(len(requests), len(responses)) - 1]}
                 publisher.request_json = request_json
                 publisher.time.sleep = lambda seconds: None
+                publisher.CI_RUN_LOOKUP_ATTEMPTS = 3
                 sys.argv = sys.argv[1:]
                 try:
                     raise SystemExit(publisher.main())
@@ -155,19 +168,22 @@ class PublicationStateTests(unittest.TestCase):
                     print(f"requests={len(requests)}", file=sys.stderr)
                 """), encoding="utf-8")
             proxy.chmod(0o755)
-            attempts = release_publish.CI_RUN_LOOKUP_ATTEMPTS
-            for responses, accepted, requests in (
-                ([[]], False, attempts),
-                ([[{**successful, "head_sha": "b" * 40}]], False, attempts),
-                ([[{**successful, "event": "pull_request"}]], False, attempts),
-                ([[{**successful, "head_branch": "dev"}]], False, attempts),
-                ([[{**successful, "path": ".github/workflows/release.yml"}]], False, attempts),
-                ([[{**successful, "status": "in_progress", "conclusion": None}]], False, attempts),
-                ([[{**successful, "conclusion": "failure"}]], False, attempts),
-                ([[successful]], True, 1),
-                ([[], [], [successful]], True, 3),
-            ):
-                with self.subTest(responses=responses), tempfile.TemporaryDirectory() as runner:
+            cases = [
+                ([[]], required_jobs, False, 3),
+                ([[{**dispatch, "head_sha": "b" * 40}]], required_jobs, False, 3),
+                ([[{**dispatch, "event": "pull_request"}]], required_jobs, False, 3),
+                ([[{**dispatch, "head_branch": "dev"}]], required_jobs, False, 3),
+                ([[{**dispatch, "path": ".github/workflows/release.yml"}]], required_jobs, False, 3),
+                ([[dispatch]], required_jobs, True, 1),
+                ([[], [], [dispatch]], required_jobs, True, 3),
+            ]
+            for index in range(len(required_jobs)):
+                cases.append(([[dispatch]], required_jobs[:index] + required_jobs[index + 1:], False, 3))
+                failed = [dict(job) for job in required_jobs]
+                failed[index]["conclusion"] = "failure"
+                cases.append(([[dispatch]], failed, False, 3))
+            for responses, jobs, accepted, requests in cases:
+                with self.subTest(responses=responses, jobs=jobs), tempfile.TemporaryDirectory() as runner:
                     result = subprocess.run(
                         ["bash", "-c", command],
                         env={
@@ -176,6 +192,7 @@ class PublicationStateTests(unittest.TestCase):
                             "GH_TOKEN": "fixture-token", "RUNNER_TEMP": runner,
                             "TEST_PUBLISHER": str(ROOT / "scripts/release-publish.py"),
                             "TEST_CI_RESPONSES": json.dumps(responses),
+                            "TEST_CI_JOBS": json.dumps(jobs),
                         },
                         capture_output=True, text=True, timeout=20, check=False,
                     )
@@ -183,7 +200,219 @@ class PublicationStateTests(unittest.TestCase):
                     self.assertIn(f"requests={requests}", result.stderr)
                     if accepted:
                         selected = json.loads((Path(runner) / "dispatch-ci-run.json").read_text(encoding="utf-8"))
-                        self.assertEqual(selected, successful)
+                        self.assertEqual(selected, dispatch)
+
+    def test_source_candidate_requires_completed_full_success(self) -> None:
+        run = {
+            "id": 7, "head_sha": self.commit, "event": "push", "head_branch": "master",
+            "path": ".github/workflows/ci.yml", "status": "completed", "conclusion": "success", "run_attempt": 1,
+        }
+        for status, conclusion, accepted in (
+            ("in_progress", None, False),
+            ("completed", "failure", False),
+            ("completed", "success", True),
+        ):
+            with self.subTest(status=status, conclusion=conclusion):
+                response = {"workflow_runs": [{**run, "status": status, "conclusion": conclusion}]}
+                with mock.patch.object(release_publish, "request_json", return_value=response), mock.patch.object(
+                    release_publish, "CI_RUN_LOOKUP_ATTEMPTS", 1
+                ):
+                    if accepted:
+                        self.assertEqual(release_publish.successful_ci_run(
+                            "trainstar/synchro", self.commit, "fixture-token"
+                        ), response["workflow_runs"][0])
+                    else:
+                        with self.assertRaises(release_publish.PublicationError):
+                            release_publish.successful_ci_run("trainstar/synchro", self.commit, "fixture-token")
+
+    def test_recover_package_cells_reuses_only_valid_original_evidence(self) -> None:
+        cell = "SUP-PG-LINUX-X64-001"
+        source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        hashes = {role: str(index) * 64 for index, role in enumerate(
+            ("pg-extension", "adapter", "seed-tool"), start=1
+        )}
+        manifest = {
+            "source": {"commit": source},
+            "resolved_support_cells": valid_records(),
+            "distributions": [
+                {"role": role, "kind": "file", "sha256": digest} for role, digest in hashes.items()
+            ],
+        }
+        record = {
+            "schema_version": 2,
+            "cell_id": cell,
+            "source_commit": source,
+            "status": "passed",
+            "artifact_hashes": list(hashes.values()),
+            "lifecycle": {"status": "passed", "terminal": True, "test_count": 1},
+            "environment": valid_records()[0]["environment"],
+            "process_lifecycle": {
+                "kind": "server", "initial_pid": 101, "kill_signal": 9, "resume_pid": 202,
+                "push_digest": "4" * 64, "replay_equal": True,
+                "remote_value_applied": True, "server_resumed_write_verified": True,
+            },
+        }
+        owner = {
+            "status": "completed", "path": ".github/workflows/release.yml",
+            "event": "workflow_dispatch", "head_sha": source,
+            "head_repository": {"full_name": "trainstar/synchro"},
+        }
+        successful_job = {"id": 7, "name": "package server Ubuntu 24.04 x64", "conclusion": "success"}
+        cases = (
+            ("valid", None),
+            ("failed job", "no successful job"),
+            ("no job", "no successful job"),
+            ("wrong owner", "owner differs"),
+            ("wrong source", "original completed candidate owner"),
+            ("wrong record source", "did not validate"),
+            ("wrong digest", "digest differs"),
+            ("wrong manifest", "did not validate"),
+            ("ambiguous artifacts", "ambiguous evidence"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for label, failure in cases:
+                with self.subTest(case=label):
+                    selected_manifest = copy.deepcopy(manifest)
+                    selected_record = copy.deepcopy(record)
+                    selected_owner = copy.deepcopy(owner)
+                    jobs = [successful_job]
+                    if label == "failed job":
+                        jobs = [{**successful_job, "conclusion": "failure"}]
+                    elif label == "no job":
+                        jobs = []
+                    elif label == "wrong source":
+                        selected_owner["head_sha"] = "b" * 40
+                    elif label == "wrong record source":
+                        selected_record["source_commit"] = "b" * 40
+                    elif label == "wrong manifest":
+                        selected_manifest["distributions"][0]["sha256"] = "5" * 64
+                    archive_stream = io.BytesIO()
+                    with zipfile.ZipFile(archive_stream, "w") as archive:
+                        archive.writestr(f"{cell}.json", json.dumps(selected_record))
+                    archive_bytes = archive_stream.getvalue()
+                    artifact = {
+                        "name": "package-evidence-server", "id": 31, "expired": False,
+                        "workflow_run": {"id": 19},
+                        "digest": "sha256:" + hashlib.sha256(archive_bytes).hexdigest(),
+                    }
+                    if label == "wrong owner":
+                        artifact["workflow_run"]["id"] = 20
+                    elif label == "wrong digest":
+                        artifact["digest"] = "sha256:" + "0" * 64
+                    artifacts = [artifact, artifact] if label == "ambiguous artifacts" else [artifact]
+                    manifest_path = root / f"{label.replace(' ', '-')}-manifest.json"
+                    manifest_path.write_text(json.dumps(selected_manifest), encoding="utf-8")
+                    output_dir = root / label.replace(" ", "-")
+
+                    def request_json(url: str, token: str | None = None) -> dict:
+                        self.assertEqual(token, "fixture-token")
+                        if url.endswith("/actions/runs/19"):
+                            return selected_owner
+                        if "/actions/runs/19/jobs?" in url:
+                            return {"jobs": jobs}
+                        if "/actions/runs/19/artifacts?" in url:
+                            return {"artifacts": artifacts}
+                        self.fail(f"Unexpected acquisition URL: {url}")
+
+                    with mock.patch.object(release_publish, "request_json", side_effect=request_json), mock.patch.object(
+                        release_publish, "request_bytes", return_value=archive_bytes
+                    ):
+                        if failure is None:
+                            result = release_publish.recover_package_cells(
+                                ROOT, manifest_path, "trainstar/synchro", "19", output_dir, "fixture-token"
+                            )
+                            self.assertEqual(result["accepted_cells"], [cell])
+                            self.assertEqual(result["owner_run_id"], "19")
+                            self.assertEqual(json.loads((output_dir / "cells" / f"{cell}.json").read_text()), record)
+                        else:
+                            with self.assertRaisesRegex(release_publish.PublicationError, failure):
+                                release_publish.recover_package_cells(
+                                    ROOT, manifest_path, "trainstar/synchro", "19", output_dir, "fixture-token"
+                                )
+
+    def test_recovery_tooling_rejects_product_changes(self) -> None:
+        for changed, accepted in (
+            ("scripts/release-publish.py", True),
+            (".github/workflows/release.yml", True),
+            ("clients/swift/Sources/Client.swift", False),
+            ("api/go/cmd/synchrod-pg/main.go", False),
+            ("extensions/synchro-pg/src/lib.rs", False),
+        ):
+            with self.subTest(changed=changed), mock.patch.object(
+                release_publish.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=changed + "\n"),
+            ) as git_diff:
+                if accepted:
+                    release_publish.verify_recovery_tooling(ROOT, self.commit, "b" * 40)
+                else:
+                    with self.assertRaisesRegex(release_publish.PublicationError, "product or unsupported"):
+                        release_publish.verify_recovery_tooling(ROOT, self.commit, "b" * 40)
+                self.assertEqual(git_diff.call_args.args[0][:3], ["git", "diff", "--name-only"])
+
+    def test_docs_deployment_accepts_only_current_master_ci(self) -> None:
+        verify = release_step_command("Verify the source CI run", "docs.yml")
+        stale = release_step_command("Reject stale docs source", "docs.yml")
+        run = {
+            "repository": {"full_name": "trainstar/synchro"},
+            "head_repository": {"full_name": "trainstar/synchro"},
+            "path": ".github/workflows/ci.yml", "event": "push", "head_branch": "master",
+            "head_sha": self.commit, "status": "completed", "conclusion": "success",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gh = root / "gh"
+            gh.write_text(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import os, sys
+                assert sys.argv[1] == "api"
+                if sys.argv[2].endswith("/branches/master"):
+                    print(os.environ["MASTER_SHA"])
+                elif sys.argv[2].endswith("/actions/runs/17"):
+                    print(os.environ["CI_RUN_JSON"])
+                else:
+                    raise SystemExit(2)
+                """), encoding="utf-8")
+            gh.chmod(0o755)
+            base = {
+                **os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                "GH_TOKEN": "fixture-token", "GITHUB_REPOSITORY": "trainstar/synchro",
+                "GITHUB_EVENT_NAME": "workflow_run", "GITHUB_REF": "refs/heads/master",
+                "CI_RUN_ID": "17", "MASTER_SHA": self.commit,
+                "GITHUB_OUTPUT": str(root / "output"),
+            }
+            for label, change, accepted in (
+                ("trusted", {}, True),
+                ("fork", {"head_repository": {"full_name": "other/synchro"}}, False),
+                ("wrong workflow", {"path": ".github/workflows/docs.yml"}, False),
+                ("pull request", {"event": "pull_request"}, False),
+                ("wrong branch", {"head_branch": "dev"}, False),
+                ("stale", {"head_sha": "b" * 40}, False),
+                ("failed", {"conclusion": "failure"}, False),
+            ):
+                with self.subTest(case=label):
+                    (root / "output").unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "-c", verify],
+                        env={**base, "CI_RUN_JSON": json.dumps({**run, **change})},
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    if accepted:
+                        self.assertIn("source_sha=" + self.commit, (root / "output").read_text())
+            manual = subprocess.run(
+                ["bash", "-c", verify],
+                env={**base, "CI_RUN_JSON": json.dumps(run), "GITHUB_EVENT_NAME": "workflow_dispatch",
+                     "GITHUB_REF": "refs/heads/dev"},
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            self.assertNotEqual(manual.returncode, 0)
+            for source_sha, accepted in ((self.commit, True), ("b" * 40, False)):
+                with self.subTest(source_sha=source_sha):
+                    result = subprocess.run(
+                        ["bash", "-c", stale], env={**base, "SOURCE_SHA": source_sha},
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_candidate_gate_requires_every_suite_to_pass(self) -> None:
         template = release_step_command("Require every candidate dependency", "ci.yml")
@@ -236,7 +465,9 @@ class PublicationStateTests(unittest.TestCase):
                 for need in job["needs"]:
                     self.assertTrue(
                         f"needs.{need}.result == 'success'" in job["if"]
-                        or f'test "${{{{ needs.{need}.result }}}}" = success' in job["body"],
+                        or f'test "${{{{ needs.{need}.result }}}}" = success' in job["body"]
+                        or (name == "package-gate" and need.startswith("package-")
+                            and f"needs.candidate.outputs.run_{need.removeprefix('package-')} == 'true' && 'success' || 'skipped'" in job["body"]),
                         need,
                     )
 
@@ -256,6 +487,8 @@ class PublicationStateTests(unittest.TestCase):
             git("config", "user.email", "release@example.invalid")
             helper = repo / "scripts/release-publish.py"
             helper.parent.mkdir()
+            (repo / "verification").mkdir()
+            (repo / "verification/README").write_text("Recovery verifier fixture\n", encoding="utf-8")
             original = 'raise RuntimeError("original defective publisher")\n'
             helper.write_text(original, encoding="utf-8")
             git("add", ".")

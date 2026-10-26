@@ -7,9 +7,12 @@ import argparse
 import base64
 import datetime
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -468,6 +471,104 @@ def request_json(url: str, token: str | None = None) -> Any | None:
         raise PublicationError(f"response is not JSON: {url}") from error
 
 
+def recover_package_cells(repo_root: Path, release_manifest: Path, repository: str, run_id: str,
+                          output_dir: Path, token: str | None) -> dict[str, Any]:
+    """Retain verified successful cells from the original sealed owner."""
+    run_id = positive_identifier(run_id, "recovery run ID")
+    manifest = load_json(release_manifest, "release manifest")
+    source = manifest["source"]["commit"]
+    run = request_json(f"https://api.github.com/repos/{repository}/actions/runs/{run_id}", token)
+    if (not isinstance(run, dict) or run.get("status") != "completed"
+            or run.get("path") != ".github/workflows/release.yml"
+            or run.get("event") != "workflow_dispatch" or run.get("head_sha") != source
+            or run.get("head_repository", {}).get("full_name") != repository):
+        raise PublicationError("recovery requires the original completed candidate owner")
+    spec = importlib.util.spec_from_file_location(
+        "recovery_packaged_smoke", Path(__file__).resolve().parents[1] / "verification/packaged_smoke.py")
+    assert spec and spec.loader
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    required = set(verifier.required_cells(repo_root))
+    jobs = []
+    artifacts = []
+    for collection, target in (("jobs", jobs), ("artifacts", artifacts)):
+        page = 1
+        while True:
+            response = request_json(
+                f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/{collection}?per_page=100&page={page}", token)
+            if not isinstance(response, dict) or not isinstance(response.get(collection), list):
+                raise PublicationError(f"recovery {collection} response is invalid")
+            target.extend(response[collection])
+            if len(response[collection]) < 100:
+                break
+            page += 1
+    accepted = []
+    lineage = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for cell in sorted(required):
+        name = "package-evidence-server" if cell == "SUP-PG-LINUX-X64-001" else f"package-evidence-{cell}"
+        matches = [a for a in artifacts if a.get("name") == name and a.get("expired") is False]
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise PublicationError(f"recovery has ambiguous evidence for {cell}")
+        job_name = "package server Ubuntu 24.04 x64" if cell == "SUP-PG-LINUX-X64-001" else f"package {cell}"
+        if not any(j.get("name") == job_name and j.get("conclusion") == "success" for j in jobs):
+            raise PublicationError(f"recovery evidence has no successful job for {cell}")
+        artifact = matches[0]
+        if str(artifact.get("workflow_run", {}).get("id")) != run_id:
+            raise PublicationError(f"recovery evidence owner differs for {cell}")
+        artifact_id = positive_identifier(artifact.get("id"), "recovery evidence artifact ID")
+        archive_bytes = request_bytes(
+            f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip", token)
+        if archive_bytes is None or sha256_bytes(archive_bytes) != normalize_sha256(artifact.get("digest"), "recovery evidence digest"):
+            raise PublicationError(f"recovery evidence digest differs for {cell}")
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+                members = [n for n in archive.namelist() if n in {f"{cell}.json", f"cells/{cell}.json"}]
+                if len(members) != 1:
+                    raise PublicationError(f"recovery evidence record is missing for {cell}")
+                data = archive.read(members[0])
+                upgrade_data = archive.read(f"upgrades/{cell}.json") if f"upgrades/{cell}.json" in archive.namelist() else None
+            record = json.loads(data)
+            verifier.validate_manifest_cell(repo_root, cell, record, release_manifest)
+        except (ValueError, KeyError, zipfile.BadZipFile) as error:
+            raise PublicationError(f"recovery evidence did not validate for {cell}: {error}") from error
+        (output_dir / "cells").mkdir(exist_ok=True)
+        (output_dir / "cells" / f"{cell}.json").write_bytes(data)
+        if cell in {"SUP-IOS-CURRENT-001", "SUP-ANDROID-CURRENT-001", "SUP-RN-IOS-CURRENT-001", "SUP-RN-ANDROID-CURRENT-001"} and "release-test-upgrade:" in (repo_root / "Makefile").read_text():
+            if upgrade_data is None:
+                raise PublicationError(f"recovery upgrade evidence is missing for {cell}")
+            upgrade_spec = importlib.util.spec_from_file_location("recovery_upgrade", Path(__file__).resolve().parents[1] / "verification/consumers/upgrade/sealed_result.py")
+            assert upgrade_spec and upgrade_spec.loader
+            upgrades = importlib.util.module_from_spec(upgrade_spec)
+            upgrade_spec.loader.exec_module(upgrades)
+            upgrades.verify_record(json.loads(upgrade_data), cell, release_manifest)
+            (output_dir / "upgrades").mkdir(exist_ok=True)
+            (output_dir / "upgrades" / f"{cell}.json").write_bytes(upgrade_data)
+        accepted.append(cell)
+        lineage.append({"cell_id": cell, "artifact_id": artifact_id,
+                        "artifact_digest": artifact["digest"],
+                        "job_ids": [j["id"] for j in jobs if j.get("name") == job_name and j.get("conclusion") == "success"]})
+    return {"source_commit": source, "owner_run_id": run_id,
+            "manifest_sha256": sha256_file(release_manifest),
+            "accepted_cells": accepted, "missing_cells": sorted(required.difference(accepted)),
+            "lineage": lineage}
+
+
+def verify_recovery_tooling(repo_root: Path, source_commit: str, dispatch_commit: str) -> None:
+    """Reject product changes in a recovery workflow revision."""
+    validate_candidate_identity(source_commit, "0.0.0")
+    validate_candidate_identity(dispatch_commit, "0.0.0")
+    changed = subprocess.run(["git", "diff", "--name-only", source_commit, dispatch_commit],
+                             cwd=repo_root, text=True, capture_output=True, check=True).stdout.splitlines()
+    allowed = {"Makefile", "RELEASE.md", "scripts/release-publish.py", "verification/packaged_smoke.py",
+               "verification/packaged-smoke-cell.schema.json", "verification/test_packaged_smoke.py"}
+    prefixes = (".github/", "scripts/ci/", "verification/consumers/upgrade/", "docs/")
+    if any(path not in allowed and not path.startswith(prefixes) for path in changed):
+        raise PublicationError("recovery dispatch contains product or unsupported validation changes")
+
+
 def central_authorization() -> str:
     username = os.environ.get("MAVEN_CENTRAL_USERNAME", "")
     password = os.environ.get("MAVEN_CENTRAL_PASSWORD", "")
@@ -619,7 +720,7 @@ def list_central_deployments(name: str, *, page_size: int = 100) -> dict[str, An
     }
 
 
-def successful_ci_run(repository: str, sha: str, token: str | None) -> dict[str, Any]:
+def successful_ci_run(repository: str, sha: str, token: str | None, *, tooling_only: bool = False) -> dict[str, Any]:
     if repository != "trainstar/synchro":
         raise PublicationError("publication repository is invalid")
     if not COMMIT.fullmatch(sha):
@@ -641,12 +742,18 @@ def successful_ci_run(repository: str, sha: str, token: str | None) -> dict[str,
             and run.get("event") == "push"
             and run.get("head_branch") == "master"
             and run.get("path") == ".github/workflows/ci.yml"
-            and run.get("status") == "completed"
-            and run.get("conclusion") == "success"
+            and (tooling_only or (run.get("status") == "completed" and run.get("conclusion") == "success"))
             and isinstance(run.get("run_attempt"), int)
         ]
-        if matches:
-            return max(matches, key=lambda run: run["run_attempt"])
+        for run in sorted(matches, key=lambda run: run["run_attempt"], reverse=True):
+            if tooling_only:
+                result = request_json(f"https://api.github.com/repos/{repository}/actions/runs/{run['id']}/jobs?per_page=100", token)
+                jobs = result.get("jobs", []) if isinstance(result, dict) else []
+                required = {"source quality", "CodeQL / result", "dependency scan / result"}
+                passed = {j.get("name") for j in jobs if j.get("conclusion") == "success"}
+                if not required.issubset(passed):
+                    continue
+            return run
         if attempt < CI_RUN_LOOKUP_ATTEMPTS:
             print(f"release-publish: no successful master CI push run for {sha} yet, attempt {attempt}", file=sys.stderr)
             time.sleep(CI_RUN_LOOKUP_DELAY_SECONDS)
@@ -825,6 +932,17 @@ def main() -> int:
     ci_run_parser.add_argument("--repository", default="trainstar/synchro")
     ci_run_parser.add_argument("--github-token-environment", default="GITHUB_TOKEN")
     ci_run_parser.add_argument("--output", type=Path, required=True)
+    ci_run_parser.add_argument("--tooling-only", action="store_true")
+    recovery_parser = subparsers.add_parser("recover-package-cells")
+    recovery_parser.add_argument("--repo-root", type=Path, required=True)
+    recovery_parser.add_argument("--release-manifest", type=Path, required=True)
+    recovery_parser.add_argument("--run-id", required=True)
+    recovery_parser.add_argument("--cells-dir", type=Path, required=True)
+    recovery_parser.add_argument("--output", type=Path, required=True)
+    tooling_parser = subparsers.add_parser("verify-recovery-tooling")
+    tooling_parser.add_argument("--repo-root", type=Path, required=True)
+    tooling_parser.add_argument("--source-commit", required=True)
+    tooling_parser.add_argument("--dispatch-commit", required=True)
     github_parser = subparsers.add_parser("github-release")
     github_parser.add_argument("--tag", required=True)
     github_parser.add_argument("--repository", default="trainstar/synchro")
@@ -882,7 +1000,12 @@ def main() -> int:
                 print(classify_npm(identity, observe_npm(identity)))
         elif args.command == "ci-run":
             token = os.environ.get(args.github_token_environment, "").strip() or None
-            write_json(args.output, successful_ci_run(args.repository, args.sha, token))
+            write_json(args.output, successful_ci_run(args.repository, args.sha, token, tooling_only=args.tooling_only))
+        elif args.command == "recover-package-cells":
+            write_json(args.output, recover_package_cells(args.repo_root.resolve(), args.release_manifest.resolve(),
+                       "trainstar/synchro", args.run_id, args.cells_dir.resolve(), os.environ.get("GITHUB_TOKEN")))
+        elif args.command == "verify-recovery-tooling":
+            verify_recovery_tooling(args.repo_root.resolve(), args.source_commit, args.dispatch_commit)
         elif args.command == "github-release":
             token = os.environ.get(args.github_token_environment, "").strip() or None
             value = github_release(args.repository, args.tag, token, include_drafts=True)

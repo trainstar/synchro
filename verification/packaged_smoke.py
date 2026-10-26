@@ -40,9 +40,9 @@ release_artifacts = importlib.util.module_from_spec(_release_spec)
 _release_spec.loader.exec_module(release_artifacts)
 
 
-SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
-CELL_SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = 1
+LEGACY_SMOKE_OPERATIONS = ("connect", "push", "pull", "kill", "resume")
+CELL_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 2
 LOCAL_EVIDENCE_KIND = "local-source-artifacts"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -216,18 +216,6 @@ def hash_files(paths: list[Path]) -> list[str]:
     return hashes
 
 
-def operation_entries(status: str, test_count: int) -> list[dict[str, object]]:
-    return [
-        {
-            "name": operation,
-            "status": status,
-            "terminal": True,
-            "test_count": test_count,
-        }
-        for operation in SMOKE_OPERATIONS
-    ]
-
-
 def begin_cell(repo_root: Path, cell_id: str, output: Path) -> None:
     if cell_id not in required_cells(repo_root):
         raise EvidenceError(f"unknown packaged smoke cell {cell_id}")
@@ -239,7 +227,7 @@ def begin_cell(repo_root: Path, cell_id: str, output: Path) -> None:
             "source_commit": source_commit(repo_root),
             "status": "failed",
             "artifact_hashes": [],
-            "operations": operation_entries("failed", 0),
+            "lifecycle": {"status": "failed", "terminal": True, "test_count": 0},
             "failure": "packaged smoke cell did not reach a terminal pass",
         },
     )
@@ -1053,7 +1041,7 @@ def complete_cell(
             **({"evidence_kind": LOCAL_EVIDENCE_KIND} if local_inputs is not None else {}),
             "status": "passed",
             "artifact_hashes": hashes,
-            "operations": operation_entries("passed", 1),
+            "lifecycle": {"status": "passed", "terminal": True, "test_count": 1},
             "environment": environment,
             "process_lifecycle": {
                 "initial_pid": initial_pid,
@@ -1121,7 +1109,7 @@ def complete_server_cell(
             **({"evidence_kind": LOCAL_EVIDENCE_KIND} if local_inputs is not None else {}),
             "status": "passed",
             "artifact_hashes": hashes,
-            "operations": operation_entries("passed", 1),
+            "lifecycle": {"status": "passed", "terminal": True, "test_count": 1},
             "environment": environment,
             "process_lifecycle": {
                 "kind": "server",
@@ -1153,14 +1141,15 @@ def validate_hash_list(value: object, field: str, allow_empty: bool = False) -> 
 def validate_cell(value: object, expected_cell: str, expected_commit: str, *, local: bool = False) -> dict[str, object]:
     if not isinstance(value, dict):
         raise EvidenceError(f"cell {expected_cell} evidence must be an object")
-    if value.get("schema_version") != CELL_SCHEMA_VERSION:
+    version = value.get("schema_version")
+    if type(version) is not int or version not in {1, CELL_SCHEMA_VERSION}:
         raise EvidenceError(f"cell {expected_cell} has the wrong schema version")
     if value.get("cell_id") != expected_cell:
         raise EvidenceError(f"cell {expected_cell} has the wrong identity")
     if value.get("source_commit") != expected_commit:
         raise EvidenceError(f"cell {expected_cell} source commit does not match HEAD")
     status = value.get("status")
-    if status not in {"passed", "failed"}:
+    if not isinstance(status, str) or status not in {"passed", "failed"}:
         raise EvidenceError(f"cell {expected_cell} has an invalid status")
     expected_members = {
         "schema_version",
@@ -1168,7 +1157,7 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str, *, lo
         "source_commit",
         "status",
         "artifact_hashes",
-        "operations",
+        "operations" if version == 1 else "lifecycle",
         "process_lifecycle" if status == "passed" else "failure",
     }
     if status == "passed" or "environment" in value:
@@ -1193,28 +1182,35 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str, *, lo
         f"cell {expected_cell} artifact_hashes",
         allow_empty=status == "failed",
     )
-    operations = value.get("operations")
-    if not isinstance(operations, list):
-        raise EvidenceError(f"cell {expected_cell} operations are missing")
-    actual_names: list[str] = []
-    for item in operations:
-        if not isinstance(item, dict):
-            raise EvidenceError(f"cell {expected_cell} contains a malformed operation")
-        if set(item) != {"name", "status", "terminal", "test_count"}:
-            raise EvidenceError(f"cell {expected_cell} contains invalid operation members")
-        name = item.get("name")
-        if not isinstance(name, str):
-            raise EvidenceError(f"cell {expected_cell} contains an unnamed operation")
-        actual_names.append(name)
-        if item.get("status") != status:
-            raise EvidenceError(f"cell {expected_cell} operation {name} has the wrong status")
-        if item.get("terminal") is not True:
-            raise EvidenceError(f"cell {expected_cell} operation {name} is not terminal")
+    if version == 1:
+        operations = value.get("operations")
+        if not isinstance(operations, list):
+            raise EvidenceError(f"cell {expected_cell} operations are missing")
+        actual_names: list[str] = []
+        for item in operations:
+            if not isinstance(item, dict) or set(item) != {"name", "status", "terminal", "test_count"}:
+                raise EvidenceError(f"cell {expected_cell} contains a malformed operation")
+            name = item.get("name")
+            if not isinstance(name, str):
+                raise EvidenceError(f"cell {expected_cell} contains an unnamed operation")
+            actual_names.append(name)
+            if item.get("status") != status or item.get("terminal") is not True:
+                raise EvidenceError(f"cell {expected_cell} operation {name} did not reach a terminal {status}")
+            expected_count = 1 if status == "passed" else 0
+            if type(item.get("test_count")) is not int or item["test_count"] != expected_count:
+                raise EvidenceError(f"cell {expected_cell} operation {name} has an invalid test count")
+        if actual_names != list(LEGACY_SMOKE_OPERATIONS):
+            raise EvidenceError(f"cell {expected_cell} does not contain each smoke operation once")
+        lifecycle_outcome = {"status": status, "terminal": True, "test_count": 1 if status == "passed" else 0}
+    else:
+        lifecycle_outcome = value.get("lifecycle")
+        if not isinstance(lifecycle_outcome, dict) or set(lifecycle_outcome) != {"status", "terminal", "test_count"}:
+            raise EvidenceError(f"cell {expected_cell} lifecycle is malformed")
         expected_count = 1 if status == "passed" else 0
-        if item.get("test_count") != expected_count:
-            raise EvidenceError(f"cell {expected_cell} operation {name} has an invalid test count")
-    if actual_names != list(SMOKE_OPERATIONS):
-        raise EvidenceError(f"cell {expected_cell} does not contain each smoke operation once")
+        if (lifecycle_outcome.get("status") != status or lifecycle_outcome.get("terminal") is not True
+                or type(lifecycle_outcome.get("test_count")) is not int
+                or lifecycle_outcome["test_count"] != expected_count):
+            raise EvidenceError(f"cell {expected_cell} lifecycle did not reach a terminal {status}")
     if status == "passed":
         lifecycle = value.get("process_lifecycle")
         if not isinstance(lifecycle, dict):
@@ -1227,6 +1223,8 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str, *, lo
         lifecycle_keys = set(lifecycle)
         if lifecycle_keys != client_keys and lifecycle_keys != server_keys:
             raise EvidenceError(f"cell {expected_cell} process lifecycle has invalid members")
+        if (expected_cell == "SUP-PG-LINUX-X64-001") != (kind == "server"):
+            raise EvidenceError(f"cell {expected_cell} process lifecycle has the wrong kind")
         initial_pid = required_integer(lifecycle.get("initial_pid"), "initial pid", 1)
         resume_pid = required_integer(lifecycle.get("resume_pid"), "resume pid", 1)
         if lifecycle.get("kill_signal") != 9 or initial_pid == resume_pid:
@@ -1243,12 +1241,12 @@ def validate_cell(value: object, expected_cell: str, expected_commit: str, *, lo
         else:
             if required_integer(lifecycle.get("durable_pending_before_kill"), "pending before kill") <= 0:
                 raise EvidenceError(f"cell {expected_cell} has no durable work before kill")
-            if lifecycle.get("durable_pending_after_resume") != 0:
+            if type(lifecycle.get("durable_pending_after_resume")) is not int or lifecycle["durable_pending_after_resume"] != 0:
                 raise EvidenceError(f"cell {expected_cell} did not drain durable work after resume")
     result = {
         "status": status,
         "artifact_hashes": hashes,
-        "operations": operations,
+        "lifecycle": lifecycle_outcome,
     }
     if environment is not None:
         result["environment"] = environment
@@ -1279,7 +1277,7 @@ def missing_cell(cell_id: str) -> dict[str, object]:
     return {
         "status": "failed",
         "artifact_hashes": [],
-        "operations": operation_entries("failed", 0),
+        "lifecycle": {"status": "failed", "terminal": True, "test_count": 0},
         "failure": f"cell evidence is missing for {cell_id}",
     }
 
@@ -1308,27 +1306,21 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
             if isinstance(digest, str)
         }
     )
-    obligations: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = []
     all_passed = True
     for cell_id in cells:
         record = records[cell_id]
         record_status = record["status"]
         if record_status != "passed":
             all_passed = False
-        record_hashes = record.get("artifact_hashes", [])
-        for operation in record["operations"]:
-            if not isinstance(operation, dict):
-                raise EvidenceError(f"cell {cell_id} contains a malformed operation")
-            obligations.append(
-                {
-                    "id": f"smoke/{cell_id}/{operation['name']}",
-                    "kind": "smoke",
-                    "status": operation["status"],
-                    "terminal": operation["terminal"],
-                    "test_count": operation["test_count"],
-                    "artifact_hashes": record_hashes,
-                }
-            )
+        lifecycle = record["lifecycle"]
+        outcomes.append({
+            "id": cell_id,
+            "status": lifecycle["status"],
+            "terminal": lifecycle["terminal"],
+            "test_count": lifecycle["test_count"],
+            "artifact_hashes": record["artifact_hashes"],
+        })
     measured = environment_records(repo_root, [
         {"id": cell_id, "environment": record["environment"]}
         for cell_id, record in records.items() if "environment" in record
@@ -1337,7 +1329,7 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "source_commit": commit,
         "artifact_hashes": hashes,
-        "obligations": obligations,
+        "cells": outcomes,
         "status": "passed" if all_passed else "failed",
         "resolved_support_cells": measured,
     }
@@ -1346,13 +1338,60 @@ def collect_summary(repo_root: Path, cells_dir: Path, output: Path) -> None:
     write_json(output, summary)
 
 
+def validate_manifest_cell(
+    repo_root: Path, cell_id: str, record: dict[str, object], release_manifest: Path,
+) -> dict[str, object]:
+    manifest = load_json(release_manifest, "sealed release manifest")
+    source = manifest.get("source") if isinstance(manifest, dict) else None
+    commit = source.get("commit") if isinstance(source, dict) else None
+    if commit != source_commit(repo_root):
+        raise EvidenceError("packaged smoke and sealed source commits differ")
+    cell = validate_cell(record, cell_id, commit)
+    if cell["status"] != "passed":
+        raise EvidenceError(f"packaged smoke cell did not pass: {cell_id}")
+    selected = next((item for item in manifest_environments(repo_root, manifest) if item["id"] == cell_id), None)
+    if selected is None or cell.get("environment") != selected["environment"]:
+        raise EvidenceError(f"measured cell {cell_id} environment does not match sealed manifest")
+    distributions = manifest.get("distributions")
+    if not isinstance(distributions, list):
+        raise EvidenceError("sealed release distributions are missing")
+    role_hashes: dict[str, str] = {}
+    for item in distributions:
+        if not isinstance(item, dict) or item.get("kind") != "file":
+            continue
+        role, digest = item.get("role"), item.get("sha256")
+        if not isinstance(role, str) or role in role_hashes or not isinstance(digest, str) or not SHA256.fullmatch(digest):
+            raise EvidenceError("sealed release contains invalid file identities")
+        role_hashes[role] = digest
+    required_roles = {
+        ("postgresql-server", "postgresql"): ("pg-extension", "adapter", "seed-tool"),
+        ("swift-client", "ios"): (),
+        ("kotlin-client", "android"): ("kotlin-maven",),
+        ("react-native-client", "ios"): ("react-native-npm",),
+        ("react-native-client", "android"): ("react-native-npm", "kotlin-maven"),
+    }
+    matrix = load_json(repo_root / "conformance/support-matrix.json", "support matrix")
+    selected_cell = next((item for item in matrix["cells"] if item["id"] == cell_id and item["policy"] == "required"), None)
+    if selected_cell is None:
+        raise EvidenceError(f"sealed release does not cover cell {cell_id}")
+    key = (selected_cell["component"], selected_cell["platform"])
+    if key not in required_roles or any(role not in role_hashes for role in required_roles[key]):
+        raise EvidenceError(f"sealed release does not cover cell {cell_id}")
+    expected_hashes = {role_hashes[role] for role in required_roles[key]}
+    if selected_cell["platform"] == "ios":
+        expected_hashes.add(hash_files([release_manifest])[0])
+    if set(cell["artifact_hashes"]) != expected_hashes:
+        raise EvidenceError(f"packaged smoke cell {cell_id} does not match sealed payloads")
+    return cell
+
+
 def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path | None = None) -> None:
     value = load_json(summary_path, "packaged smoke summary")
     required_keys = {
         "schema_version",
         "source_commit",
         "artifact_hashes",
-        "obligations",
+        "cells",
         "status",
         "resolved_support_cells",
     }
@@ -1368,112 +1407,54 @@ def verify_summary(repo_root: Path, summary_path: Path, release_manifest: Path |
         raise EvidenceError("packaged smoke summary did not pass")
     measured = environment_records(repo_root, value.get("resolved_support_cells"))
     summary_hashes = set(validate_hash_list(value.get("artifact_hashes"), "summary artifact hashes"))
-    obligations = value.get("obligations")
-    if not isinstance(obligations, list):
-        raise EvidenceError("packaged smoke summary obligations are missing")
-    expected_ids = {
-        f"smoke/{cell_id}/{operation}"
-        for cell_id in required_cells(repo_root)
-        for operation in SMOKE_OPERATIONS
-    }
+    outcomes = value.get("cells")
+    if not isinstance(outcomes, list):
+        raise EvidenceError("packaged smoke summary cells are missing")
+    expected_ids = set(required_cells(repo_root))
     seen: set[str] = set()
-    for obligation in obligations:
-        if not isinstance(obligation, dict) or set(obligation) != {
+    for outcome in outcomes:
+        if not isinstance(outcome, dict) or set(outcome) != {
             "id",
-            "kind",
             "status",
             "terminal",
             "test_count",
             "artifact_hashes",
         }:
-            raise EvidenceError("packaged smoke summary contains a malformed obligation")
-        obligation_id = obligation.get("id")
-        if obligation_id not in expected_ids or obligation_id in seen:
-            raise EvidenceError("packaged smoke summary contains an unknown or duplicate obligation")
-        seen.add(obligation_id)
-        hashes = set(validate_hash_list(obligation.get("artifact_hashes"), f"{obligation_id} artifact hashes"))
+            raise EvidenceError("packaged smoke summary contains a malformed cell")
+        cell_id = outcome.get("id")
+        if not isinstance(cell_id, str) or cell_id not in expected_ids or cell_id in seen:
+            raise EvidenceError("packaged smoke summary contains an unknown or duplicate cell")
+        seen.add(cell_id)
+        hashes = set(validate_hash_list(outcome.get("artifact_hashes"), f"{cell_id} artifact hashes"))
         if (
-            obligation.get("kind") != "smoke"
-            or obligation.get("status") != "passed"
-            or obligation.get("terminal") is not True
-            or required_integer(obligation.get("test_count"), f"{obligation_id} test count", 1) < 1
+            outcome.get("status") != "passed"
+            or outcome.get("terminal") is not True
+            or type(outcome.get("test_count")) is not int
+            or outcome["test_count"] != 1
             or not hashes.issubset(summary_hashes)
         ):
-            raise EvidenceError(f"packaged smoke obligation did not pass: {obligation_id}")
+            raise EvidenceError(f"packaged smoke cell did not pass: {cell_id}")
     if seen != expected_ids:
-        raise EvidenceError("packaged smoke summary has missing obligations")
+        raise EvidenceError("packaged smoke summary has missing cells")
+    if summary_hashes != {digest for outcome in outcomes for digest in outcome["artifact_hashes"]}:
+        raise EvidenceError("packaged smoke summary hashes differ from its cells")
     if release_manifest is not None:
         manifest = load_json(release_manifest, "sealed release manifest")
-        source = manifest.get("source") if isinstance(manifest, dict) else None
-        if not isinstance(source, dict) or source.get("commit") != value["source_commit"]:
-            raise EvidenceError("packaged smoke and sealed source commits differ")
         if measured != manifest_environments(repo_root, manifest):
             raise EvidenceError("measured summary environments do not match sealed manifest")
-        distributions = manifest.get("distributions")
-        if not isinstance(distributions, list):
-            raise EvidenceError("sealed release distributions are missing")
-        role_hashes = {}
-        for record in distributions:
-            if not isinstance(record, dict) or record.get("kind") != "file":
-                continue
-            role, digest = record.get("role"), record.get("sha256")
-            if not isinstance(role, str) or role in role_hashes or not isinstance(digest, str) or not SHA256.fullmatch(digest):
-                raise EvidenceError("sealed release contains invalid file identities")
-            role_hashes[role] = digest
-        manifest_hash = hash_files([release_manifest])[0]
-        required_roles = {
-            ("postgresql-server", "postgresql"): ("pg-extension", "adapter", "seed-tool"),
-            ("swift-client", "ios"): (),
-            ("kotlin-client", "android"): ("kotlin-maven",),
-            ("react-native-client", "ios"): ("react-native-npm",),
-            ("react-native-client", "android"): ("react-native-npm", "kotlin-maven"),
-        }
-        matrix = load_json(repo_root / "conformance/support-matrix.json", "support matrix")
-        expected_hashes = {}
-        for cell in matrix["cells"]:
-            if cell["policy"] != "required":
-                continue
-            key = (cell["component"], cell["platform"])
-            if key not in required_roles or any(role not in role_hashes for role in required_roles[key]):
-                raise EvidenceError(f"sealed release does not cover cell {cell['id']}")
-            hashes = {role_hashes[role] for role in required_roles[key]}
-            if cell["platform"] == "ios":
-                hashes.add(manifest_hash)
-            expected_hashes[cell["id"]] = hashes
-        for obligation in obligations:
-            cell_id = obligation["id"].split("/")[1]
-            if set(obligation["artifact_hashes"]) != expected_hashes[cell_id]:
-                raise EvidenceError(f"packaged smoke cell {cell_id} does not match sealed payloads")
-        if summary_hashes != set().union(*expected_hashes.values()):
+        sealed_hashes: set[str] = set()
+        for outcome in outcomes:
+            cell_id = outcome["id"]
+            record = load_json(summary_path.parent / "cells" / f"{cell_id}.json", f"cell {cell_id}")
+            cell = validate_manifest_cell(repo_root, cell_id, record, release_manifest)
+            sealed_hashes.update(cell["artifact_hashes"])
+            if set(outcome["artifact_hashes"]) != set(cell["artifact_hashes"]):
+                raise EvidenceError(f"packaged smoke summary cell {cell_id} differs from its receipt")
+            selected = next(item for item in measured if item["id"] == cell_id)
+            if cell["environment"] != selected["environment"]:
+                raise EvidenceError(f"packaged smoke summary cell {cell_id} environment differs from its receipt")
+        if summary_hashes != sealed_hashes:
             raise EvidenceError("packaged smoke summary hashes do not match sealed payloads")
-
-
-def dry_summary(repo_root: Path, output: Path) -> None:
-    commit = source_commit(repo_root)
-    structural_hash = hashlib.sha256((repo_root / "verification/packaged-smoke-cell.schema.json").read_bytes()).hexdigest()
-    obligations = [
-        {
-            "id": f"smoke/{cell_id}/{operation}",
-            "kind": "smoke",
-            "status": "passed",
-            "terminal": True,
-            "test_count": 1,
-            "artifact_hashes": [structural_hash],
-        }
-        for cell_id in required_cells(repo_root)
-        for operation in SMOKE_OPERATIONS
-    ]
-    write_json(
-        output,
-        {
-            "schema_version": SUMMARY_SCHEMA_VERSION,
-            "source_commit": commit,
-            "artifact_hashes": [structural_hash],
-            "obligations": obligations,
-            "status": "passed",
-            "dry_run": True,
-        },
-    )
 
 
 def base64url(value: bytes) -> str:
@@ -1724,10 +1705,6 @@ def parse_args() -> argparse.Namespace:
     verify.add_argument("--summary", type=Path, required=True)
     verify.add_argument("--release-manifest", type=Path)
 
-    dry = subparsers.add_parser("dry-run")
-    dry.add_argument("--repo-root", type=Path, required=True)
-    dry.add_argument("--output", type=Path, required=True)
-
     config = subparsers.add_parser("config")
     config.add_argument("--cell", required=True)
     config.add_argument("--platform", required=True)
@@ -1816,8 +1793,6 @@ def main() -> int:
             collect_summary(args.repo_root.resolve(), args.cells_dir.resolve(), args.output.resolve())
         elif args.command == "verify-summary":
             verify_summary(args.repo_root.resolve(), args.summary.resolve(), args.release_manifest)
-        elif args.command == "dry-run":
-            dry_summary(args.repo_root.resolve(), args.output.resolve())
         elif args.command == "config":
             write_config(
                 args.cell,
