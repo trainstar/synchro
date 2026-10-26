@@ -353,7 +353,7 @@ adb_command() {
                 self.assertEqual(cell["evidence_kind"], "local-source-artifacts")
                 self.assertEqual(cell["environment"], measured_environment(cell_id))
                 self.assertEqual(cell["process_lifecycle"]["kill_signal"], 9)
-                self.assertEqual(len(cell["operations"]), 5)
+                self.assertEqual(cell["lifecycle"], {"status": "passed", "terminal": True, "test_count": 1})
                 packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=root / "consumer")
                 with self.assertRaises(packaged_smoke.EvidenceError):
                     packaged_smoke.validate_cell(cell, cell_id, packaged_smoke.source_commit(REPO_ROOT))
@@ -439,15 +439,17 @@ adb_command() {
                 complete = packaged_smoke.complete_server_cell if cell_id == "SUP-PG-LINUX-X64-001" else packaged_smoke.complete_cell
                 complete(*arguments[:-1], None, local_inputs=inputs, **self.local_completion_options(arguments))
                 original = packaged_smoke.load_json(arguments[2], "local cell")
-                for mutation in ("environment", "hash", "zero-operation", "source", "cell", "kind", "failure"):
+                for mutation in ("environment", "hash", "zero-lifecycle", "nonterminal", "source", "cell", "kind", "failure"):
                     bad = copy.deepcopy(original)
                     if mutation == "environment":
                         field = "postgresql" if cell_id == "SUP-PG-LINUX-X64-001" else "ios"
                         bad["environment"][field] = "18.4" if field == "postgresql" else "27.0.1"
                     elif mutation == "hash":
                         bad["artifact_hashes"] = ["f" * 64]
-                    elif mutation == "zero-operation":
-                        bad["operations"][0]["test_count"] = 0
+                    elif mutation == "zero-lifecycle":
+                        bad["lifecycle"]["test_count"] = 0
+                    elif mutation == "nonterminal":
+                        bad["lifecycle"]["terminal"] = False
                     elif mutation == "source":
                         bad["source_commit"] = "a" * 40
                     elif mutation == "cell":
@@ -458,7 +460,7 @@ adb_command() {
                         bad["status"] = "failed"
                         bad["failure"] = "consumer failed"
                         del bad["process_lifecycle"]
-                        bad["operations"] = packaged_smoke.operation_entries("failed", 0)
+                        bad["lifecycle"] = {"status": "failed", "terminal": True, "test_count": 0}
                     packaged_smoke.write_json(arguments[2], bad)
                     with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
                         packaged_smoke.verify_local_cell(REPO_ROOT, cell_id, inputs, arguments[2], arguments[6], arguments[7], artifact_dir=root / "consumer")
@@ -532,7 +534,7 @@ adb_command() {
                 self.assertEqual(cell["environment"], measured_environment(cell_id))
                 validated = packaged_smoke.validate_cell(cell, cell_id, packaged_smoke.source_commit(REPO_ROOT))
                 self.assertEqual(validated["environment"], measured_environment(cell_id))
-                self.assertEqual(len(cell["operations"]), 5)
+                self.assertEqual(cell["lifecycle"], {"status": "passed", "terminal": True, "test_count": 1})
 
     def test_changed_initial_resume_or_selected_environment_rejects_completion(self) -> None:
         for cell_id, changes in (
@@ -619,7 +621,7 @@ adb_command() {
                 with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
                     packaged_smoke.validate_cell(bad, expected, packaged_smoke.source_commit(REPO_ROOT))
 
-    def test_complete_summary_preserves_nine_measurements_and_45_obligations(self) -> None:
+    def test_complete_summary_preserves_nine_measurements_and_lifecycles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, output = self.completed_summary(Path(directory))
             summary = packaged_smoke.load_json(output, "summary")
@@ -628,9 +630,68 @@ adb_command() {
                 {"id": cell_id, "environment": measured_environment(cell_id)}
                 for cell_id in sorted(packaged_smoke.required_cells(REPO_ROOT))
             ])
-            self.assertEqual(len(summary["obligations"]), 45)
+            self.assertEqual(len(summary["cells"]), 9)
+            self.assertTrue(all(cell["status"] == "passed" and cell["terminal"] and cell["test_count"] == 1 for cell in summary["cells"]))
             self.assertNotIn("missing_environment_cells", summary)
             packaged_smoke.verify_summary(REPO_ROOT, output)
+
+    def test_legacy_cell_requires_all_terminal_operations_before_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = self.completion_arguments(Path(directory), "SUP-IOS-CURRENT-001")
+            self.complete_fixture(arguments)
+            legacy = packaged_smoke.load_json(arguments[2], "completed cell")
+            legacy["schema_version"] = 1
+            del legacy["lifecycle"]
+            legacy["operations"] = [
+                {"name": name, "status": "passed", "terminal": True, "test_count": 1}
+                for name in packaged_smoke.LEGACY_SMOKE_OPERATIONS
+            ]
+            normalized = packaged_smoke.validate_cell(legacy, arguments[1], packaged_smoke.source_commit(REPO_ROOT))
+            self.assertEqual(normalized["lifecycle"], {"status": "passed", "terminal": True, "test_count": 1})
+            for mutation in ("missing", "duplicate", "zero", "boolean-count", "failed", "nonterminal", "bad-process"):
+                bad = copy.deepcopy(legacy)
+                if mutation == "missing":
+                    bad["operations"].pop()
+                elif mutation == "duplicate":
+                    bad["operations"][1]["name"] = bad["operations"][0]["name"]
+                elif mutation == "zero":
+                    bad["operations"][2]["test_count"] = 0
+                elif mutation == "boolean-count":
+                    bad["operations"][2]["test_count"] = True
+                elif mutation == "failed":
+                    bad["operations"][3]["status"] = "failed"
+                elif mutation == "nonterminal":
+                    bad["operations"][4]["terminal"] = False
+                else:
+                    bad["process_lifecycle"]["durable_pending_before_kill"] = 0
+                with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.validate_cell(bad, arguments[1], packaged_smoke.source_commit(REPO_ROOT))
+
+    def test_summary_rejects_missing_duplicate_unknown_and_nonterminal_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, output = self.completed_summary(Path(directory))
+            original = packaged_smoke.load_json(output, "summary")
+            for mutation in ("missing", "duplicate", "unknown", "zero", "boolean-count", "failed", "nonterminal", "foreign-hash"):
+                bad = copy.deepcopy(original)
+                if mutation == "missing":
+                    bad["cells"].pop()
+                elif mutation == "duplicate":
+                    bad["cells"].append(copy.deepcopy(bad["cells"][0]))
+                elif mutation == "unknown":
+                    bad["cells"][0]["id"] = "SUP-UNKNOWN-001"
+                elif mutation == "zero":
+                    bad["cells"][0]["test_count"] = 0
+                elif mutation == "boolean-count":
+                    bad["cells"][0]["test_count"] = True
+                elif mutation == "failed":
+                    bad["cells"][0]["status"] = "failed"
+                elif mutation == "nonterminal":
+                    bad["cells"][0]["terminal"] = False
+                else:
+                    bad["cells"][0]["artifact_hashes"] = ["f" * 64]
+                packaged_smoke.write_json(output, bad)
+                with self.subTest(mutation=mutation), self.assertRaises(packaged_smoke.EvidenceError):
+                    packaged_smoke.verify_summary(REPO_ROOT, output)
 
     def test_passed_summaries_reject_invalid_environment_collections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -681,8 +742,8 @@ adb_command() {
             self.assertEqual(summary["status"], "failed")
             self.assertEqual(summary["resolved_support_cells"], [{"id": pg_cell, "environment": measured_environment(pg_cell)}])
             self.assertEqual(summary["missing_environment_cells"], sorted(set(packaged_smoke.required_cells(REPO_ROOT)) - {pg_cell}))
-            self.assertEqual(len(summary["obligations"]), 45)
-            self.assertTrue(all(record["status"] == "failed" and record["test_count"] == 0 for record in summary["obligations"]))
+            self.assertEqual(len(summary["cells"]), 9)
+            self.assertTrue(all(record["status"] == "failed" and record["test_count"] == 0 for record in summary["cells"]))
             self.assertNotIn("environment", packaged_smoke.load_json(cells_dir / f"{ios_cell}.json", "begin cell"))
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "did not pass"):
                 packaged_smoke.verify_summary(REPO_ROOT, output)
@@ -713,6 +774,7 @@ adb_command() {
             environment = {**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"}
             result = subprocess.run([sys.executable, str(script), "--help"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("dry-run", result.stdout)
             for command in ("complete-cell", "complete-server-cell"):
                 for missing in ("--initial-environment", "--resume-environment", "--release-manifest"):
                     arguments = [sys.executable, str(script), command, "--cell", "SUP-IOS-MIN-001", "--killed-pid", "101"]
@@ -918,6 +980,7 @@ adb_command() {
     def test_summary_rejects_self_consistent_but_wrong_release_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            cells_dir, _ = self.completed_summary(root)
             manifest_path = root / "release-manifest.json"
             roles = ["pg-extension", "adapter", "seed-tool", "kotlin-maven", "react-native-npm"]
             hashes = {role: str(index + 1) * 64 for index, role in enumerate(roles)}
@@ -941,29 +1004,62 @@ adb_command() {
                 "SUP-RN-IOS-MIN-001": [manifest_hash, hashes["react-native-npm"]],
                 "SUP-RN-ANDROID-MIN-001": [hashes["kotlin-maven"], hashes["react-native-npm"]],
             }
+            for cell_id, expected in cells.items():
+                path = cells_dir / f"{cell_id}.json"
+                receipt = packaged_smoke.load_json(path, f"cell {cell_id}")
+                receipt["artifact_hashes"] = expected
+                packaged_smoke.write_json(path, receipt)
+            server_cell = "SUP-PG-LINUX-X64-001"
+            server_receipt = packaged_smoke.load_json(cells_dir / f"{server_cell}.json", "server cell")
+            validated = packaged_smoke.validate_manifest_cell(REPO_ROOT, server_cell, server_receipt, manifest_path)
+            self.assertEqual(set(validated["artifact_hashes"]), set(cells[server_cell]))
+            legacy_receipt = copy.deepcopy(server_receipt)
+            legacy_receipt["schema_version"] = 1
+            del legacy_receipt["lifecycle"]
+            legacy_receipt["operations"] = [
+                {"name": name, "status": "passed", "terminal": True, "test_count": 1}
+                for name in packaged_smoke.LEGACY_SMOKE_OPERATIONS
+            ]
+            self.assertEqual(packaged_smoke.validate_manifest_cell(
+                REPO_ROOT, server_cell, legacy_receipt, manifest_path,
+            )["lifecycle"], {"status": "passed", "terminal": True, "test_count": 1})
+            legacy_receipt["operations"][0]["test_count"] = True
+            with self.assertRaises(packaged_smoke.EvidenceError):
+                packaged_smoke.validate_manifest_cell(REPO_ROOT, server_cell, legacy_receipt, manifest_path)
             summary = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "source_commit": packaged_smoke.source_commit(REPO_ROOT),
                 "artifact_hashes": sorted({h for hs in cells.values() for h in hs}),
                 "status": "passed",
                 "resolved_support_cells": [
                     {"id": cell_id, "environment": measured_environment(cell_id)} for cell_id in sorted(cells)
                 ],
-                "obligations": [
-                    {"id": f"smoke/{cell}/{operation}", "kind": "smoke", "status": "passed",
-                     "terminal": True, "test_count": 1, "artifact_hashes": hs}
-                    for cell, hs in cells.items() for operation in packaged_smoke.SMOKE_OPERATIONS
+                "cells": [
+                    {"id": cell, "status": "passed", "terminal": True, "test_count": 1, "artifact_hashes": hs}
+                    for cell, hs in cells.items()
                 ],
             }
             summary_path = root / "summary.json"
             packaged_smoke.write_json(summary_path, summary)
             packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            missing_receipt = cells_dir / "SUP-IOS-MIN-001.json"
+            retained_bytes = missing_receipt.read_bytes()
+            missing_receipt.unlink()
+            with self.assertRaisesRegex(packaged_smoke.EvidenceError, "is missing or malformed"):
+                packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            missing_receipt.write_bytes(retained_bytes)
             original_summary = copy.deepcopy(summary)
-            summary["obligations"][0]["artifact_hashes"] = ["f" * 64]
+            summary["cells"][0]["artifact_hashes"].append("f" * 64)
             summary["artifact_hashes"].append("f" * 64)
+            changed_cell = cells_dir / f"{summary['cells'][0]['id']}.json"
+            receipt = packaged_smoke.load_json(changed_cell, "changed cell")
+            receipt["artifact_hashes"].append("f" * 64)
+            packaged_smoke.write_json(changed_cell, receipt)
             packaged_smoke.write_json(summary_path, summary)
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "does not match sealed"):
                 packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
+            receipt["artifact_hashes"].pop()
+            packaged_smoke.write_json(changed_cell, receipt)
             for cell_id, field, actual in (
                 ("SUP-PG-LINUX-X64-001", "postgresql", "18.4"),
                 ("SUP-IOS-CURRENT-001", "xcode", "27.0.1"),
@@ -978,14 +1074,20 @@ adb_command() {
                 with self.subTest(cell=cell_id, field=field), self.assertRaisesRegex(packaged_smoke.EvidenceError, "environments do not match sealed"):
                     packaged_smoke.verify_summary(REPO_ROOT, summary_path, manifest_path)
 
-    def test_dry_summary_and_mutations_fail_closed(self) -> None:
+    def test_synthetic_summary_fixture_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="packaged-smoke-structure.") as raw_directory:
             directory = Path(raw_directory)
             dry_path = directory / "dry.json"
-            packaged_smoke.dry_summary(REPO_ROOT, dry_path)
-            dry = packaged_smoke.load_json(dry_path, "dry summary")
-            self.assertIsInstance(dry, dict)
-
+            packaged_smoke.write_json(dry_path, {
+                "schema_version": 2,
+                "source_commit": packaged_smoke.source_commit(REPO_ROOT),
+                "artifact_hashes": [hashlib.sha256(b"schema").hexdigest()],
+                "cells": [{"id": cell_id, "status": "passed", "terminal": True, "test_count": 1,
+                           "artifact_hashes": [hashlib.sha256(b"schema").hexdigest()]}
+                          for cell_id in packaged_smoke.required_cells(REPO_ROOT)],
+                "status": "passed",
+                "dry_run": True,
+            })
             with self.assertRaisesRegex(packaged_smoke.EvidenceError, "invalid members"):
                 packaged_smoke.verify_summary(REPO_ROOT, dry_path)
 
@@ -996,12 +1098,9 @@ adb_command() {
             packaged_smoke.collect_summary(REPO_ROOT, directory / "cells", output)
             summary = packaged_smoke.load_json(output, "collected summary")
             self.assertEqual(summary["status"], "failed")
-            expected_count = len(packaged_smoke.required_cells(REPO_ROOT)) * len(
-                packaged_smoke.SMOKE_OPERATIONS
-            )
-            self.assertEqual(len(summary["obligations"]), expected_count)
-            self.assertTrue(all(item["terminal"] is True for item in summary["obligations"]))
-            self.assertTrue(all(item["status"] == "failed" for item in summary["obligations"]))
+            self.assertEqual(len(summary["cells"]), len(packaged_smoke.required_cells(REPO_ROOT)))
+            self.assertTrue(all(item["terminal"] is True for item in summary["cells"]))
+            self.assertTrue(all(item["status"] == "failed" for item in summary["cells"]))
             self.assertEqual(summary["resolved_support_cells"], [])
             self.assertEqual(summary["missing_environment_cells"], sorted(packaged_smoke.required_cells(REPO_ROOT)))
 

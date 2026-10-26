@@ -40,6 +40,12 @@ jobs:
       artifact_run_id: ${{ steps.resolve.outputs.artifact_run_id }}
       artifact_id: ${{ steps.resolve.outputs.artifact_id }}
       release_dir_name: ${{ steps.resolve.outputs.release_dir_name }}
+      run_server: ${{ steps.package.outputs.run_server }}
+      run_android: ${{ steps.package.outputs.run_android }}
+      run_apple: ${{ steps.package.outputs.run_apple }}
+      android_matrix: ${{ steps.package.outputs.android_matrix }}
+      apple_matrix: ${{ steps.package.outputs.apple_matrix }}
+      recovered_cells: ${{ steps.package.outputs.recovered_cells }}
     steps:
       - name: Require dispatch from master
         run: |
@@ -53,7 +59,9 @@ jobs:
       - name: Preserve dispatch publication helper
         run: |
           set -euo pipefail
-          git show "$GITHUB_SHA:scripts/release-publish.py" > "$RUNNER_TEMP/release-publish.py"
+          mkdir -p "$RUNNER_TEMP/release-tools"
+          git archive "$GITHUB_SHA" scripts verification | tar -x -C "$RUNNER_TEMP/release-tools"
+          ln -s "$RUNNER_TEMP/release-tools/scripts/release-publish.py" "$RUNNER_TEMP/release-publish.py"
 
       - name: Verify recovery workflow Candidate
         if: inputs.resume_run_id != ''
@@ -62,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" ci-run \
-            --sha "$GITHUB_SHA" --output "$RUNNER_TEMP/dispatch-ci-run.json"
+            --sha "$GITHUB_SHA" --tooling-only --output "$RUNNER_TEMP/dispatch-ci-run.json"
 
       - name: Download recovery candidate
         if: inputs.resume_run_id != ''
@@ -114,6 +122,8 @@ jobs:
             test "$build_run_id" = "$RESUME_RUN_ID" || { echo "sealed candidate belongs to another Release run" >&2; exit 1; }
             artifact_run_id="$RESUME_RUN_ID"
             artifact_id="$(jq -r '.artifact_id' "$RUNNER_TEMP/verified-sealed-receipt.json")"
+            python3 "$RUNNER_TEMP/release-publish.py" verify-recovery-tooling --repo-root . \
+              --source-commit "$source_commit" --dispatch-commit "$GITHUB_SHA"
           else
             mode=normal
             git fetch --no-tags origin master
@@ -179,6 +189,59 @@ jobs:
             echo "artifact_id=$artifact_id"
             echo "release_dir_name=$release_dir_name"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Plan missing package cells
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.resolve.outputs.mode }}
+          OWNER: ${{ steps.resolve.outputs.artifact_run_id }}
+          RELEASE_NAME: ${{ steps.resolve.outputs.release_dir_name }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = recovery ]; then
+            GITHUB_TOKEN="$GH_TOKEN" python3 "$RUNNER_TEMP/release-publish.py" recover-package-cells \
+              --repo-root . --release-manifest "$RUNNER_TEMP/$RELEASE_NAME/release-manifest.json" \
+              --run-id "$OWNER" --cells-dir "$RUNNER_TEMP/recovered-cells" --output "$RUNNER_TEMP/package-recovery.json"
+            cp "$RUNNER_TEMP/package-recovery.json" "$RUNNER_TEMP/recovered-cells/recovery.json"
+          fi
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          required = {c["id"] for c in json.loads(Path("conformance/support-matrix.json").read_text())["cells"] if c["policy"] == "required"}
+          recovered = set()
+          if os.environ["MODE"] == "recovery":
+              recovered = set(json.loads((Path(os.environ["RUNNER_TEMP"]) / "package-recovery.json").read_text())["accepted_cells"])
+          missing = required - recovered
+          android = [
+              {"cell":"SUP-ANDROID-MIN-001","api":"24","support_api":"24"},
+              {"cell":"SUP-ANDROID-CURRENT-001","api":"37.0","support_api":"37"},
+              {"cell":"SUP-RN-ANDROID-CURRENT-001","api":"37.0","support_api":"37"},
+              {"cell":"SUP-RN-ANDROID-MIN-001","api":"37.0","support_api":"37"},
+          ]
+          apple = [
+              {"cell":"SUP-IOS-MIN-001","ios":"17.0","support":"17","xcode":"27.1","runner":"xcode-27"},
+              {"cell":"SUP-IOS-CURRENT-001","ios":"27.1","support":"27.1","xcode":"27.1","runner":"xcode-27"},
+              {"cell":"SUP-RN-IOS-CURRENT-001","ios":"27.1","support":"27.1","xcode":"27.1","runner":"xcode-27"},
+              {"cell":"SUP-RN-IOS-MIN-001","ios":"27.1","support":"27.1","xcode":"27.1","runner":"xcode-27"},
+          ]
+          android = [c for c in android if c["cell"] in missing]
+          apple = [c for c in apple if c["cell"] in missing]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for name, value in {"run_server":"SUP-PG-LINUX-X64-001" in missing,"run_android":bool(android),"run_apple":bool(apple),"recovered_cells":bool(recovered)}.items():
+                  output.write(f"{name}={str(value).lower()}\n")
+              output.write("android_matrix=" + json.dumps({"include":android},separators=(",",":")) + "\n")
+              output.write("apple_matrix=" + json.dumps({"include":apple},separators=(",",":")) + "\n")
+          PY
+
+      - name: Retain accepted package cells
+        if: steps.package.outputs.recovered_cells == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: recovered-package-evidence
+          path: ${{ runner.temp }}/recovered-cells
+          if-no-files-found: error
+          retention-days: 90
 
   build-server:
     name: build sealed Linux components
@@ -462,7 +525,7 @@ jobs:
 
   package-server:
     name: package server Ubuntu 24.04 x64
-    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' && needs.candidate.outputs.run_server == 'true' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
     permissions:
@@ -518,12 +581,12 @@ jobs:
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: package-evidence-server
-          path: dist/package-evidence/cells
+          path: dist/package-evidence
           if-no-files-found: error
 
   package-android:
     name: package ${{ matrix.cell }}
-    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' && needs.candidate.outputs.run_android == 'true' }}
     needs: [candidate, seal]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -532,20 +595,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - cell: SUP-ANDROID-MIN-001
-            api: '24'
-            support_api: '24'
-          - cell: SUP-ANDROID-CURRENT-001
-            api: '37.0'
-            support_api: '37'
-          - cell: SUP-RN-ANDROID-CURRENT-001
-            api: '37.0'
-            support_api: '37'
-          - cell: SUP-RN-ANDROID-MIN-001
-            api: '37.0'
-            support_api: '37'
+      matrix: ${{ fromJSON(needs.candidate.outputs.android_matrix) }}
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
@@ -722,12 +772,12 @@ jobs:
         if: always()
         with:
           name: package-evidence-${{ matrix.cell }}
-          path: dist/package-evidence/cells
+          path: dist/package-evidence
           if-no-files-found: error
 
   package-apple:
     name: package ${{ matrix.cell }}
-    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' }}
+    if: ${{ !cancelled() && needs.candidate.result == 'success' && needs.seal.result == 'success' && needs.candidate.outputs.run_apple == 'true' }}
     needs: [candidate, seal]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
@@ -736,28 +786,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - cell: SUP-IOS-MIN-001
-            ios: '17.0'
-            support: '17'
-            xcode: '27.1'
-            runner: xcode-27
-          - cell: SUP-IOS-CURRENT-001
-            ios: '27.1'
-            support: '27.1'
-            xcode: '27.1'
-            runner: xcode-27
-          - cell: SUP-RN-IOS-CURRENT-001
-            ios: '27.1'
-            support: '27.1'
-            xcode: '27.1'
-            runner: xcode-27
-          - cell: SUP-RN-IOS-MIN-001
-            ios: '27.1'
-            support: '27.1'
-            xcode: '27.1'
-            runner: xcode-27
+      matrix: ${{ fromJSON(needs.candidate.outputs.apple_matrix) }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -769,6 +798,15 @@ jobs:
         with:
           go-version: '1.25.0'
           cache: false
+
+      - name: Acquire recovery Go modules
+        if: needs.candidate.outputs.mode == 'recovery'
+        run: |
+          set -euo pipefail
+          git show "$GITHUB_SHA:scripts/ci/download_go_modules.py" > "$RUNNER_TEMP/download-go-modules.py"
+          python3 "$RUNNER_TEMP/download-go-modules.py" --module-dir api/go
+          python3 "$RUNNER_TEMP/download-go-modules.py" --module-dir conformance
+          echo 'GOPROXY=off' >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
@@ -846,41 +884,6 @@ jobs:
             echo "LOCAL_POSTGRES_BINARY_SHA256=$expected_hash"
           } >> "$GITHUB_ENV"
 
-      - name: Select required Xcode and simulator
-        env:
-          IOS_VERSION: ${{ matrix.ios }}
-          XCODE_VERSION: ${{ matrix.xcode }}
-        run: |
-          set -euo pipefail
-          test -d "/Applications/Xcode_$XCODE_VERSION.app" || { echo "Xcode $XCODE_VERSION is required" >&2; exit 1; }
-          sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
-          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "$XCODE_VERSION"
-          swift --version | grep -E 'Swift version 6[.]' >/dev/null
-          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == wanted } ? 0 : 1)' "$IOS_VERSION"; then
-            if [ "$IOS_VERSION" = '17.0' ]; then
-              umask 077
-              runtime_dir="$(mktemp -d)"
-              trap 'rm -rf "$runtime_dir"' EXIT
-              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-                --get --data-urlencode 'path=/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg' \
-                --cookie-jar "$runtime_dir/cookies" --output /dev/null \
-                'https://developerservices2.apple.com/services/download'
-              test -s "$runtime_dir/cookies"
-              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-                --cookie "$runtime_dir/cookies" --output "$runtime_dir/iOS_17_Simulator_Runtime.dmg" \
-                'https://download.developer.apple.com/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg'
-              sudo xcodebuild -importPlatform "$runtime_dir/iOS_17_Simulator_Runtime.dmg"
-            else
-              sudo xcodebuild -downloadPlatform iOS -buildVersion "$IOS_VERSION"
-            fi
-          fi
-          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
-          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'wanted=ARGV.fetch(0) == "17.0" ? "iPhone 14" : "iPhone Duo"; x=JSON.parse(STDIN.read).fetch("devicetypes").find { |i| i["name"] == wanted }; abort "required iPhone simulator type is unavailable" unless x; puts x.fetch("identifier")' "$IOS_VERSION")"
-          udid="$(xcrun simctl create "Synchro_${{ matrix.cell }}" "$device" "$runtime")"
-          xcrun simctl boot "$udid"
-          xcrun simctl bootstatus "$udid" -b
-          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-
       - name: Start local Apple fixture
         run: |
           set -euo pipefail
@@ -941,6 +944,41 @@ jobs:
             exit "$startup_status"
           fi
 
+      - name: Select required Xcode and simulator
+        env:
+          IOS_VERSION: ${{ matrix.ios }}
+          XCODE_VERSION: ${{ matrix.xcode }}
+        run: |
+          set -euo pipefail
+          test -d "/Applications/Xcode_$XCODE_VERSION.app" || { echo "Xcode $XCODE_VERSION is required" >&2; exit 1; }
+          sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app"
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "$XCODE_VERSION"
+          swift --version | grep -E 'Swift version 6[.]' >/dev/null
+          if ! xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); exit(JSON.parse(STDIN.read).fetch("runtimes").any? { |r| r["version"] == wanted } ? 0 : 1)' "$IOS_VERSION"; then
+            if [ "$IOS_VERSION" = '17.0' ]; then
+              umask 077
+              runtime_dir="$(mktemp -d)"
+              trap 'rm -rf "$runtime_dir"' EXIT
+              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                --get --data-urlencode 'path=/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg' \
+                --cookie-jar "$runtime_dir/cookies" --output /dev/null \
+                'https://developerservices2.apple.com/services/download'
+              test -s "$runtime_dir/cookies"
+              curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                --cookie "$runtime_dir/cookies" --output "$runtime_dir/iOS_17_Simulator_Runtime.dmg" \
+                'https://download.developer.apple.com/Developer_Tools/iOS_17_Simulator_Runtime/iOS_17_Simulator_Runtime.dmg'
+              sudo xcodebuild -importPlatform "$runtime_dir/iOS_17_Simulator_Runtime.dmg"
+            else
+              sudo xcodebuild -downloadPlatform iOS -buildVersion "$IOS_VERSION"
+            fi
+          fi
+          runtime="$(xcrun simctl list runtimes available -j | ruby -rjson -e 'wanted=ARGV.fetch(0); r=JSON.parse(STDIN.read).fetch("runtimes").find { |x| x["version"] == wanted }; abort "required iOS runtime is unavailable" unless r; puts r.fetch("identifier")' "$IOS_VERSION")"
+          device="$(xcrun simctl list devicetypes -j | ruby -rjson -e 'wanted=ARGV.fetch(0) == "17.0" ? "iPhone 14" : "iPhone Duo"; x=JSON.parse(STDIN.read).fetch("devicetypes").find { |i| i["name"] == wanted }; abort "required iPhone simulator type is unavailable" unless x; puts x.fetch("identifier")' "$IOS_VERSION")"
+          udid="$(xcrun simctl create "Synchro_${{ matrix.cell }}" "$device" "$runtime")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "IOS_SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+
       - name: Run Apple package lifecycle
         run: |
           make release-run-support-cell \
@@ -967,7 +1005,7 @@ jobs:
         if: always()
         with:
           name: package-evidence-${{ matrix.cell }}
-          path: dist/package-evidence/cells
+          path: dist/package-evidence
           if-no-files-found: error
 
   package-gate:
@@ -983,9 +1021,9 @@ jobs:
         run: |
           test "${{ needs.candidate.result }}" = success
           test "${{ needs.seal.result }}" = success
-          test "${{ needs.package-server.result }}" = success
-          test "${{ needs.package-android.result }}" = success
-          test "${{ needs.package-apple.result }}" = success
+          test "${{ needs.package-server.result }}" = "${{ needs.candidate.outputs.run_server == 'true' && 'success' || 'skipped' }}"
+          test "${{ needs.package-android.result }}" = "${{ needs.candidate.outputs.run_android == 'true' && 'success' || 'skipped' }}"
+          test "${{ needs.package-apple.result }}" = "${{ needs.candidate.outputs.run_apple == 'true' && 'success' || 'skipped' }}"
 
       - name: Checkout candidate
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -1004,8 +1042,15 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: package-evidence-*
-          path: dist/package-evidence/cells
+          path: dist/package-evidence
           merge-multiple: true
+
+      - name: Download retained accepted cells
+        if: needs.candidate.outputs.recovered_cells == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: recovered-package-evidence
+          path: dist/package-evidence
 
       - name: Aggregate exact support obligations
         run: |
@@ -1018,11 +1063,15 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --summary dist/package-evidence/summary.json \
             --release-manifest "dist/releases/${{ needs.candidate.outputs.release_dir_name }}/release-manifest.json"
+          if grep -q '^release-test-upgrade:' Makefile; then
+            python3 verification/consumers/upgrade/sealed_result.py verify-all \
+              --release-dir "dist/releases/${{ needs.candidate.outputs.release_dir_name }}" --evidence-dir dist/package-evidence
+          fi
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: package-gate-evidence
-          path: dist/package-evidence/summary.json
+          path: dist/package-evidence
           if-no-files-found: error
           retention-days: 90
 
@@ -1105,6 +1154,10 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --summary dist/package-evidence/summary.json \
             --release-manifest "$release/release-manifest.json"
+          if grep -q '^release-test-upgrade:' Makefile; then
+            python3 verification/consumers/upgrade/sealed_result.py verify-all \
+              --release-dir "$release" --evidence-dir dist/package-evidence
+          fi
           ci_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ needs.candidate.outputs.candidate_ci_run_id }}")"
           jq -e --arg sha "$commit" --argjson attempt '${{ needs.candidate.outputs.candidate_ci_run_attempt }}' \
             '.head_sha == $sha and .run_attempt == $attempt and .event == "push" and .head_branch == "master" and .path == ".github/workflows/ci.yml" and .status == "completed" and .conclusion == "success"' <<<"$ci_run" >/dev/null

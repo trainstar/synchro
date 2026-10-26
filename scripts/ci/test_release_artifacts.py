@@ -253,6 +253,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             go.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$GO_WITNESS\"\n"
+                "if [ \"$1\" = mod ]; then exit 0; fi\n"
                 "exit 47\n",
                 encoding="utf-8",
             )
