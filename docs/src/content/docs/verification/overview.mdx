@@ -19,6 +19,10 @@ macOS hosts Apple validation. It does not create a PostgreSQL support cell.
 ## What Is Generated
 
 Release records the exact environment, commands, results, replay information, and artifact hashes. `release-manifest.json` records resolved current versions.
+Each schema version 2 package receipt records one terminal lifecycle result for one required support cell.
+It also records process replacement, durable work or replay, convergence, measured environment, and sealed artifact identities.
+The package summary records one status and artifact identity set per required cell.
+The verifier strictly checks older schema version 1 operation rows before it includes retained receipts in that summary.
 
 Tooling computes release eligibility from that evidence. Documentation, fixture presence, and the current handwritten test inventory do not certify a release.
 
@@ -50,7 +54,7 @@ Release-critical proofs use independent expected results, real packaged componen
 
 Every required test must run. Skips, ignored tests, unexplained flakes, and retry-only passes block promotion. Reruns remain linked to their original failures with a recorded reason and diagnosis.
 
-The final support gate derives semantic obligations and packaged checks from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
+The final support gate derives required cells from the support matrix. It rejects missing, skipped, unavailable, malformed, zero-test, and nonterminal results.
 
 Each support cell with the `required` policy requires packaged connect, push, pull, process-kill, and resume checks. A `tested` cell, such as the macOS host, runs its test suites but has no packaged-cell obligation. The package installation step must use the release artifact under test.
 
@@ -63,8 +67,23 @@ Each installed client pushes a program, a workout, a workout exercise, and exerc
 - Each value equals a value that the harness authored by hand.
 
 An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.
+Native and React Native consumers report success only after terminal stop and close operations finish.
 
-The Makefile reads the generated packaged summary from `dist/verification/packaged-smoke-summary.json`. Missing summary data blocks the gate.
+The four representative client upgrade paths run against sealed artifacts in Package when the source contains `release-test-upgrade`.
+Their receipts identify the Package job and actual harness mode. They do not certify the current-cell environment.
+An older source keeps its original accepted upgrade contract. It does not gain an upgrade result from a later workflow.
+
+Local source-artifact lifecycle runs are optional focused diagnostics.
+Required Package execution uses the final sealed artifacts on each required hosted support cell.
+
+Recovery keeps the original source commit, sealed artifacts, and complete Candidate result.
+It reuses only original receipts that match the sealed manifest, support environment, successful job, and artifact digest.
+It runs missing cells with an unchanged acceptance contract. It rejects invalidated acceptance.
+A reviewed nonproduct dispatch needs successful source-quality and security tooling checks.
+
+The local Make target reads `dist/verification/packaged-smoke-summary.json` by default.
+The hosted Package gate verifies `dist/package-evidence/summary.json` with the original cell receipts and sealed manifest.
+Missing summary or cell evidence blocks that gate.
 
 Security evidence may be access-controlled while a finding is unresolved. Public reports describe scope and disposition without publishing exploit instructions.
 

@@ -269,11 +269,15 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass connect, push, pull, kill, and resume on every required support cell. |
+| Package | Exact sealed distributions pass one full lifecycle on every required support cell. Representative client upgrades run when the source has `release-test-upgrade`. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
+The four representative client upgrade paths run in Package against sealed client artifacts when the selected source contains `release-test-upgrade`.
+Those paths cover Swift, Kotlin, React Native iOS, and React Native Android.
+An older source without that target keeps its original accepted upgrade contract.
+Do not create upgrade results for a source that did not execute the sealed upgrade target.
 
 Each required gate is one Make target with a declared test selection.
 A required target rejects a changed selector such as `GO_TEST_ARGS`, `GO_TEST_PKGS`, `SWIFT_TEST_ARGS`, `GRADLE_TEST_ARGS`, `DETOX_ARGS`, or `BLACKBOX_TEST_COUNT`.
@@ -314,99 +318,24 @@ Publication requires zero open issues in the release milestone.
 The `release-signing` job creates detached signatures only.
 It has no publication credentials and performs no public operation.
 
-The Package gate owns the full five-operation lifecycle.
+The Package gate owns one full lifecycle per required support cell.
 The consumer's terminal result owns phase completion. An empty queue alone cannot certify success.
 Native and React Native consumers report resume success only after stop and close finish.
+Each schema version 2 cell records one terminal lifecycle result, exact artifact hashes, the measured environment, and process evidence.
+Completion checks exact training dataset values and server convergence after process replacement.
+The Package summary records one status and artifact identity set per required cell.
+It rejects missing, unknown, duplicate, failed, zero-count, and nonterminal cells.
+The verifier validates retained schema version 1 receipts before it converts their five operation rows to one lifecycle result.
 
-### Local source-artifact lifecycle before CI
+### Optional local lifecycle diagnostics
 
-Required local validation uses the same connect, push, pull, kill, and resume implementation.
-It does not require or create CI identities or a partial sealed release manifest.
-First build the actual consumer artifacts through the supported source-artifact Make targets.
-Resolve all nine expected support environments independently before consumer execution.
-Store that complete resolution in `PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS`.
-Use a clean exact source commit for preparation, completion, and verification.
-
-Prepare one explicit local record per required cell:
-
-```sh
-VERSION=$(git -C "$SOURCE" show HEAD:VERSION)
-APPLE_ARCHIVE="$CONSUMER_ARTIFACT_DIR/apple/synchro-spm-$VERSION.tar.gz"
-MAVEN_BASE="$CONSUMER_ARTIFACT_DIR/maven/fit/trainstar/synchro/$VERSION/synchro-$VERSION"
-MAVEN_FILES="$MAVEN_BASE.aar $MAVEN_BASE.pom"
-if test -f "$MAVEN_BASE.module"; then MAVEN_FILES="$MAVEN_FILES $MAVEN_BASE.module"; fi
-NPM_FILE="$CONSUMER_ARTIFACT_DIR/npm/trainstar-synchro-react-native-$VERSION.tgz"
-case "$CELL" in
-  SUP-IOS-*) ARTIFACT_FILES="$APPLE_ARCHIVE" ;;
-  SUP-RN-IOS-*) ARTIFACT_FILES="$NPM_FILE $APPLE_ARCHIVE" ;;
-  SUP-ANDROID-*) ARTIFACT_FILES="$MAVEN_FILES" ;;
-  SUP-RN-ANDROID-*) ARTIFACT_FILES="$NPM_FILE $MAVEN_FILES" ;;
-  SUP-PG-*) ARTIFACT_FILES="$EXTENSION_ARCHIVE $ADAPTER_BINARY $SEED_BINARY" ;;
-esac
-make prepare-local-smoke-cell SUPPORT_CELL_ID="$CELL" \
-  CLIENT_ARTIFACT_DIR="$CONSUMER_ARTIFACT_DIR" \
-  PACKAGED_SMOKE_SUPPORT_ENVIRONMENTS="$EXPECTED_ENVIRONMENTS" \
-  PACKAGED_SMOKE_LOCAL_INPUTS="$LOCAL_INPUTS" \
-  PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$ARTIFACT_FILES"
-```
-
-Client preparation requires the selected consumer artifact directory.
-The explicit list must identify exactly the selected cell's artifact files.
-Kotlin binds the AAR, POM, and Gradle module metadata when the publication contains that metadata.
-RN Android also binds the installed npm tarball.
-Swift local artifact identity is the selected Apple archive hash.
-RN iOS local artifact identities are the selected archive and npm tarball hashes.
-The authored Apple paths are `Package.swift`, `Synchro.podspec`, `LICENSE`, and `clients/swift/Sources`.
-The archive and expanded files must match the clean source commit.
-Their complete byte equality binds expanded authored sources without separate source-file hashes or caller enumeration.
-The only effective Swift manifest is the exact committed `Package.swift`, which selects `clients/swift/Sources/Synchro`.
-Local binding rejects every additional `Package@swift-*.swift` in the expanded package root, including case variants.
-Local RN iOS requires the default bare clone of that repository and its exact candidate tag.
-Local RN rejects public package resolution.
-Local RN iOS rejects an externally supplied `SYNCHRO_PREPUBLICATION_GIT_URL`.
-Sealed execution retains its separately verified Git resolution.
-
-The closed record contains schema version, local kind, source commit, cell identity, complete expected environments, and actual artifact hashes.
-Keep the record and expected hashes outside tested output and establish them before execution.
-Take `EXPECTED_HASHES` from the prepared record before consumer execution, not from the completed cell result.
-Pass `PACKAGED_SMOKE_LOCAL_INPUTS` instead of `PACKAGED_SMOKE_RELEASE_MANIFEST` to the existing consumer smoke target.
-Providing neither input or both inputs fails.
-Set `CLIENT_ARTIFACTS_PREPARED=1` for client execution to retain the files identified during preparation.
-Keep `PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES` and the same `PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS` explicit.
-The local server target requires three prebuilt files in order: extension archive, adapter, and seed.
-It must not rebuild those files after local identity preparation.
-Keep the selected cell, platform, simulator or device binding, and real service configuration unchanged.
-Consumer binding runs before builds or device actions and repeats before completion.
-
-Run a client cell through its existing supported entry point:
-
-```sh
-make test-client-platforms SUPPORT_CELL_ID="$CELL" SUPPORT_PLATFORM_VERSION="$PLATFORM_VERSION" \
-  CLIENT_ARTIFACT_DIR="$CONSUMER_ARTIFACT_DIR" CLIENT_ARTIFACTS_PREPARED=1 \
-  PACKAGED_SMOKE_LOCAL_INPUTS="$LOCAL_INPUTS" PACKAGED_SMOKE_RELEASE_MANIFEST= \
-  PACKAGED_SMOKE_DISTRIBUTION_ARTIFACTS="$ARTIFACT_FILES" \
-  PACKAGED_SMOKE_EXPECTED_ARTIFACT_HASHES="$EXPECTED_HASHES"
-```
-
-For the server cell, use `make test-consumer-server` with the same explicit local input, artifact list, and expected hashes.
-
-Verify each retained local cell with the original source-built files and expected hashes:
-
-```sh
-set -- python3 verification/packaged_smoke.py verify-local-cell --repo-root "$SOURCE" \
-  --cell "$CELL" --local-inputs "$LOCAL_INPUTS" --cell-result "$CELL_RESULT"
-case "$CELL" in SUP-PG-*) ;; *) set -- "$@" --artifact-dir "$CONSUMER_ARTIFACT_DIR" ;; esac
-for file in $ARTIFACT_FILES; do set -- "$@" --artifact "$file"; done
-for hash in $EXPECTED_HASHES; do set -- "$@" --expected-artifact-hash "$hash"; done
-"$@"
-```
-
-Client verification requires the same selected directory and complete artifact list.
-Completion still requires independent initial and resume measurements, real server proof, process replacement, and terminal consumer stop and close.
-Completed local evidence contains `evidence_kind="local-source-artifacts"`.
-Retain each genuine local cell result. No local summary generator is required.
-Sealed Package collection and verification reject local evidence.
-Local lifecycle success does not replace later Package execution against the exact sealed distributions.
+Use `make prepare-local-smoke-cell` and one focused `make test-client-platforms` or `make test-consumer-server` run when diagnosis requires it.
+Prepare a local input record from a clean exact source commit and the selected source-built artifact files.
+Record all expected support environments before execution.
+Bind the consumer to that record, its artifact hashes, and the selected simulator or device.
+Use `verification/packaged_smoke.py verify-local-cell` with the original files after completion.
+Local evidence has `evidence_kind="local-source-artifacts"` and cannot enter the sealed Package summary.
+The required Package gate runs against the exact sealed distributions in the required hosted cells.
 
 The Public gate does not repeat that lifecycle.
 It verifies public GitHub assets, Maven files, and the npm tarball against sealed identities.
@@ -425,18 +354,19 @@ Candidate preparation must check current stable device releases separately.
 1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
 3. Run the clean package installation and lifecycle check on every required support cell.
-4. Wait for the protected `release` environment approval.
-5. Recheck the approved candidate and sealed identity.
-6. Attest the sealed files with the exact sealed release manifest.
-7. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry. A release candidate does not need `NPM_DIST_TAG_TOKEN`.
-8. Create immutable `v<version>` and `api/go/v<version>` tags.
-9. Publish GitHub assets without marking them latest. The release body is the `CHANGELOG.md` section of the version. Mark a release candidate as a GitHub prerelease.
-10. Verify source and asset access.
-11. Publish Maven and verify public consumption.
-12. Publish npm through trusted OIDC under the `candidate` dist-tag, or under `next` for a release candidate.
-13. Verify the explicit npm version, exact public bytes, provenance, and clean React Native builds.
-14. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`. A release candidate skips this step.
-15. Mark GitHub latest after all public checks pass. A release candidate skips this step.
+4. Run the four representative client upgrades against sealed inputs when the selected source contains `release-test-upgrade`.
+5. Wait for the protected `release` environment approval.
+6. Recheck the approved candidate and sealed identity.
+7. Attest the sealed files with the exact sealed release manifest.
+8. Verify the Central credentials, the npm trusted publisher, and `NPM_DIST_TAG_TOKEN` for each unpublished registry. A release candidate does not need `NPM_DIST_TAG_TOKEN`.
+9. Create immutable `v<version>` and `api/go/v<version>` tags.
+10. Publish GitHub assets without marking them latest. The release body is the `CHANGELOG.md` section of the version. Mark a release candidate as a GitHub prerelease.
+11. Verify source and asset access.
+12. Publish Maven and verify public consumption.
+13. Publish npm through trusted OIDC under the `candidate` dist-tag, or under `next` for a release candidate.
+14. Verify the explicit npm version, exact public bytes, provenance, and clean React Native builds.
+15. Move npm `latest` to the verified version with `NPM_DIST_TAG_TOKEN`. A release candidate skips this step.
+16. Mark GitHub latest after all public checks pass. A release candidate skips this step.
 
 ## Success Evidence
 
@@ -455,7 +385,7 @@ The R1 definition now derives its Linux host identity from `/etc/machine-id`. Th
 | Observed state | Required action |
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
-| Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Resume with original sealed bytes and the original artifact-owner run ID. |
+| Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Keep the original source, seal, and acceptance contract. Reuse verified accepted cells and run missing cells. Reject invalidated acceptance. |
 | Registry credential check fails | Correct the `release` environment Central secrets, `NPM_DIST_TAG_TOKEN`, or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
@@ -471,6 +401,8 @@ The R1 definition now derives its Linux host identity from `/etc/machine-id`. Th
 
 Never move tags or replace published bytes.
 Recovery never rebuilds or republishes an existing package version.
+Preserve the original full Candidate result and the original sealed artifact owner.
+Keep every failed attempt visible while you diagnose its boundary.
 
 The `publication-sealed-candidate` receipt artifact retains for 90 days.
 Before a resume, verify that the receipt remains available and that its source SHA, version, sealed manifest, and artifacts match the original candidate.
@@ -478,7 +410,24 @@ The workflow rejects an unavailable or mismatched receipt.
 Do not bypass this control or add a substitute gate.
 
 Recovery uses publication helpers from the dispatch commit and retains the original candidate checkout and sealed bytes.
-Candidate CI must pass for both commits when they differ.
+The original source commit must retain its complete successful Candidate result.
+When the dispatch commit differs, review its diff and allow only nonproduct recovery tooling changes.
+The dispatch commit must pass source-quality, CodeQL, and dependency-scan tooling checks.
+These checks do not replace the original Candidate result.
+Recovery downloads accepted receipts from the original completed Release run.
+Each retained receipt requires a successful original job and a matching artifact digest, source commit, sealed hash set, and measured environment.
+The verifier reads the original lifecycle and process evidence before it accepts a retained cell.
+Recovery keeps the original test contract and resolved environments fixed.
+Review the dispatch diff before reuse. A filename allowlist cannot prove equivalent assertions or fixture behavior.
+Reject sealed recovery if a changed assertion, consumer, fixture, or required environment invalidates original acceptance.
+With that contract unchanged, run only cells that lack original accepted evidence.
+Do not use a later run to replace a passed original cell or to hide a product failure.
+When the source contains `release-test-upgrade`, retain each representative client upgrade only with its valid sealed upgrade receipt.
+The receipt identifies its Package job and actual representative harness mode.
+Swift runs on the macOS host. RN iOS uses RN 0.83.10, and RN Android uses RN 0.88.0.
+These upgrade proofs do not replace the separate current-cell lifecycle and environment checks.
+RC4 source predates `release-test-upgrade`. It keeps its original accepted upgrade contract.
+Do not create sealed upgrade evidence for RC4.
 The protected publisher discovers an existing draft through the authenticated release list.
 It addresses a new draft by the release ID from the create response, because the list can omit a new draft.
 Candidate lookups retry for a bounded time, because the filtered CI run list can omit a completed run.

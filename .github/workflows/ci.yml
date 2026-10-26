@@ -70,6 +70,15 @@ jobs:
       - name: Run source-quality tests
         run: make ci-source-quality
 
+      - name: Retain verified docs site
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: docs-dist
+          path: docs/dist
+          include-hidden-files: true
+          if-no-files-found: error
+
   pull-request-swift:
     name: pull-request Swift unit
     if: github.event_name == 'pull_request'

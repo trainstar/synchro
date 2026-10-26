@@ -1,15 +1,20 @@
 name: Docs
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [master]
-    paths:
-      - 'README.md'
-      - 'docs/**'
   workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful master CI run that contains docs-dist.
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -21,21 +26,50 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Verify the source CI run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/master ]; then
+            echo "Docs dispatch must select master" >&2
+            exit 1
+          fi
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Docs CI run ID is invalid" >&2; exit 1; }
+          master_sha="$(gh api "repos/$GITHUB_REPOSITORY/branches/master" --jq '.commit.sha')"
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")"
+          jq -e --arg repository "$GITHUB_REPOSITORY" --arg master "$master_sha" '
+            .repository.full_name == $repository and
+            .head_repository.full_name == $repository and
+            .path == ".github/workflows/ci.yml" and
+            .event == "push" and
+            .head_branch == "master" and
+            .head_sha == $master and
+            .status == "completed" and
+            .conclusion == "success"
+          ' <<< "$run" > /dev/null || {
+            echo "Docs CI run is not a successful current master push" >&2
+            exit 1
+          }
+          echo "run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$master_sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-dist
+          path: docs/dist
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
-
-      - name: Install and build docs
-        run: make docs-build
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
@@ -43,11 +77,23 @@ jobs:
           include-hidden-files: true
 
   deploy:
-    needs: build
+    needs: prepare
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Reject stale docs source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          master_sha="$(gh api "repos/$GITHUB_REPOSITORY/branches/master" --jq '.commit.sha')"
+          test "$SOURCE_SHA" = "$master_sha" || {
+            echo "Docs source is stale" >&2
+            exit 1
+          }
+
       - id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

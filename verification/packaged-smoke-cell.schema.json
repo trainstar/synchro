@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://synchro.dev/schemas/packaged-smoke-cell-v1.schema.json",
+  "$id": "https://synchro.dev/schemas/packaged-smoke-cell-v2.schema.json",
   "title": "Packaged smoke cell evidence",
   "type": "object",
   "additionalProperties": false,
@@ -10,10 +10,10 @@
     "source_commit",
     "status",
     "artifact_hashes",
-    "operations"
+    "lifecycle"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "cell_id": { "enum": [
       "SUP-PG-LINUX-X64-001", "SUP-IOS-MIN-001", "SUP-IOS-CURRENT-001",
       "SUP-RN-IOS-MIN-001", "SUP-RN-IOS-CURRENT-001", "SUP-ANDROID-MIN-001", "SUP-ANDROID-CURRENT-001",
@@ -27,20 +27,14 @@
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
     },
-    "operations": {
-      "type": "array",
-      "minItems": 5,
-      "maxItems": 5,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "status", "terminal", "test_count"],
-        "properties": {
-          "name": { "enum": ["connect", "push", "pull", "kill", "resume"] },
-          "status": { "enum": ["passed", "failed"] },
-          "terminal": { "const": true },
-          "test_count": { "type": "integer", "minimum": 0, "maximum": 1 }
-        }
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "terminal", "test_count"],
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "terminal": { "const": true },
+        "test_count": { "type": "integer", "minimum": 0, "maximum": 1 }
       }
     },
     "failure": { "type": "string", "minLength": 1 },
@@ -100,9 +94,20 @@
       "if": { "properties": { "status": { "const": "passed" } } },
       "then": {
         "required": ["process_lifecycle", "environment"],
-        "properties": { "artifact_hashes": { "minItems": 1 } }
+        "properties": {
+          "artifact_hashes": { "minItems": 1 },
+          "lifecycle": { "properties": { "status": { "const": "passed" }, "test_count": { "const": 1 } } }
+        }
       },
-      "else": { "required": ["failure"] }
+      "else": {
+        "required": ["failure"],
+        "properties": { "lifecycle": { "properties": { "status": { "const": "failed" }, "test_count": { "const": 0 } } } }
+      }
+    },
+    {
+      "if": { "properties": { "cell_id": { "const": "SUP-PG-LINUX-X64-001" } } },
+      "then": { "properties": { "process_lifecycle": { "required": ["kind"] } } },
+      "else": { "properties": { "process_lifecycle": { "not": { "required": ["kind"] } } } }
     }
   ],
   "oneOf": [
