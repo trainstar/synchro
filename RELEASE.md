@@ -269,12 +269,12 @@ A breaking minor requires an explicit compatibility window and data-preserving m
 | Gate | Outcome |
 | --- | --- |
 | Candidate | Required source CI passes for the exact commit. |
-| Package | Exact sealed distributions pass one full lifecycle on every required support cell. Current client upgrades run when the source has `release-test-upgrade`. |
+| Package | Exact sealed distributions pass one full lifecycle on every required support cell. Representative client upgrades run when the source has `release-test-upgrade`. |
 | Publish | One approval authorizes dependency-ordered publication. |
 | Public | Public bytes match the sealed payloads, and clean consumers resolve and build from public coordinates. |
 
 Candidate CI owns source correctness. Release does not run completed source suites again.
-The four current client upgrade paths run in Package against sealed client artifacts when the selected source contains `release-test-upgrade`.
+The four representative client upgrade paths run in Package against sealed client artifacts when the selected source contains `release-test-upgrade`.
 Those paths cover Swift, Kotlin, React Native iOS, and React Native Android.
 An older source without that target keeps its original accepted upgrade contract.
 Do not create upgrade results for a source that did not execute the sealed upgrade target.
@@ -385,7 +385,7 @@ The R1 definition now derives its Linux host identity from `/etc/machine-id`. Th
 | Observed state | Required action |
 | --- | --- |
 | No sealed candidate | Start a new candidate. |
-| Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Keep the original source and seal. Reuse verified accepted cells and run only missing or invalidated cells. |
+| Sealed candidate before tags, including a cancelled rehearsal, with a retained receipt | Keep the original source, seal, and acceptance contract. Reuse verified accepted cells and run missing cells. Reject invalidated acceptance. |
 | Registry credential check fails | Correct the `release` environment Central secrets, `NPM_DIST_TAG_TOKEN`, or the npm trusted publisher. Then resume with the original artifact-owner run ID. |
 | One source tag exists | Verify its commit and create the missing tag there. |
 | GitHub draft exists | Verify its existing assets and upload only missing sealed assets before publication. |
@@ -422,7 +422,7 @@ Review the dispatch diff before reuse. A filename allowlist cannot prove equival
 Reject sealed recovery if a changed assertion, consumer, fixture, or required environment invalidates original acceptance.
 With that contract unchanged, run only cells that lack original accepted evidence.
 Do not use a later run to replace a passed original cell or to hide a product failure.
-When the source contains `release-test-upgrade`, retain each current client upgrade only with its valid sealed upgrade receipt.
+When the source contains `release-test-upgrade`, retain each representative client upgrade only with its valid sealed upgrade receipt.
 The receipt identifies its Package job and actual representative harness mode.
 Swift runs on the macOS host. RN iOS uses RN 0.83.10, and RN Android uses RN 0.88.0.
 These upgrade proofs do not replace the separate current-cell lifecycle and environment checks.

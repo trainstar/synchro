@@ -78,7 +78,8 @@ Required Package execution uses the final sealed artifacts on each required host
 
 Recovery keeps the original source commit, sealed artifacts, and complete Candidate result.
 It reuses only original receipts that match the sealed manifest, support environment, successful job, and artifact digest.
-It runs only missing or invalidated cells. A reviewed nonproduct dispatch needs successful source-quality and security tooling checks.
+It runs missing cells with an unchanged acceptance contract. It rejects invalidated acceptance.
+A reviewed nonproduct dispatch needs successful source-quality and security tooling checks.
 
 The local Make target reads `dist/verification/packaged-smoke-summary.json` by default.
 The hosted Package gate verifies `dist/package-evidence/summary.json` with the original cell receipts and sealed manifest.
