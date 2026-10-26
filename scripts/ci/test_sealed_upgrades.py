@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import gzip
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zipfile
@@ -146,6 +149,64 @@ class SealedUpgradeTests(unittest.TestCase):
         with mock.patch.object(sealed_result.sys, "platform", "linux"):
             with self.assertRaisesRegex(ValueError, "requires macOS"):
                 sealed_result.runtime(args)
+
+    def test_prepared_fixture_does_not_start_or_mutate_local_fixture(self) -> None:
+        self.git.stop()
+
+        class ReadyHandler(BaseHTTPRequestHandler):
+            ready = True
+
+            def do_GET(self) -> None:
+                status = 200 if self.path == "/ready" and self.ready else 503
+                self.send_response(status)
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ReadyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        marker = self.root / "fixture-started"
+        fake_make = self.root / "fake-make"
+        fake_make.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" > "$UPGRADE_START_MARKER"\n'
+            "exit 23\n",
+        )
+        fake_make.chmod(0o700)
+        environment = {**os.environ, "UPGRADE_START_MARKER": str(marker)}
+        base = {
+            "ADAPTER_TEST_URL": "postgres://fixture",
+            "SYNCHRO_TEST_URL": f"http://127.0.0.1:{server.server_port}",
+            "SYNCHRO_TEST_JWT_SECRET": "test-secret",
+            "UPGRADE_FIXTURE_PREPARED": "1",
+        }
+
+        def run(values: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            arguments = ["make", "--no-print-directory", "upgrade-fixture", f"MAKE={fake_make}"]
+            arguments.extend(f"{key}={value}" for key, value in values.items())
+            return subprocess.run(
+                arguments, cwd=SCRIPT.parents[3], env=environment,
+                capture_output=True, text=True, check=False, timeout=15,
+            )
+
+        self.assertEqual(run(base).returncode, 0)
+        self.assertFalse(marker.exists())
+        for missing in ("ADAPTER_TEST_URL", "SYNCHRO_TEST_URL", "SYNCHRO_TEST_JWT_SECRET"):
+            with self.subTest(missing=missing):
+                values = {**base, missing: ""}
+                self.assertNotEqual(run(values).returncode, 0)
+                self.assertFalse(marker.exists())
+        ReadyHandler.ready = False
+        self.assertNotEqual(run(base).returncode, 0)
+        self.assertFalse(marker.exists())
+        ReadyHandler.ready = True
+        self.assertNotEqual(run({**base, "UPGRADE_FIXTURE_PREPARED": "0"}).returncode, 0)
+        self.assertIn("synchrod-pg-test-start", marker.read_text())
 
     def test_tampered_extracted_inputs_fail_before_upgrade(self) -> None:
         cases = (

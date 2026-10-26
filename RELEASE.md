@@ -417,7 +417,10 @@ These checks do not replace the original Candidate result.
 Recovery downloads accepted receipts from the original completed Release run.
 Each retained receipt requires a successful original job and a matching artifact digest, source commit, sealed hash set, and measured environment.
 The verifier reads the original lifecycle and process evidence before it accepts a retained cell.
-Run only cells that lack valid original evidence or whose selected test contract or environment changed.
+Recovery keeps the original test contract and resolved environments fixed.
+Review the dispatch diff before reuse. A filename allowlist cannot prove equivalent assertions or fixture behavior.
+Reject sealed recovery if a changed assertion, consumer, fixture, or required environment invalidates original acceptance.
+With that contract unchanged, run only cells that lack original accepted evidence.
 Do not use a later run to replace a passed original cell or to hide a product failure.
 When the source contains `release-test-upgrade`, retain each current client upgrade only with its valid sealed upgrade receipt.
 The receipt identifies its Package job and actual representative harness mode.

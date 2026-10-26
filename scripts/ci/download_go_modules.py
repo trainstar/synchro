@@ -42,7 +42,6 @@ def classify_failure(output: str) -> tuple[str, bool]:
 
 def classify_result(stdout: str, stderr: str) -> tuple[str, bool, bool]:
     errors = []
-    module_error = False
     decoder = json.JSONDecoder()
     position = 0
     while position < len(stdout):
@@ -57,21 +56,15 @@ def classify_result(stdout: str, stderr: str) -> tuple[str, bool, bool]:
             break
         if isinstance(item, dict) and isinstance(item.get("Error"), str):
             errors.append(item["Error"])
-            module_error = True
-    stderr_category = classify_failure(stderr) if stderr.strip() else None
-    if stderr_category is not None and not stderr_category[1] and stderr_category[0] != "unknown":
-        return stderr_category[0], False, module_error
+    errors.extend(line for line in stderr.splitlines() if line.strip()
+                  and not re.fullmatch(r"go: downloading \S+ \S+", line))
     categories = [classify_failure(error) for error in errors]
     for category, retryable in categories:
         if not retryable:
-            return category, False, module_error
-    if stderr_category is not None and stderr_category[1]:
-        categories.append(stderr_category)
+            return category, False, True
     if categories:
         category = categories[0][0] if len(set(categories)) == 1 else "transient"
-        return category, True, module_error
-    if stderr_category is not None:
-        return stderr_category[0], False, module_error
+        return category, True, True
     return "unknown", False, False
 
 

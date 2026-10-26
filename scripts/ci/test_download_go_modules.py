@@ -139,6 +139,15 @@ class DownloadGoModulesTests(unittest.TestCase):
         self.assertEqual(self.count.read_text(), "1")
         self.assertIn("failed: lockfile_changed", err)
 
+    def test_unknown_stderr_prevents_transient_retry(self) -> None:
+        status, _, err = self.run_download([{
+            "status": 1, "stdout": json.dumps({"Error": "TLS handshake timeout"}),
+            "stderr": "unclassified failure",
+        }])
+        self.assertEqual(status, 1)
+        self.assertEqual(self.count.read_text(), "1")
+        self.assertIn("failed: unknown", err)
+
 
 if __name__ == "__main__":
     unittest.main()

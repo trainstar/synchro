@@ -110,6 +110,7 @@
 	test-swift-upgrade \
 	test-kotlin-upgrade \
 	test-rn-upgrade-ios \
+	upgrade-fixture \
 	build-rn-upgrade-android \
 	test-rn-upgrade-android \
 	test-rn-unit \
@@ -1492,11 +1493,24 @@ UPGRADE_TEST = GOFLAGS= GOPROXY=off GOWORK=off go run ./cmd/testresult exact \
 	-expect target_pass \
 	-- go test -tags nativeupgrade -json ./upgrade -count=1 -timeout=60m -run '^TestNativePackageUpgrade$$'
 
+upgrade-fixture:
+	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
+	@set -eu; \
+		if [ "$(UPGRADE_FIXTURE_PREPARED)" = 1 ]; then \
+			test -n "$(SYNCHRO_TEST_URL)" && test -n "$(SYNCHRO_TEST_JWT_SECRET)" || \
+				{ echo "The prepared upgrade fixture needs SYNCHRO_TEST_URL and SYNCHRO_TEST_JWT_SECRET" >&2; exit 1; }; \
+			url="$(SYNCHRO_TEST_URL)"; url="$${url%/}"; \
+			curl --fail --silent --max-time 10 --output /dev/null "$$url/ready" || \
+				{ echo "The prepared upgrade fixture is not ready" >&2; exit 1; }; \
+		else \
+			$(MAKE) --no-print-directory synchrod-pg-test-start; \
+		fi
+
 # The published predecessor creates retained intent. The candidate artifact
 # then opens the same database file and synchronizes it.
 test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
+	@$(MAKE) --no-print-directory upgrade-fixture
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/swift"; \
 		rm -rf "$$work"; \
@@ -1530,7 +1544,7 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
 	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
-	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
+	@$(MAKE) --no-print-directory upgrade-fixture
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/kotlin"; \
 		rm -rf "$$work"; \
@@ -1584,7 +1598,7 @@ build-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifa
 test-rn-upgrade-android: build-rn-upgrade-android
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
-	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
+	@$(MAKE) --no-print-directory upgrade-fixture
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-android"; \
 		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
@@ -1603,7 +1617,7 @@ test-rn-upgrade-android: build-rn-upgrade-android
 
 test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact client-consumer-rn-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
+	@$(MAKE) --no-print-directory upgrade-fixture
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-ios"; \
 		rm -rf "$$work"; \
