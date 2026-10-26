@@ -201,10 +201,11 @@ class AdapterProcessTests(unittest.TestCase):
         self.assertFalse((self.root / "child.pid").exists())
 
     def test_preflight_and_readiness_share_one_budget(self) -> None:
-        environment = self.delayed_queries({1: 0.7, 2: 0.7})
-        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "1"
+        environment = self.delayed_queries({1: 2, 2: 4.5})
+        environment["SYNCHROD_ADAPTER_READY_ATTEMPTS"] = "6"
         started = self.invoke("start", environment)
         self.assertNotEqual(started.returncode, 0)
+        self.assertEqual((self.root / "queried").read_text(), "2")
         self.assertFalse(self.state.exists())
         self.assert_child_exited()
 

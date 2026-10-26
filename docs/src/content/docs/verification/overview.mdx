@@ -69,7 +69,8 @@ Each installed client pushes a program, a workout, a workout exercise, and exerc
 An empty queue alone does not pass a cell, because rejection or deletion also empties a queue.
 Native and React Native consumers report success only after terminal stop and close operations finish.
 
-The four current client upgrade paths run against sealed artifacts in Package when the source contains `release-test-upgrade`.
+The four representative client upgrade paths run against sealed artifacts in Package when the source contains `release-test-upgrade`.
+Their receipts identify the Package job and actual harness mode. They do not certify the current-cell environment.
 An older source keeps its original accepted upgrade contract. It does not gain an upgrade result from a later workflow.
 
 Local source-artifact lifecycle runs are optional focused diagnostics.

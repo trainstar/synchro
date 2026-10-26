@@ -433,6 +433,21 @@ def rate_limit_wait(headers: Any, now: float) -> float | None:
 
 
 def request_bytes(url: str, token: str | None = None) -> bytes | None:
+    artifact = re.fullmatch(r"https://api[.]github[.]com/repos/trainstar/synchro/actions/artifacts/([1-9][0-9]*)/zip", url)
+    if artifact:
+        environment = os.environ.copy()
+        if token:
+            environment["GH_TOKEN"] = token
+        try:
+            result = subprocess.run(
+                ["gh", "api", "--hostname", "github.com", f"repos/trainstar/synchro/actions/artifacts/{artifact[1]}/zip"],
+                env=environment, capture_output=True, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise PublicationError("GitHub artifact download did not complete") from error
+        if result.returncode != 0:
+            raise PublicationError("GitHub artifact download failed")
+        return result.stdout
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "synchro-release-verifier"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -477,6 +492,10 @@ def recover_package_cells(repo_root: Path, release_manifest: Path, repository: s
     run_id = positive_identifier(run_id, "recovery run ID")
     manifest = load_json(release_manifest, "release manifest")
     source = manifest["source"]["commit"]
+    build = manifest.get("build", {})
+    if str(build.get("run_id")) != run_id or type(build.get("run_attempt")) is not int or build["run_attempt"] < 1:
+        raise PublicationError("recovery manifest belongs to another artifact owner")
+    owner_attempt = build["run_attempt"]
     run = request_json(f"https://api.github.com/repos/{repository}/actions/runs/{run_id}", token)
     if (not isinstance(run, dict) or run.get("status") != "completed"
             or run.get("path") != ".github/workflows/release.yml"
@@ -494,8 +513,9 @@ def recover_package_cells(repo_root: Path, release_manifest: Path, repository: s
     for collection, target in (("jobs", jobs), ("artifacts", artifacts)):
         page = 1
         while True:
+            path = f"attempts/{owner_attempt}/jobs" if collection == "jobs" else collection
             response = request_json(
-                f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/{collection}?per_page=100&page={page}", token)
+                f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/{path}?per_page=100&page={page}", token)
             if not isinstance(response, dict) or not isinstance(response.get(collection), list):
                 raise PublicationError(f"recovery {collection} response is invalid")
             target.extend(response[collection])
@@ -513,11 +533,23 @@ def recover_package_cells(repo_root: Path, release_manifest: Path, repository: s
         if len(matches) != 1:
             raise PublicationError(f"recovery has ambiguous evidence for {cell}")
         job_name = "package server Ubuntu 24.04 x64" if cell == "SUP-PG-LINUX-X64-001" else f"package {cell}"
-        if not any(j.get("name") == job_name and j.get("conclusion") == "success" for j in jobs):
+        producers = [j for j in jobs if j.get("name") == job_name and j.get("conclusion") == "success"
+                     and str(j.get("run_id")) == run_id and j.get("run_attempt") == owner_attempt]
+        if len(producers) != 1:
             raise PublicationError(f"recovery evidence has no successful job for {cell}")
         artifact = matches[0]
-        if str(artifact.get("workflow_run", {}).get("id")) != run_id:
+        if (str(artifact.get("workflow_run", {}).get("id")) != run_id
+                or artifact.get("workflow_run", {}).get("head_sha") != source):
             raise PublicationError(f"recovery evidence owner differs for {cell}")
+        producer = producers[0]
+        try:
+            created = datetime.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+            started = datetime.datetime.fromisoformat(producer["started_at"].replace("Z", "+00:00"))
+            completed = datetime.datetime.fromisoformat(producer["completed_at"].replace("Z", "+00:00"))
+            if not started <= created <= completed:
+                raise ValueError("artifact is outside the original job execution")
+        except (KeyError, TypeError, ValueError) as error:
+            raise PublicationError(f"recovery evidence execution differs for {cell}") from error
         artifact_id = positive_identifier(artifact.get("id"), "recovery evidence artifact ID")
         archive_bytes = request_bytes(
             f"https://api.github.com/repos/{repository}/actions/artifacts/{artifact_id}/zip", token)
@@ -543,13 +575,13 @@ def recover_package_cells(repo_root: Path, release_manifest: Path, repository: s
             assert upgrade_spec and upgrade_spec.loader
             upgrades = importlib.util.module_from_spec(upgrade_spec)
             upgrade_spec.loader.exec_module(upgrades)
-            upgrades.verify_record(json.loads(upgrade_data), cell, release_manifest)
+            upgrades.verify_record(json.loads(upgrade_data), cell, release_manifest, repo_root=repo_root)
             (output_dir / "upgrades").mkdir(exist_ok=True)
             (output_dir / "upgrades" / f"{cell}.json").write_bytes(upgrade_data)
         accepted.append(cell)
         lineage.append({"cell_id": cell, "artifact_id": artifact_id,
                         "artifact_digest": artifact["digest"],
-                        "job_ids": [j["id"] for j in jobs if j.get("name") == job_name and j.get("conclusion") == "success"]})
+                        "job_id": producer["id"], "run_attempt": owner_attempt})
     return {"source_commit": source, "owner_run_id": run_id,
             "manifest_sha256": sha256_file(release_manifest),
             "accepted_cells": accepted, "missing_cells": sorted(required.difference(accepted)),

@@ -1063,7 +1063,8 @@ release-test-upgrade:
 		python3 verification/consumers/upgrade/sealed_result.py snapshot "$$@" --output "$$tmp/sealed.json"; \
 		if $(MAKE) --no-print-directory "$$upgrade" \
 			CLIENT_ARTIFACT_DIR="$(abspath $(RELEASE_CONSUMER_DIR))" CLIENT_ARTIFACTS_PREPARED=1 \
-			UPGRADE_PACKAGE_SNAPSHOT="$$tmp/packages.json" SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" > "$$tmp/test.log" 2>&1; then \
+			UPGRADE_FIXTURE_PREPARED=1 UPGRADE_PACKAGE_SNAPSHOT="$$tmp/packages.json" \
+			SUPPORT_CELL_ID="$(SUPPORT_CELL_ID)" > "$$tmp/test.log" 2>&1; then \
 			cat "$$tmp/test.log"; \
 		else \
 			cat "$$tmp/test.log"; exit 1; \
@@ -1495,7 +1496,7 @@ UPGRADE_TEST = GOFLAGS= GOPROXY=off GOWORK=off go run ./cmd/testresult exact \
 # then opens the same database file and synchronizes it.
 test-swift-upgrade: conformance-mod-download client-consumer-apple-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/swift"; \
 		rm -rf "$$work"; \
@@ -1529,7 +1530,7 @@ test-kotlin-upgrade: conformance-mod-download client-consumer-kotlin-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
 	@test -n "$(ANDROID_JAVA_HOME)" || { echo "Android builds require JDK 17. Set ANDROID_JAVA_HOME to a JDK 17 install." >&2; exit 1; }
-	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/kotlin"; \
 		rm -rf "$$work"; \
@@ -1583,7 +1584,7 @@ build-rn-upgrade-android: conformance-mod-download client-consumer-kotlin-artifa
 test-rn-upgrade-android: build-rn-upgrade-android
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
 	@test -n "$(KOTLIN_ANDROID_SERIAL)" || { echo "Set KOTLIN_ANDROID_SERIAL to one booted Android device." >&2; exit 1; }
-	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-android"; \
 		if [ -n "$(UPGRADE_PACKAGE_SNAPSHOT)" ]; then python3 verification/consumers/upgrade/sealed_result.py runtime-snapshot \
@@ -1602,7 +1603,7 @@ test-rn-upgrade-android: build-rn-upgrade-android
 
 test-rn-upgrade-ios: conformance-mod-download client-consumer-apple-artifact client-consumer-rn-artifact
 	@test -n "$(ADAPTER_TEST_URL)" || { echo "ADAPTER_TEST_URL is required" >&2; exit 1; }
-	@$(MAKE) --no-print-directory synchrod-pg-test-start
+	@if [ "$(UPGRADE_FIXTURE_PREPARED)" != 1 ]; then $(MAKE) --no-print-directory synchrod-pg-test-start; fi
 	@set -eu; \
 		work="$(UPGRADE_WORK_DIR)/rn-ios"; \
 		rm -rf "$$work"; \

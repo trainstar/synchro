@@ -27,6 +27,7 @@ env:
 
 jobs:
   prepare:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     outputs:
       source_sha: ${{ steps.source.outputs.source_sha }}

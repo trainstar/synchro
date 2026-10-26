@@ -29,8 +29,15 @@ PREDECESSOR_SWIFT_REVISION = "234d18d0f8f1751927ca58544863688ebc2fb70a"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 RESULT_KEYS = {
-    "schema_version", "cell_id", "source", "sealed_manifest_sha256", "candidate_package_hashes",
-    "predecessor_version", "predecessor_swift_revision", "tested_package_hashes", "status", "test", "test_count",
+    "schema_version", "package_job_cell_id", "upgrade_environment", "source", "sealed_manifest_sha256",
+    "candidate_package_hashes", "predecessor_version", "predecessor_swift_revision",
+    "tested_package_hashes", "status", "test", "test_count",
+}
+UPGRADE_ENVIRONMENTS = {
+    "SUP-IOS-CURRENT-001": {"mode": "swift-host", "host_platform": "darwin"},
+    "SUP-ANDROID-CURRENT-001": {"mode": "kotlin-android-device"},
+    "SUP-RN-IOS-CURRENT-001": {"mode": "react-native-ios-simulator", "react_native_version": "0.83.10"},
+    "SUP-RN-ANDROID-CURRENT-001": {"mode": "react-native-android-device", "react_native_version": "0.88.0"},
 }
 
 
@@ -128,6 +135,8 @@ def runtime(args: argparse.Namespace) -> dict:
     kind, directory = CELLS[args.cell]
     work = Path(args.work_dir) / directory
     if kind == "swift":
+        if sys.platform != "darwin":
+            raise ValueError("Swift host upgrade requires macOS")
         packages = {
             side: digest(work / side / ".build" / "debug" / "SynchroUpgrade")
             for side in ("predecessor", "candidate")
@@ -141,7 +150,16 @@ def runtime(args: argparse.Namespace) -> dict:
         packages = {side: digest(work / f"{side}.apk") for side in ("predecessor", "candidate")}
     else:
         packages = {side: tree(work / f"{side}.app", allow_links=True) for side in ("predecessor", "candidate")}
-    return packages
+    environment = UPGRADE_ENVIRONMENTS[args.cell].copy()
+    if kind == "swift":
+        environment["host_platform"] = sys.platform
+    if kind.startswith("rn-"):
+        package = json.loads((work / "app" / "package.json").read_text(), object_pairs_hook=unique_members)
+        version = package["dependencies"]["react-native"]
+        if version != environment["react_native_version"]:
+            raise ValueError(f"generated React Native host version is wrong: {version}")
+        environment["react_native_version"] = version
+    return {"package_hashes": packages, "upgrade_environment": environment}
 
 
 def completed_test(path: Path) -> int:
@@ -211,7 +229,7 @@ def file_tree_hash(files: dict[str, str]) -> str:
     return result.hexdigest()
 
 
-def expected_candidate_hashes(release: Path, manifest: dict) -> dict[str, dict[str, str]]:
+def expected_candidate_hashes(release: Path, manifest: dict, repo_root: Path = REPO_ROOT) -> dict[str, dict[str, str]]:
     source = manifest["source"]["commit"]
     if not isinstance(source, str) or not COMMIT.fullmatch(source):
         raise ValueError("sealed release source commit is invalid")
@@ -220,7 +238,7 @@ def expected_candidate_hashes(release: Path, manifest: dict) -> dict[str, dict[s
     if len(roles) != len(records):
         raise ValueError("sealed release repeats a package role")
     archive = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "archive", "--format=tar", "--prefix=Synchro/", source, *APPLE_SOURCE_PATHS],
+        ["git", "-C", str(repo_root), "archive", "--format=tar", "--prefix=Synchro/", source, *APPLE_SOURCE_PATHS],
         check=True, capture_output=True,
     ).stdout
     swift_files = archive_file_hashes(archive, "Synchro/")
@@ -262,20 +280,22 @@ def expected_candidate_hashes(release: Path, manifest: dict) -> dict[str, dict[s
     }
 
 
-def verify_record(record: dict, cell_id: str, manifest_path: Path) -> None:
+def verify_record(record: dict, cell_id: str, manifest_path: Path, repo_root: Path = REPO_ROOT) -> None:
     if cell_id not in CELLS:
         raise ValueError(f"unsupported upgrade cell: {cell_id}")
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(), object_pairs_hook=unique_members)
-    expected = expected_candidate_hashes(manifest_path.parent, manifest)
+    expected = expected_candidate_hashes(manifest_path.parent, manifest, repo_root=repo_root)
     source = manifest["source"]["commit"]
     manifest_hash = digest(manifest_path)
     if not isinstance(record, dict) or set(record) != RESULT_KEYS:
         raise ValueError(f"upgrade result shape is invalid: {cell_id}")
     if record["schema_version"] != 1 or type(record["schema_version"]) is not int:
         raise ValueError(f"upgrade result schema is invalid: {cell_id}")
-    if record["cell_id"] != cell_id or record["source"] != source or record["sealed_manifest_sha256"] != manifest_hash:
+    if record["package_job_cell_id"] != cell_id or record["source"] != source or record["sealed_manifest_sha256"] != manifest_hash:
         raise ValueError(f"upgrade result identity is invalid: {cell_id}")
+    if record["upgrade_environment"] != UPGRADE_ENVIRONMENTS[cell_id]:
+        raise ValueError(f"upgrade harness environment is invalid: {cell_id}")
     if record["candidate_package_hashes"] != expected[cell_id]:
         raise ValueError(f"upgrade candidate package hashes are invalid: {cell_id}")
     built = record["tested_package_hashes"]
@@ -357,19 +377,20 @@ def main() -> None:
     before = json.loads(Path(args.before).read_text())
     if before != current:
         raise ValueError("sealed upgrade inputs changed during execution")
-    runtime_before = json.loads(Path(args.runtime_before).read_text())
+    runtime_before = json.loads(Path(args.runtime_before).read_text(), object_pairs_hook=unique_members)
     if runtime_before != runtime(args):
         raise ValueError("built upgrade packages changed during execution")
     count = completed_test(Path(args.test_log))
     write_json(output, {
         "schema_version": 1,
-        "cell_id": args.cell,
+        "package_job_cell_id": args.cell,
+        "upgrade_environment": runtime_before["upgrade_environment"],
         "source": current["source"],
         "sealed_manifest_sha256": current["sealed_manifest_sha256"],
         "candidate_package_hashes": current["candidate_package_hashes"],
         "predecessor_version": current["predecessor_version"],
         "predecessor_swift_revision": current["predecessor_swift_revision"],
-        "tested_package_hashes": runtime_before,
+        "tested_package_hashes": runtime_before["package_hashes"],
         "status": "passed",
         "test": TEST,
         "test_count": count,

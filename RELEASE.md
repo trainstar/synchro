@@ -354,7 +354,7 @@ Candidate preparation must check current stable device releases separately.
 1. Verify the selected `master` commit and Candidate CI result.
 2. Build, seal, hash, and verify each distribution once.
 3. Run the clean package installation and lifecycle check on every required support cell.
-4. Run the four current client upgrades against sealed inputs when the selected source contains `release-test-upgrade`.
+4. Run the four representative client upgrades against sealed inputs when the selected source contains `release-test-upgrade`.
 5. Wait for the protected `release` environment approval.
 6. Recheck the approved candidate and sealed identity.
 7. Attest the sealed files with the exact sealed release manifest.
@@ -420,6 +420,9 @@ The verifier reads the original lifecycle and process evidence before it accepts
 Run only cells that lack valid original evidence or whose selected test contract or environment changed.
 Do not use a later run to replace a passed original cell or to hide a product failure.
 When the source contains `release-test-upgrade`, retain each current client upgrade only with its valid sealed upgrade receipt.
+The receipt identifies its Package job and actual representative harness mode.
+Swift runs on the macOS host. RN iOS uses RN 0.83.10, and RN Android uses RN 0.88.0.
+These upgrade proofs do not replace the separate current-cell lifecycle and environment checks.
 RC4 source predates `release-test-upgrade`. It keeps its original accepted upgrade contract.
 Do not create sealed upgrade evidence for RC4.
 The protected publisher discovers an existing draft through the authenticated release list.

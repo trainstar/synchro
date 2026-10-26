@@ -39,7 +39,7 @@ class SealedUpgradeTests(unittest.TestCase):
             sealed_result.subprocess, "run",
             return_value=subprocess.CompletedProcess(["git", "archive"], 0, self.archive, b""),
         )
-        self.git.start()
+        self.git_run = self.git.start()
         self.addCleanup(self.git.stop)
         apple = self.consumer / "apple"
         (apple / "Synchro").mkdir(parents=True)
@@ -90,7 +90,8 @@ class SealedUpgradeTests(unittest.TestCase):
         for cell in sealed_result.CELLS:
             record = {
                 "schema_version": 1,
-                "cell_id": cell,
+                "package_job_cell_id": cell,
+                "upgrade_environment": sealed_result.UPGRADE_ENVIRONMENTS[cell].copy(),
                 "source": SOURCE,
                 "sealed_manifest_sha256": manifest_hash,
                 "candidate_package_hashes": package_hashes[cell],
@@ -108,6 +109,43 @@ class SealedUpgradeTests(unittest.TestCase):
         cell = "SUP-IOS-CURRENT-001"
         record = json.loads((self.evidence / "upgrades" / f"{cell}.json").read_text())
         sealed_result.verify_record(record, cell, self.release / "release-manifest.json")
+
+    def test_recovered_record_uses_explicit_source_checkout(self) -> None:
+        cell = "SUP-IOS-CURRENT-001"
+        record = json.loads((self.evidence / "upgrades" / f"{cell}.json").read_text())
+        checkout = self.root / "original-source"
+        sealed_result.verify_record(record, cell, self.release / "release-manifest.json", repo_root=checkout)
+        self.assertEqual(self.git_run.call_args.args[0][1:3], ["-C", str(checkout)])
+
+    def test_generated_react_native_host_version_controls_upgrade_environment(self) -> None:
+        for cell, directory, correct, wrong in (
+            ("SUP-RN-IOS-CURRENT-001", "rn-ios", "0.83.10", "0.88.0"),
+            ("SUP-RN-ANDROID-CURRENT-001", "rn-android", "0.88.0", "0.83.10"),
+        ):
+            with self.subTest(cell=cell):
+                work = self.root / "work" / directory
+                (work / "app").mkdir(parents=True)
+                if directory == "rn-ios":
+                    for side in ("predecessor", "candidate"):
+                        bundle = work / f"{side}.app"
+                        bundle.mkdir()
+                        (bundle / "main.jsbundle").write_bytes(b"built bundle")
+                else:
+                    for side in ("predecessor", "candidate"):
+                        (work / f"{side}.apk").write_bytes(b"built package")
+                package = work / "app/package.json"
+                args = argparse.Namespace(cell=cell, work_dir=str(self.root / "work"))
+                package.write_text(json.dumps({"dependencies": {"react-native": correct}}))
+                self.assertEqual(sealed_result.runtime(args)["upgrade_environment"]["react_native_version"], correct)
+                package.write_text(json.dumps({"dependencies": {"react-native": wrong}}))
+                with self.assertRaisesRegex(ValueError, "generated React Native host version"):
+                    sealed_result.runtime(args)
+
+    def test_swift_host_upgrade_rejects_non_macos(self) -> None:
+        args = argparse.Namespace(cell="SUP-IOS-CURRENT-001", work_dir=str(self.root / "work"))
+        with mock.patch.object(sealed_result.sys, "platform", "linux"):
+            with self.assertRaisesRegex(ValueError, "requires macOS"):
+                sealed_result.runtime(args)
 
     def test_tampered_extracted_inputs_fail_before_upgrade(self) -> None:
         cases = (
@@ -145,6 +183,7 @@ class SealedUpgradeTests(unittest.TestCase):
             ("test_count", 0),
             ("predecessor_version", "9.9.9"),
             ("predecessor_swift_revision", "e" * 40),
+            ("upgrade_environment", {"mode": "swift-ios-current-device"}),
             ("candidate_package_hashes", {"swift-source-tree": "0" * 64}),
             ("tested_package_hashes", {"predecessor": "b" * 64, "candidate": "wrong"}),
         ):

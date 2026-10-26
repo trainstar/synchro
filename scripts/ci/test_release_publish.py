@@ -232,6 +232,7 @@ class PublicationStateTests(unittest.TestCase):
             ("pg-extension", "adapter", "seed-tool"), start=1
         )}
         manifest = {
+            "build": {"run_id": "19", "run_attempt": 1},
             "source": {"commit": source},
             "resolved_support_cells": valid_records(),
             "distributions": [
@@ -257,12 +258,16 @@ class PublicationStateTests(unittest.TestCase):
             "event": "workflow_dispatch", "head_sha": source,
             "head_repository": {"full_name": "trainstar/synchro"},
         }
-        successful_job = {"id": 7, "name": "package server Ubuntu 24.04 x64", "conclusion": "success"}
+        successful_job = {"id": 7, "name": "package server Ubuntu 24.04 x64", "conclusion": "success",
+                          "run_id": 19, "run_attempt": 1,
+                          "started_at": "2026-10-25T19:00:00Z", "completed_at": "2026-10-25T19:10:00Z"}
         cases = (
             ("valid", None),
             ("failed job", "no successful job"),
             ("no job", "no successful job"),
             ("wrong owner", "owner differs"),
+            ("wrong attempt", "no successful job"),
+            ("later artifact", "execution differs"),
             ("wrong source", "original completed candidate owner"),
             ("wrong record source", "did not validate"),
             ("wrong digest", "digest differs"),
@@ -279,6 +284,8 @@ class PublicationStateTests(unittest.TestCase):
                     jobs = [successful_job]
                     if label == "failed job":
                         jobs = [{**successful_job, "conclusion": "failure"}]
+                    elif label == "wrong attempt":
+                        jobs = [{**successful_job, "run_attempt": 2}]
                     elif label == "no job":
                         jobs = []
                     elif label == "wrong source":
@@ -293,11 +300,14 @@ class PublicationStateTests(unittest.TestCase):
                     archive_bytes = archive_stream.getvalue()
                     artifact = {
                         "name": "package-evidence-server", "id": 31, "expired": False,
-                        "workflow_run": {"id": 19},
+                        "workflow_run": {"id": 19, "head_sha": source},
+                        "created_at": "2026-10-25T19:09:00Z",
                         "digest": "sha256:" + hashlib.sha256(archive_bytes).hexdigest(),
                     }
                     if label == "wrong owner":
                         artifact["workflow_run"]["id"] = 20
+                    elif label == "later artifact":
+                        artifact["created_at"] = "2026-10-25T20:09:00Z"
                     elif label == "wrong digest":
                         artifact["digest"] = "sha256:" + "0" * 64
                     artifacts = [artifact, artifact] if label == "ambiguous artifacts" else [artifact]
@@ -309,7 +319,7 @@ class PublicationStateTests(unittest.TestCase):
                         self.assertEqual(token, "fixture-token")
                         if url.endswith("/actions/runs/19"):
                             return selected_owner
-                        if "/actions/runs/19/jobs?" in url:
+                        if "/actions/runs/19/attempts/1/jobs?" in url:
                             return {"jobs": jobs}
                         if "/actions/runs/19/artifacts?" in url:
                             return {"artifacts": artifacts}
@@ -349,6 +359,18 @@ class PublicationStateTests(unittest.TestCase):
                     with self.assertRaisesRegex(release_publish.PublicationError, "product or unsupported"):
                         release_publish.verify_recovery_tooling(ROOT, self.commit, "b" * 40)
                 self.assertEqual(git_diff.call_args.args[0][:3], ["git", "diff", "--name-only"])
+
+    def test_artifact_download_uses_authenticated_github_cli(self) -> None:
+        with mock.patch.object(release_publish.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout=b"archive bytes", stderr=b"")
+            url = "https://api.github.com/repos/trainstar/synchro/actions/artifacts/31/zip"
+            self.assertEqual(release_publish.request_bytes(url, "fixture-token"), b"archive bytes")
+            self.assertEqual(run.call_args.args[0], ["gh", "api", "--hostname", "github.com",
+                                                   "repos/trainstar/synchro/actions/artifacts/31/zip"])
+            self.assertEqual(run.call_args.kwargs["env"]["GH_TOKEN"], "fixture-token")
+            run.return_value = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"private response")
+            with self.assertRaisesRegex(release_publish.PublicationError, "artifact download failed"):
+                release_publish.request_bytes(url, "fixture-token")
 
     def test_docs_deployment_accepts_only_current_master_ci(self) -> None:
         verify = release_step_command("Verify the source CI run", "docs.yml")
